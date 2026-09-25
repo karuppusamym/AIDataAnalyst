@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**318 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
+**320 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -378,6 +378,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` |
 | `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE', 'RISK_DECISION'], str]` | `dict` | 3 |
 | `decision_escalation_threshold` | `float` | `0.8` | 1 |
+| `decision_clarify_threshold` | `float` | `0.7` | 1 |
+| `decision_dispute_threshold` | `float` | `0.8` | 1 |
 | `decision_timeout_seconds` | `float` | `3.0` | 1 |
 | `openrouter_decisions_url` | `str` | `'https://openrouter.ai/api/alpha/decisions'` | 1 |
 | `model_timeout_seconds` | `int` | `30` | 11 |

@@ -405,6 +405,42 @@ function okfKnowledgeUsed(
   return { documents: record(okf, "used") === true ? documents : [], note };
 }
 
+interface ModelReviewNote {
+  tone: "warn" | "neutral" | "ok";
+  label: string;
+  text: string;
+}
+
+/** R11-MP27: what the governed decision model said about this answer, read defensively from
+ *  `plan_evidence` (`clarification`, and `answer_review`, which carries a disputed tie-break). Advisory
+ *  only -- none of it changed what ran -- so it is shown as a note, never as a refusal. */
+function modelReviewNotes(planEvidence: unknown): ModelReviewNote[] {
+  const notes: ModelReviewNote[] = [];
+  const clarification = record(planEvidence, "clarification");
+  if (clarification && record(clarification, "suggested") === true) {
+    notes.push({
+      tone: "warn",
+      label: "may be ambiguous",
+      text: "The question could be read more than one way. If this answer is not what you meant, ask again naming the measure, the period or the subject.",
+    });
+  }
+  const review = record(planEvidence, "answer_review");
+  const verdict = review ? record(review, "verdict") : null;
+  const disputed = review ? record(review, "disputed") === true : false;
+  if (verdict === "DOUBTFUL" || verdict === "CHECK") {
+    notes.push({
+      tone: verdict === "DOUBTFUL" ? "warn" : "neutral",
+      label: verdict === "DOUBTFUL" ? "review: doubtful" : "review: check",
+      text: disputed
+        ? "A second model wrote a different query and the reviewer preferred it. Check the query before relying on the figures."
+        : "The reviewer was not confident this query answers the question. Check the query before relying on the figures.",
+    });
+  } else if (verdict === "OK") {
+    notes.push({ tone: "ok", label: "review: ok", text: "The reviewer judged that this query answers the question." });
+  }
+  return notes;
+}
+
 /** The open answer/evidence panel -- either the response this session just
  *  received from `runAgentAnalysis` (`isFresh`, has `explanation`), or a
  *  history item / permalink reopened from `GET /agent-runs/{id}` +
@@ -668,6 +704,7 @@ function AnswerPanel({
   // incident_ids}` shape directly rather than parsing it out of the
   // explanation text below.
   const okfKnowledge = okfKnowledgeUsed(planEvidence);
+  const reviewNotes = modelReviewNotes(planEvidence);
   const trust = record(planEvidence, "trust");
   const trustWarningsRaw = trust ? record(trust, "warnings") : null;
   const trustWarnings = Array.isArray(trustWarningsRaw) ? trustWarningsRaw : [];
@@ -727,6 +764,19 @@ function AnswerPanel({
                   ))}
                 </ul>
               </div>
+            ) : null}
+
+            {reviewNotes.length > 0 ? (
+              <ul className="ask__review" aria-label="Model review">
+                {reviewNotes.map((note) => (
+                  <li key={note.label} className={`ask__review_item ask__review_item--${note.tone}`}>
+                    <Pill tone={note.tone === "warn" ? "warn" : note.tone === "ok" ? "ok" : "mute"}>
+                      {note.label}
+                    </Pill>
+                    <span>{note.text}</span>
+                  </li>
+                ))}
+              </ul>
             ) : null}
 
             {explanation ? (

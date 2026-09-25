@@ -1101,6 +1101,10 @@ class Settings(BaseSettings):
     ] = Field(default_factory=dict)
     #: R11-MP09: the probability at or above which the decision model refuses.
     decision_escalation_threshold: float = Field(default=0.8, ge=0.5, le=0.99)
+    #: R11-MP27: at or above which an ambiguous question gets a clarification note,
+    #: and a preference for the second candidate marks the answer disputed.
+    decision_clarify_threshold: float = Field(default=0.7, ge=0.5, le=0.99)
+    decision_dispute_threshold: float = Field(default=0.8, ge=0.5, le=0.99)
     decision_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     openrouter_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
 

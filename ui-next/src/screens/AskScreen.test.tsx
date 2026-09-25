@@ -422,6 +422,43 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(await screen.findByText("The product's knowledge holds nothing on this question.")).toBeInTheDocument();
   });
 
+  it("shows the decision model's advisory notes: an ambiguous question and a disputed answer (R11-MP27)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_mp27_1",
+      plan_evidence: {
+        strategy: "FREEFORM_SQL",
+        clarification: { suggested: true, ambiguity_probability: 0.86, route: "jev-decisions" },
+        answer_review: { verdict: "CHECK", disputed: true, answers_question_probability: 0.93 },
+      },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_mp27_1", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "show me the numbers" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const notes = await screen.findByRole("list", { name: "Model review" });
+    expect(within(notes).getByText("may be ambiguous")).toBeInTheDocument();
+    expect(within(notes).getByText("review: check")).toBeInTheDocument();
+    expect(within(notes).getByText(/A second model wrote a different query/)).toBeInTheDocument();
+    // Advisory: the answer itself is still shown.
+    expect(screen.getByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+  });
+
+  it("shows no model review when the run recorded none", async () => {
+    runAgentAnalysis.mockResolvedValue({ ...ANALYSIS_RESPONSE, agent_run_id: "run_mp27_2" });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_mp27_2", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "total deposits" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Model review" })).not.toBeInTheDocument();
+  });
+
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {
     runAgentAnalysis.mockRejectedValue(
       new (await import("../lib/api")).ApiError(409, AMBIGUITY_DETAIL),

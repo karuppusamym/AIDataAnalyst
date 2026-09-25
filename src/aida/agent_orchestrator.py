@@ -76,7 +76,12 @@ from aida.context_product_execution_scope import (
     ContextProductExecutionScope,
     resolve_scope_names,
 )
-from aida.decision_model import escalation_probability
+from aida.decision_model import (
+    CANDIDATE,
+    escalation_probability,
+    prefer_statement,
+    review_statement,
+)
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import SCREENING_VERSION, screen_text
 from aida.injection_defense import screen_metadata
@@ -160,7 +165,7 @@ from aida.semantic_inference import (
     resolve_scoped_glossary_term,
 )
 from aida.signing import sign_value
-from aida.sql_candidate_agreement import compare_candidates
+from aida.sql_candidate_agreement import AgreementLevel, compare_candidates
 from aida.sql_validation import (
     FINDING_CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN,
     FINDING_EXACTLY_ONE_STATEMENT_REQUIRED,
@@ -1517,6 +1522,21 @@ class GovernedAgentOrchestrator:
                 )
                 if decision_block:
                     details["decision"] = "BLOCK"
+                # R11-MP27 (c): asked in the same call. A suggestion only: the run
+                # goes on, and the answer carries a note that the asker may want to
+                # say what they mean.
+                ambiguity = decision.ambiguity_probability
+                if (
+                    not decision_block
+                    and ambiguity is not None
+                    and ambiguity >= self.settings.decision_clarify_threshold
+                ):
+                    ledger.plan_evidence["clarification"] = {
+                        "suggested": True,
+                        "ambiguity_probability": ambiguity,
+                        "route": decision.route_key,
+                    }
+                    ledger.publish_plan_evidence()
         ledger.advance(RuntimeStage.SCREENED, control_type="DETERMINISTIC", details=details)
         if decision_block:
             agent_run.generation_source = "POLICY_BLOCK"
@@ -2553,7 +2573,75 @@ class GovernedAgentOrchestrator:
                 record["agreement"] = agreement.evidence()
                 record["output_fingerprint"] = evidence.output_fingerprint
                 record["candidate_confidence"] = output.confidence
+                if agreement.level in {AgreementLevel.SAME_SOURCES, AgreementLevel.DIFFERENT}:
+                    await self._break_candidate_tie(
+                        session, request, record, statement, inputs, output.sql
+                    )
         ledger.plan_evidence["sql_candidate"] = record
+        ledger.publish_plan_evidence()
+
+    async def _break_candidate_tie(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        record: dict[str, Any],
+        statement: ValidatedStatement,
+        inputs: GenerationInputs,
+        candidate_redacted_sql: str,
+    ) -> None:
+        """R11-MP27 (a): the two statements disagree; ask the decision model which
+        answers the question. Evidence only -- the primary still runs, because the
+        candidate never passed validation. A strong preference for the candidate
+        marks the answer disputed, which the answer review surfaces."""
+        preference = await prefer_statement(
+            session,
+            self.settings,
+            organization_id=request.organization_id,
+            question=self._question_for_providers(request).text,
+            primary_sql=tokenize_values(statement.sql, inputs.redacted_values),
+            candidate_sql=candidate_redacted_sql,
+        )
+        if preference is None:
+            return
+        record["tie_break"] = preference.evidence()
+        record["disputed"] = (
+            preference.preferred == CANDIDATE
+            and preference.probability is not None
+            and preference.probability >= self.settings.decision_dispute_threshold
+        )
+
+    async def _review_answer(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        ledger: RunLedger,
+        statement: ValidatedStatement,
+        gateway_result: GatewayResult,
+    ) -> None:
+        """R11-MP27 (b): an advisory review of a generated statement, recorded as
+        evidence and never blocking. Judged on the redacted question, the statement
+        with its values tokenized, the result's column names and row count."""
+        inputs = statement.generation_inputs
+        if inputs is None:
+            return
+        review = await review_statement(
+            session,
+            self.settings,
+            organization_id=request.organization_id,
+            question=self._question_for_providers(request).text,
+            sql=tokenize_values(statement.sql, inputs.redacted_values),
+            columns=list(gateway_result.rows[0]) if gateway_result.rows else [],
+            row_count=len(gateway_result.rows),
+        )
+        if review is None:
+            return
+        evidence = review.evidence()
+        candidate = ledger.plan_evidence.get("sql_candidate")
+        if isinstance(candidate, dict) and candidate.get("disputed"):
+            evidence["disputed"] = True
+            if evidence["verdict"] == "OK":
+                evidence["verdict"] = "CHECK"
+        ledger.plan_evidence["answer_review"] = evidence
         ledger.publish_plan_evidence()
 
     async def _approved_route_for_key(
@@ -2864,6 +2952,8 @@ class GovernedAgentOrchestrator:
         if lineage_evidence:
             ledger.plan_evidence["lineage"] = lineage_evidence
             ledger.publish_plan_evidence()
+
+        await self._review_answer(session, request, ledger, statement, gateway_result)
 
         completed_failure = self._checkpoint_completed(
             agent_run=agent_run, gateway_result=gateway_result
