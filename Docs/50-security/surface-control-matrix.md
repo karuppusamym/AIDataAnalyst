@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **565**
-- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 469, SDK 1
+- Surfaces covered: **566**
+- By family: BULK 11, EXPORT 8, GRAPHQL 38, JOB 30, MCP 9, REST 469, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -106,6 +106,7 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL Query.governedExecutions` | GRAPHQL | `aida.graphql_schema.Query.governed_executions` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |
 | `GRAPHQL Query.lineageGraph` | GRAPHQL | `aida.graphql_schema.Query.lineage_graph` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.lineageImpact` | GRAPHQL | `aida.graphql_schema.Query.lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Query.objectOkfKnowledge` | GRAPHQL | `aida.graphql_schema.Query.object_okf_knowledge` | AgentDeveloper, Analyst, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GRAPHQL Query.routineParseCoverage` | GRAPHQL | `aida.graphql_schema.Query.routine_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.table` | GRAPHQL | `aida.graphql_schema.Query.table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.tables` | GRAPHQL | `aida.graphql_schema.Query.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |

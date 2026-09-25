@@ -12,6 +12,7 @@ GraphQL field                                REST route it answers for
 ``OkfBundle.document(path)``                 ``GET .../okf-bundle/document?path=``
 ``OkfBundle.publications``                   ``GET .../okf-bundle/publications``
 ``OkfBundle.findings``                       the manifest's ``findings``
+``objectOkfKnowledge(tableId)``              ``GET /v1/metadata/tables/{id}/okf-knowledge``
 ===========================================  =================================================
 
 **One store, no second reader.** Every field reaches `aida.okf_store.read_published_bundle`
@@ -64,10 +65,13 @@ from aida.okf_read_model import OKF_ROLES, publication_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     SOURCE_BUNDLE_CHANNELS,
+    SOURCE_REFUSED,
     OkfPublishedBundle,
     OkfPublishedSourceBundle,
     list_publications,
     load_document,
+    read_object_knowledge,
+    read_object_source_knowledge,
     read_published_bundle,
     read_published_source_bundle,
     record_okf_read,
@@ -83,11 +87,15 @@ __all__ = [
     "OkfBundleHandle",
     "OkfDocumentBody",
     "OkfDocumentEntry",
+    "OkfObjectAnswer",
+    "OkfObjectItem",
+    "OkfObjectSource",
     "document_citation",
     "get_okf_bundle",
     "list_okf_documents",
     "list_okf_findings",
     "list_okf_publications",
+    "read_object_okf",
     "read_okf_document",
 ]
 
@@ -465,3 +473,151 @@ async def list_okf_findings(
         first=first,
         after=after,
     )
+
+
+
+# ---------------------------------------------------------------------------
+# R11-OKF02: the Catalog's object read (`GET /v1/metadata/tables/{id}/okf-knowledge`)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class OkfObjectItem:
+    """One product bundle's document about the object."""
+
+    product_key: str
+    product_version: int
+    product_name: str
+    publication: OkfPublicationRead
+    document: OkfDocumentBody
+
+
+@dataclass(frozen=True, slots=True)
+class OkfObjectSource:
+    """The object's own datasource bundle's answer, read only when no product holds it.
+
+    `state` is the REST read's: DOCUMENT, NOT_IN_BUNDLE or REFUSED, each carrying only what
+    it may (a refusal names no bundle; an absence counts nothing)."""
+
+    state: str
+    reason: str | None
+    datasource_id: UUID | None
+    publication: OkfPublicationRead | None
+    document: OkfDocumentBody | None
+
+
+@dataclass(frozen=True, slots=True)
+class OkfObjectAnswer:
+    table_id: UUID
+    items: tuple[OkfObjectItem, ...]
+    source: OkfObjectSource | None
+
+
+def _object_document(publication: Any, document: OkfBundleDocument) -> OkfDocumentBody:
+    return OkfDocumentBody(
+        entry=OkfDocumentEntry(
+            publication_id=publication.id,
+            publication_sequence=publication.sequence,
+            path=document.path,
+            kind=document_kind(document.path),
+            citation=document_citation(publication.id, document.path, document.sha256),
+            sha256=document.sha256,
+            bytes=document.byte_length,
+            rendered_in_sequence=document.rendered_in_sequence,
+            subject_key=document.subject_key,
+        ),
+        text=document.content,
+    )
+
+
+async def read_object_okf(scope: ReadScope, table_id: UUID) -> OkfObjectAnswer:
+    """The object's stored knowledge, as the Catalog route reads it: the same two store reads
+    (`read_object_knowledge`, then `read_object_source_knowledge` only when no product bundle
+    holds it), decided and recorded once per request on GraphQL's own channels."""
+    _require_roles(scope, OKF_ROLES)
+    key = ("object", table_id)
+    async with scope.lock:
+        remembered = scope.okf.get(key)
+        if remembered is None:
+            try:
+                remembered = await _read_object(scope, table_id)
+            except ReadRefused as refused:
+                remembered = refused
+            scope.okf[key] = remembered
+    if isinstance(remembered, ReadRefused):
+        raise ReadRefused(remembered.code, remembered.reason)
+    assert isinstance(remembered, OkfObjectAnswer)
+    return remembered
+
+
+async def _read_object(scope: ReadScope, table_id: UUID) -> OkfObjectAnswer:
+    """The reads and their records. The caller holds `scope.lock`."""
+    session = scope.session
+    try:
+        found = await read_object_knowledge(session, table_id, scope.context, scope.settings)
+        items: list[OkfObjectItem] = []
+        for entry in found:
+            stored = entry.stored
+            record_okf_read(
+                session,
+                scope.context,
+                stored,
+                action="graphql.context_product.okf_object_read",
+                channel=BUNDLE_ROLE_CHANNELS["graphql_object"],
+                path=entry.document.path,
+            )
+            items.append(
+                OkfObjectItem(
+                    product_key=stored.product.product_key,
+                    product_version=stored.version.version,
+                    product_name=stored.version.name,
+                    publication=publication_read(stored.publication, is_current=stored.is_current),
+                    document=_object_document(stored.publication, entry.document),
+                )
+            )
+        source: OkfObjectSource | None = None
+        if not found:
+            from_source = await read_object_source_knowledge(
+                session, table_id, scope.context, scope.settings
+            )
+            stored_source = from_source.stored
+            document = from_source.document
+            if stored_source is not None:
+                record_okf_source_read(
+                    session,
+                    scope.context,
+                    stored_source,
+                    action="graphql.datasource.okf_object_read",
+                    channel=SOURCE_BUNDLE_CHANNELS["graphql_object"],
+                    path=document.path if document is not None else None,
+                )
+            source = OkfObjectSource(
+                state=from_source.state,
+                reason=from_source.reason,
+                datasource_id=None,
+                publication=None,
+                document=None,
+            )
+            if stored_source is not None and from_source.state != SOURCE_REFUSED:
+                has_document = document is not None
+                source = OkfObjectSource(
+                    state=from_source.state,
+                    reason=None,
+                    datasource_id=stored_source.datasource.id,
+                    publication=(
+                        publication_read(
+                            stored_source.publication, is_current=stored_source.is_current
+                        )
+                        if has_document
+                        else None
+                    ),
+                    document=(
+                        _object_document(stored_source.publication, document)
+                        if document is not None
+                        else None
+                    ),
+                )
+    except HTTPException as exc:
+        raise _okf_refusal(exc) from exc
+    await session.commit()
+    return OkfObjectAnswer(table_id=table_id, items=tuple(items), source=source)

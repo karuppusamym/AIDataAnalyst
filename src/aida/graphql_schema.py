@@ -76,10 +76,14 @@ from aida.graphql_okf import (
     OkfBundleHandle,
     OkfDocumentBody,
     OkfDocumentEntry,
+    OkfObjectAnswer,
+    OkfObjectItem,
+    OkfObjectSource,
     get_okf_bundle,
     list_okf_documents,
     list_okf_findings,
     list_okf_publications,
+    read_object_okf,
     read_okf_document,
 )
 from aida.graphql_reads import (
@@ -1396,6 +1400,69 @@ class OkfDocument:
         )
 
 
+@strawberry.type(
+    description="One context product bundle's document about a catalog object (R11-OKF02)."
+)
+class OkfObjectKnowledgeItem:
+    product_key: str
+    product_version: int
+    product_name: str
+    publication: OkfPublication
+    document: OkfDocument
+
+    @classmethod
+    def of(cls, item: OkfObjectItem) -> OkfObjectKnowledgeItem:
+        return cls(
+            product_key=item.product_key,
+            product_version=item.product_version,
+            product_name=item.product_name,
+            publication=OkfPublication.of(item.publication),
+            document=OkfDocument.of(item.document),
+        )
+
+
+@strawberry.type(
+    description="The object's own datasource bundle's answer, read only when no product "
+    "bundle holds it: DOCUMENT, NOT_IN_BUNDLE (counts nothing) or REFUSED (the bare reason "
+    "code, and no bundle named)."
+)
+class OkfObjectSourceKnowledge:
+    state: str
+    reason: str | None
+    datasource_id: strawberry.ID | None
+    publication: OkfPublication | None
+    document: OkfDocument | None
+
+    @classmethod
+    def of(cls, source: OkfObjectSource) -> OkfObjectSourceKnowledge:
+        return cls(
+            state=source.state,
+            reason=source.reason,
+            datasource_id=_id(source.datasource_id) if source.datasource_id else None,
+            publication=OkfPublication.of(source.publication) if source.publication else None,
+            document=OkfDocument.of(source.document) if source.document else None,
+        )
+
+
+@strawberry.type(
+    description="The stored knowledge about one catalog object, as "
+    "`GET /v1/metadata/tables/{id}/okf-knowledge` reads it. `items` holds at most one entry "
+    "per context product whose bundle the caller may read."
+)
+class OkfObjectKnowledge:
+    table_id: strawberry.ID
+    items: list[OkfObjectKnowledgeItem]
+    source: OkfObjectSourceKnowledge | None
+
+    @classmethod
+    def of(cls, answer: OkfObjectAnswer) -> OkfObjectKnowledge:
+        return cls(
+            table_id=_id(answer.table_id),
+            items=[OkfObjectKnowledgeItem.of(item) for item in answer.items],
+            source=OkfObjectSourceKnowledge.of(answer.source) if answer.source else None,
+        )
+
+
 @strawberry.type(description="A page of stored documents, in path order.")
 class OkfDocumentSummaryConnection:
     nodes: list[OkfDocumentSummary]
@@ -1757,6 +1824,18 @@ class Query:
                 info.context, SOURCE, _uuid(datasource_id), _optional_uuid(publication_id)
             )
         )
+
+    @field_resolver(
+        "The stored OKF knowledge about one catalog object, as "
+        "`GET /v1/metadata/tables/{id}/okf-knowledge` reads it (R11-OKF02): its document from "
+        "each context product bundle the caller may read, or -- only when none holds it -- "
+        "from its own datasource's bundle under that datasource's `READ_METADATA` decision. "
+        "Recorded as a read."
+    )
+    async def object_okf_knowledge(
+        self, info: Info, table_id: strawberry.ID
+    ) -> OkfObjectKnowledge | None:
+        return OkfObjectKnowledge.of(await read_object_okf(info.context, _uuid(table_id)))
 
     @field_resolver("One table by id, decided as its columns route decides it.")
     async def table(self, info: Info, id: strawberry.ID) -> Table | None:

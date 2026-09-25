@@ -192,6 +192,7 @@ BUNDLE_ROLE_CHANNELS: Final = {
     # document, its publication history.
     "graphql_manifest": "GRAPHQL_OKF_MANIFEST",
     "graphql_document": "GRAPHQL_OKF_DOCUMENT",
+    "graphql_object": "GRAPHQL_OKF_OBJECT",
     "graphql_history": "GRAPHQL_OKF_HISTORY",
 }
 #: R11-OKF02 source bundles: the same doors onto one datasource's bundle. Recorded in the audit
@@ -209,6 +210,7 @@ SOURCE_BUNDLE_CHANNELS: Final = {
     "graphql_manifest": "GRAPHQL_OKF_SOURCE_MANIFEST",
     "graphql_document": "GRAPHQL_OKF_SOURCE_DOCUMENT",
     "graphql_history": "GRAPHQL_OKF_SOURCE_HISTORY",
+    "graphql_object": "GRAPHQL_OKF_SOURCE_OBJECT",
     "mcp_context": "MCP_OKF_SOURCE_CONTEXT",
     "mcp_object": "MCP_OKF_SOURCE_OBJECT",
 }

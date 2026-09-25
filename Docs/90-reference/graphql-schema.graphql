@@ -661,6 +661,37 @@ type OkfFindingConnection {
 }
 
 """
+The stored knowledge about one catalog object, as `GET /v1/metadata/tables/{id}/okf-knowledge` reads it. `items` holds at most one entry per context product whose bundle the caller may read.
+"""
+type OkfObjectKnowledge {
+  tableId: ID!
+  items: [OkfObjectKnowledgeItem!]!
+  source: OkfObjectSourceKnowledge
+}
+
+"""
+One context product bundle's document about a catalog object (R11-OKF02).
+"""
+type OkfObjectKnowledgeItem {
+  productKey: String!
+  productVersion: Int!
+  productName: String!
+  publication: OkfPublication!
+  document: OkfDocument!
+}
+
+"""
+The object's own datasource bundle's answer, read only when no product bundle holds it: DOCUMENT, NOT_IN_BUNDLE (counts nothing) or REFUSED (the bare reason code, and no bundle named).
+"""
+type OkfObjectSourceKnowledge {
+  state: String!
+  reason: String
+  datasourceId: ID
+  publication: OkfPublication
+  document: OkfDocument
+}
+
+"""
 One stored, immutable publication of a bundle in the reader's own lineage. `publicationId` is the snapshot identity a caller pins: the manifest it inspected and any document it reads are the same bytes when both name it. `renderedCount` documents were rendered by this publication; `carriedCount` kept the prior publication's stored bytes without being rendered at all.
 """
 type OkfPublication {
@@ -774,6 +805,11 @@ type Query {
   One datasource's stored OKF knowledge bundle, as `GET /v1/datasources/{id}/okf-bundle` reads it: the datasource's `READ_METADATA` decision, and each schema's where a workspace decides, is taken on every read, and a caller it refuses is answered FORBIDDEN with the gate's own reason -- never an empty bundle. Only objects that decision admitted are named or counted. Recorded as a read.
   """
   datasourceOkfBundle(datasourceId: ID!, publicationId: ID = null): OkfBundle
+
+  """
+  The stored OKF knowledge about one catalog object, as `GET /v1/metadata/tables/{id}/okf-knowledge` reads it (R11-OKF02): its document from each context product bundle the caller may read, or -- only when none holds it -- from its own datasource's bundle under that datasource's `READ_METADATA` decision. Recorded as a read.
+  """
+  objectOkfKnowledge(tableId: ID!): OkfObjectKnowledge
 
   """One table by id, decided as its columns route decides it."""
   table(id: ID!): Table
