@@ -47,7 +47,6 @@ from aida.usage_quotas import (
 from tests.support.doubles import security_context
 
 _ANSWER = {"sql": "SELECT 1", "confidence": 0.9, "rationale_codes": ["X"]}
-TODAY = dt.datetime.now(dt.UTC).date()
 
 
 @pytest_asyncio.fixture
@@ -120,8 +119,11 @@ async def _call(
 
 
 async def _used(session: AsyncSession, org: UUID, ds: UUID | None = None) -> tuple[int, int]:
+    # Read at call time, not import time: a long suite can cross UTC midnight
+    # between collection and this test, and the windows are UTC days.
+    today = dt.datetime.now(dt.UTC).date()
     tenant = await tenant_usage(
-        session, organization_id=org, dimension=UsageDimension.MODEL_TOKENS, window_date=TODAY
+        session, organization_id=org, dimension=UsageDimension.MODEL_TOKENS, window_date=today
     )
     source = (
         await source_usage(
@@ -129,7 +131,7 @@ async def _used(session: AsyncSession, org: UUID, ds: UUID | None = None) -> tup
             organization_id=org,
             datasource_id=ds,
             dimension=UsageDimension.MODEL_TOKENS,
-            window_date=TODAY,
+            window_date=today,
         )
         if ds is not None
         else 0
