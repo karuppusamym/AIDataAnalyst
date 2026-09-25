@@ -178,6 +178,14 @@ DECISIONS: dict[str, tuple[str, str]] = {
         OPT_IN,
         "needs Redis, like the MCP and GraphQL budgets; the model-token quota bounds spend without it",
     ),
+    "source_query_concurrency_enabled": (
+        OPT_IN,
+        "R11-MP25: needs Redis; the per-process line-of-business bound applies without it",
+    ),
+    "source_query_max_concurrent_overrides": (
+        OPT_IN,
+        "R11-MP25: a per-source limit a DBA asks for; the default limit applies when unset",
+    ),
     "model_routes_by_purpose": (
         OPT_IN,
         "one route for every purpose is the default; a purpose route is named once it is approved",

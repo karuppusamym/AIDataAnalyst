@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**313 settings.** 0 are read nowhere. 72 more ship switched off, empty or zero.
+**317 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -58,6 +58,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `neo4j_password` | `str` | `''` | 4 | Supplied: only for an organization served from Neo4j |
 | `object_store_secret_key` | `str` | `''` | 1 | Supplied: the object store credential |
 | `sql_guard_allowed_functions` | `list[str]` | `list` | 5 | Supplied: the user-defined functions a deployment has reviewed for effects; empty refuses every function the SQL guard does not recognise as a built-in (R11-FP14) |
+| `source_query_concurrency_enabled` | `bool` | `False` | 1 | Opt-in: R11-MP25: needs Redis; the per-process line-of-business bound applies without it |
+| `source_query_max_concurrent_overrides` | `dict[str, Annotated[int, Field(ge=1, le=1000)]]` | `dict` | 1 | Opt-in: R11-MP25: a per-source limit a DBA asks for; the default limit applies when unset |
 | `analysis_run_daily_quota_per_organization` | `int | None` | `None` | 1 | Supplied: R11-FP17: analysis runs one tenant may consume per UTC day; the two `max_active_runs_per_*` concurrency limits still apply when unset |
 | `analysis_run_daily_quota_per_datasource` | `int | None` | `None` | 1 | Supplied: R11-FP17: analysis runs one source may consume per UTC day, which bounds a repeatedly-rescanned source that the one-at-a-time concurrency limit does not |
 | `model_token_daily_quota_per_organization` | `int | None` | `None` | 1 | Supplied: R11-FP17: model tokens one tenant may consume per UTC day, across every agent and every source -- wider than `AgentContract.daily_token_cap`, which is per contract |
@@ -164,7 +166,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `auto_enqueue_on_ingest` | `bool` | `True` | 3 |
 | `bulk_governance_threshold` | `int` | `10` | 2 |
 | `bulk_governance_roles_requiring_review` | `list[str]` | `lambda: ['DataSteward']` | 1 |
-| `redis_url` | `str` | `'redis://localhost:6379/0'` | 6 |
+| `redis_url` | `str` | `'redis://localhost:6379/0'` | 8 |
 | `neo4j_uri` | `str` | `'bolt://localhost:7687'` | 4 |
 | `neo4j_user` | `str` | `'neo4j'` | 4 |
 | `neo4j_password` | `str` | `''` | 4 |
@@ -175,9 +177,13 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `default_query_row_limit` | `int` | `5000` | 8 |
 | `hard_query_row_limit` | `int` | `100000` | 8 |
 | `sql_guard_allowed_functions` | `list[str]` | `list` | 5 |
-| `query_timeout_seconds` | `int` | `60` | 6 |
+| `query_timeout_seconds` | `int` | `60` | 7 |
 | `query_gateway_lob_max_concurrent` | `int` | `8` | 1 |
 | `query_gateway_lob_queue_timeout_seconds` | `float` | `5.0` | 1 |
+| `source_query_concurrency_enabled` | `bool` | `False` | 1 |
+| `source_query_max_concurrent` | `int` | `4` | 1 |
+| `source_query_max_concurrent_overrides` | `dict[str, Annotated[int, Field(ge=1, le=1000)]]` | `dict` | 1 |
+| `source_query_queue_timeout_seconds` | `float` | `5.0` | 1 |
 | `max_postgres_plan_cost` | `float` | `1000000.0` | 3 via `max_query_estimate_cost` |
 | `max_bigquery_dry_run_bytes` | `int` | `10000000000` | 3 via `max_query_estimate_bytes` |
 | `profile_sample_rows` | `int` | `10000` | 4 |

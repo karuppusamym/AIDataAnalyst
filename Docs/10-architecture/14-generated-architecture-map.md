@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-439 Python modules under `src/`, 2719 intra-`src` import edges.
+440 Python modules under `src/`, 2725 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 76 |
-| aida domain modules | everything else flat in `aida.*` | 295 |
+| aida domain modules | everything else flat in `aida.*` | 296 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>76 modules"]
-  domain["aida domain modules<br/>295 modules"]
+  domain["aida domain modules<br/>296 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -62,7 +62,7 @@ graph LR
   platform["atlas.platform<br/>6 modules"]
   routers -->|654| domain
   app -->|75| routers
-  domain -->|70| platform
+  domain -->|72| platform
   workflows -->|59| domain
   domain -->|28| connectors
   routers -->|20| platform
@@ -144,13 +144,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 405 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 406 |
 | `aida.workflows.worker` | Temporal worker | 132 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 208 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 209 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 90 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 431 of 439 modules.
+Union of all five: 432 of 440 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -159,7 +159,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 76 | 0 | 3 | 1 | 0 | 76 |
-| aida domain modules | 271 | 82 | 155 | 44 | 6 | 295 |
+| aida domain modules | 272 | 82 | 156 | 44 | 6 | 296 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -178,9 +178,9 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>405 reached"])
+  aida_main(["aida.main<br/>406 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>132 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>208 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>209 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>90 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
@@ -1441,7 +1441,7 @@ a package's fan-in measures nothing but the size of the package.
 | `aida.events` | aida domain modules | 100 |
 | `aida.context` | aida domain modules | 75 |
 | `aida.envelope_models` | aida domain modules | 44 |
-| `atlas.platform.config` | atlas.platform | 32 |
+| `atlas.platform.config` | atlas.platform | 33 |
 | `aida.authorization_gate` | aida domain modules | 27 |
 | `aida.ingest_screening` | aida domain modules | 23 |
 | `aida.connectors.base` | aida.connectors | 21 |

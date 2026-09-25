@@ -10,7 +10,7 @@ import difflib
 import os
 import sys
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic.fields import FieldInfo
@@ -202,6 +202,17 @@ class Settings(BaseSettings):
     # module docstring. A wait that outlives this bound is rejected with a clear,
     # distinguishable error (LobConcurrencyRejected) instead of growing the queue.
     query_gateway_lob_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    # R11-MP25: a bound per datasource, counted in Redis so it holds across every
+    # replica (the LOB bound above is per process). A query past it waits up to the
+    # timeout below, then is refused; with Redis unreachable, staging and
+    # production refuse and other environments run unbounded. Off by default
+    # because it needs the Redis service. Overrides are keyed by datasource id.
+    source_query_concurrency_enabled: bool = False
+    source_query_max_concurrent: int = Field(default=4, ge=1, le=1_000)
+    source_query_max_concurrent_overrides: dict[str, Annotated[int, Field(ge=1, le=1_000)]] = (
+        Field(default_factory=dict)
+    )
+    source_query_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     max_postgres_plan_cost: float = Field(default=1_000_000.0, gt=0)
     # BigQuery bills by bytes scanned rather than exposing a comparable cost plan,
     # so the gateway gates dry-run byte estimates against this separate budget

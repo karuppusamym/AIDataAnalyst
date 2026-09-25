@@ -45,6 +45,7 @@ from aida.security import SecurityContext
 # tests and `sql_redaction.py`'s docstring reference it as `query_gateway.audit_sql_hash`.
 from aida.signing import audit_sql_hash as audit_sql_hash
 from aida.signing import resolve_signing_provider
+from aida.source_concurrency import SourceConcurrencyDenied, source_query_slot
 from aida.sql_guard import SqlGuard, SqlValidationResult
 from aida.sql_redaction import redact_sql_literals as _redact_sql_literals
 from aida.sql_validation import (
@@ -104,6 +105,22 @@ class LobConcurrencyRejected(QueryRejected):
     def __init__(self, denied: LobConcurrencyDenied) -> None:
         super().__init__(f"LOB_CONCURRENCY_LIMIT_EXCEEDED:{denied.lob_key}")
         self.lob_key = denied.lob_key
+        self.limit = denied.limit
+        self.waited_seconds = denied.waited_seconds
+
+
+class SourceConcurrencyRejected(QueryRejected):
+    """R11-MP25: the source was at its cross-replica query limit past the wait
+    bound, or the store that counts it was unreachable where that refuses."""
+
+    def __init__(self, denied: SourceConcurrencyDenied) -> None:
+        reason = (
+            "SOURCE_CONCURRENCY_UNAVAILABLE"
+            if denied.unavailable
+            else "SOURCE_CONCURRENCY_LIMIT_EXCEEDED"
+        )
+        super().__init__(f"{reason}:{denied.datasource_id}")
+        self.datasource_id = denied.datasource_id
         self.limit = denied.limit
         self.waited_seconds = denied.waited_seconds
 
@@ -993,15 +1010,22 @@ class QueryExecutionGateway:
             # datasource's LOB (see `aida.lob_concurrency`'s module
             # docstring for why that, not the caller, is this platform's
             # real per-LOB dimension for a query execution).
+            # R11-MP25: inside the LOB slot, one of the source's own slots, counted
+            # across replicas (`aida.source_concurrency`); a no-op unless enabled.
             lob_key = str(datasource.line_of_business_id)
             try:
-                async with self._lob_concurrency.slot(lob_key):
+                async with (
+                    self._lob_concurrency.slot(lob_key),
+                    source_query_slot(self.settings, datasource.id),
+                ):
                     source_result = await connector.execute_read_query(
                         outcome.executable_sql,
                         timeout_seconds=self.settings.query_timeout_seconds,
                     )
             except LobConcurrencyDenied as exc:
                 raise LobConcurrencyRejected(exc) from exc
+            except SourceConcurrencyDenied as exc:
+                raise SourceConcurrencyRejected(exc) from exc
             sensitive_names = await self._sensitive_output_names(
                 session,
                 datasource,
