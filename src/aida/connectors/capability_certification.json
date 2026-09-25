@@ -1,5 +1,5 @@
 {
-  "certified_on": "2026-09-24",
+  "certified_on": "2026-09-25",
   "connectors": {
     "bigquery": {
       "claimed": {
@@ -1240,14 +1240,15 @@
         "server_version": "SQL Server 16.0.4265.3 (Developer Edition (64-bit))"
       },
       "fingerprint": {
-        "digest": "74661199e7b1f5831e5b4e7be34c52001cf624a044f4a4d300d907c01c24d27d",
+        "digest": "7c369816779de7c062e0ef35c25b440c22b6dd01bf702550a32988c404f97bca",
         "files": {
           "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
           "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
           "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
           "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
           "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa",
-          "aida/connectors/sqlserver.py": "794f8148a2dee1411f7f9d8d6cde6cefb1e83347f0e960022b0d0f148fe0e667"
+          "aida/connectors/sqlserver.py": "fff1f1be7a499c23ee3a144dc73d2b5bfbc93c92a800cbe2f550bb8a6baf711f",
+          "aida/connectors/sqlserver_pool.py": "b7ec0b735beebb94c540cefb6bc29d63b32500d9c9e4e0943d5eb8036c542c55"
         }
       },
       "flags": {

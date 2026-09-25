@@ -11,7 +11,7 @@ only if the connector claims it (`DEFAULT_CAPABILITIES`) and its row here is CER
 the connector's own driver double; it says the connector's logic works and says nothing
 about a real engine. A fixture result is never labelled live.
 
-Suite `connector-capability-certification-v1`, produced 2026-09-24. Regenerating a connector's LIVE
+Suite `connector-capability-certification-v1`, produced 2026-09-25. Regenerating a connector's LIVE
 rows needs the sample containers running; `--check` needs nothing.
 
 ## Summary
@@ -201,7 +201,7 @@ Code fingerprint `bb5f50ad1e0176df` over:
 
 ## sqlserver
 
-Code fingerprint `74661199e7b1f583` over:
+Code fingerprint `7c369816779de7c0` over:
 
 - `aida/capability_states.py`
 - `aida/connectors/base.py`
@@ -209,6 +209,7 @@ Code fingerprint `74661199e7b1f583` over:
 - `aida/connectors/schema_scope.py`
 - `aida/connectors/sql_execution.py`
 - `aida/connectors/sqlserver.py`
+- `aida/connectors/sqlserver_pool.py`
 
 LIVE rows ran against: driver python-tds 1.17.1, server_version SQL Server 16.0.4265.3 (Developer Edition (64-bit)).
 

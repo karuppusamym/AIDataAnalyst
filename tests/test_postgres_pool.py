@@ -21,6 +21,7 @@ import aida.connectors.postgres as postgres_module
 from aida.connectors import postgres_pool
 from aida.connectors.execution_access import with_pooled_reads
 from aida.connectors.postgres import PostgresConnector
+from aida.connectors.sqlserver import SqlServerConnector
 from tests.support.doubles import FakeSqlExecutor
 
 
@@ -32,6 +33,10 @@ def test_the_gateway_switch_pools_only_postgres() -> None:
     assert with_pooled_reads(connector, enabled=False) is connector
     other = FakeSqlExecutor(())
     assert with_pooled_reads(other, enabled=True) is other  # type: ignore[arg-type]
+    # R11-MP24, 2026-09-25: SQL Server's execution pools too (`tests/test_sqlserver_pool.py`).
+    mssql = SqlServerConnector("mssql://u:p@host:1433/db")
+    pooled_mssql = with_pooled_reads(mssql, enabled=True)
+    assert isinstance(pooled_mssql, SqlServerConnector) and pooled_mssql._pooled_reads
 
 
 def test_the_pool_key_never_holds_the_dsn() -> None:

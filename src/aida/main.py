@@ -34,6 +34,7 @@ from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
 from aida.config import Settings, get_settings
 from aida.connectors.postgres_pool import close_postgres_pools
+from aida.connectors.sqlserver_pool import close_sqlserver_pools
 from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
 from aida.context_compiler_api import router as context_compiler_router
@@ -408,6 +409,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await temporal_reconnect_task
     await close_outbound_clients()
     await close_postgres_pools()
+    close_sqlserver_pools()
     logger.info("service_stopped", service=settings.service_name)
 
 

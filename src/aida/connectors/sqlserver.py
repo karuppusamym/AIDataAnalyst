@@ -1,5 +1,7 @@
 import asyncio
+import copy
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -45,6 +47,7 @@ from aida.connectors.discovery import (
 )
 from aida.connectors.schema_scope import SchemaScope, schema_scope, scoped_sqlserver_query
 from aida.connectors.sql_execution import SqlExecutor
+from aida.connectors.sqlserver_pool import borrow, pool_key
 
 _SHOWPLAN_NS = "{http://schemas.microsoft.com/sqlserver/2004/07/showplan}"
 _EXCLUDED_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
@@ -496,6 +499,10 @@ async def _captured(read: _CapturedRead) -> Sequence[Any]:
     return read
 
 
+class _StaleConnection(Exception):
+    """An idle pooled connection the server had already closed (R11-MP24)."""
+
+
 class SqlServerConnector(SqlExecutor):
     connector_type = "sqlserver"
     dialect = "tsql"
@@ -523,10 +530,20 @@ class SqlServerConnector(SqlExecutor):
         sequences=True,
     )
 
-    def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
+    def __init__(
+        self, dsn: str, *, command_timeout: float = 30.0, pooled_reads: bool = False
+    ) -> None:
         self._params = _parse_dsn(dsn)
         self._command_timeout = command_timeout
         self._schema_scope = SchemaScope()
+        self._pooled_reads = pooled_reads
+
+    def with_pooled_reads(self) -> "SqlServerConnector":
+        """R11-MP24: this source, with governed execution borrowing idle connections
+        (`aida.connectors.sqlserver_pool`). The EXPLAIN gate never borrows."""
+        pooled = copy.copy(self)
+        pooled._pooled_reads = True
+        return pooled
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
@@ -807,22 +824,70 @@ class SqlServerConnector(SqlExecutor):
         return await asyncio.to_thread(self._execute_read_query_sync, sql, timeout_seconds)
 
     def _execute_read_query_sync(self, sql: str, timeout_seconds: int) -> QueryResult:
+        if self._pooled_reads:
+            return self._execute_pooled_sync(sql, timeout_seconds)
         connection = self._connect(timeout_seconds=timeout_seconds, autocommit=False)
         try:
-            cursor = connection.cursor()
-            try:
-                session_id = cursor.execute_scalar("SELECT @@SPID")
-                cursor.execute(sql)
-                rows = cursor.fetchall()
-                return QueryResult(
-                    rows=tuple(dict(row) for row in rows),
-                    warehouse_query_id=f"sqlserver-spid:{session_id}",
-                )
-            finally:
-                cursor.close()
-                connection.rollback()
+            return self._run_read(connection, sql)
         finally:
             connection.close()
+
+    @staticmethod
+    def _run_read(connection: Any, sql: str) -> QueryResult:
+        cursor = connection.cursor()
+        try:
+            session_id = cursor.execute_scalar("SELECT @@SPID")
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            return QueryResult(
+                rows=tuple(dict(row) for row in rows),
+                warehouse_query_id=f"sqlserver-spid:{session_id}",
+            )
+        finally:
+            cursor.close()
+            connection.rollback()
+
+    def _execute_pooled_sync(self, sql: str, timeout_seconds: int) -> QueryResult:
+        """R11-MP24: execution on a pooled connection. An idle connection the server has
+        closed fails on `SELECT @@SPID`, before the statement runs, and is retried once on a
+        fresh one; any other failure closes the connection and is raised."""
+        params = self._params
+        key = pool_key(
+            params.host,
+            params.port,
+            params.database,
+            params.user,
+            params.password,
+            timeout_seconds,
+        )
+
+        def connect() -> Any:
+            return self._connect(timeout_seconds=timeout_seconds, autocommit=False)
+
+        for attempt in range(2):
+            try:
+                # Raised out of the block, so `borrow` closes the connection, never returns it.
+                with borrow(key, connect) as connection:
+                    cursor = connection.cursor()
+                    try:
+                        try:
+                            session_id = cursor.execute_scalar("SELECT @@SPID")
+                        except (pytds.tds_base.ClosedConnectionError, OSError) as exc:
+                            if attempt:
+                                raise
+                            raise _StaleConnection from exc
+                        cursor.execute(sql)
+                        rows = cursor.fetchall()
+                        return QueryResult(
+                            rows=tuple(dict(row) for row in rows),
+                            warehouse_query_id=f"sqlserver-spid:{session_id}",
+                        )
+                    finally:
+                        with suppress(Exception):
+                            cursor.close()
+            except _StaleConnection:
+                continue
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def profile_table(
         self,
