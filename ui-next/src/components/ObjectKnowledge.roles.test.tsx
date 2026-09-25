@@ -8,11 +8,13 @@ import type { MeRead } from "../lib/types";
 /* ---------------------------------------------------------------------------
    Who is offered the Catalog evidence pane's Knowledge section.
 
-   `GET /v1/metadata/tables/{table_id}/okf-knowledge` admits six roles. For a
-   session known to hold none of them -- an Auditor, Reviewer, Viewer or
-   DataAdmin, all demo users -- the section could only ever answer "You are not
-   permitted to read this bundle", so it is not offered. Unknown identity
-   (`/v1/me` not yet answered) still offers it; the server's 403 is the authority.
+   `GET /v1/metadata/tables/{table_id}/okf-knowledge` admits the roles that read
+   the same object's evidence, plus AgentDeveloper (R11-OKF02, widened
+   2026-09-25 to Auditor, DataAdmin, Reviewer, SemanticAdmin and Viewer). For a
+   session known to hold none of them the section could only ever answer "You
+   are not permitted to read this bundle", so it is not offered. Unknown
+   identity (`/v1/me` not yet answered) still offers it; the server's 403 is the
+   authority.
 --------------------------------------------------------------------------- */
 
 const fetchObjectKnowledge =
@@ -61,7 +63,7 @@ beforeEach(() => {
 });
 
 describe("ObjectKnowledge: who is offered the section", () => {
-  it.each([["Auditor", "Viewer"], ["Reviewer"], ["Viewer"], ["DataAdmin"]])(
+  it.each([["Operations"], ["ToolDeveloper"], ["Operations", "ToolDeveloper"]])(
     "is not offered to %s, and asks nothing",
     async (...roles) => {
       sessionMe = asRoles(...roles);
@@ -73,7 +75,19 @@ describe("ObjectKnowledge: who is offered the section", () => {
     },
   );
 
-  it.each(["AgentDeveloper", "Analyst", "DataSteward", "MetadataAdmin", "PlatformAdmin"])(
+  // R11-OKF02, 2026-09-25: the evidence pane's readers are admitted too.
+  it.each([
+    "AgentDeveloper",
+    "Analyst",
+    "Auditor",
+    "DataAdmin",
+    "DataSteward",
+    "MetadataAdmin",
+    "PlatformAdmin",
+    "Reviewer",
+    "SemanticAdmin",
+    "Viewer",
+  ])(
     "is offered to %s and reads on open",
     async (role) => {
       sessionMe = asRoles(role);

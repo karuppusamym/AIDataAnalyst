@@ -14,7 +14,7 @@ from sqlalchemy import select
 from aida.config import Settings
 from aida.models import OutboxEvent
 from aida.okf_export_api import read_object_okf_knowledge
-from aida.okf_read_model import OKF_ROLES
+from aida.okf_read_model import OBJECT_KNOWLEDGE_ROLES
 from tests.test_graphql_okf import (  # noqa: F401  # noqa: F401 -- fixtures
     World,
     _data,
@@ -82,8 +82,8 @@ async def test_a_role_without_okf_access_and_an_unknown_object_are_refused(
     world: World,  # noqa: F811
 ) -> None:
     table = world.estate["tables"]["warehouse.orders"]
-    outsider_role = "Viewer"
-    assert outsider_role not in OKF_ROLES
+    outsider_role = "Operations"
+    assert outsider_role not in OBJECT_KNOWLEDGE_ROLES
     refused = (
         await _gql(http, QUERY, _headers(world.org, outsider_role), "Obj", id=str(table.id))
     ).json()

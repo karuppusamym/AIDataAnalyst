@@ -37,13 +37,19 @@ import "./Knowledge.css";
 --------------------------------------------------------------------------- */
 
 /** `GET /v1/metadata/tables/{table_id}/okf-knowledge`, copied from
- *  `Docs/50-security/surface-control-matrix.md` (`okf_read_model.OKF_ROLES`). */
+ *  `Docs/50-security/surface-control-matrix.md` (`okf_read_model.OBJECT_KNOWLEDGE_ROLES`:
+ *  since 2026-09-25 every role that reads this object's evidence, plus AgentDeveloper). */
 const KNOWLEDGE_READ_ROLES = [
   "AgentDeveloper",
   "Analyst",
+  "Auditor",
+  "DataAdmin",
   "DataSteward",
   "MetadataAdmin",
   "PlatformAdmin",
+  "Reviewer",
+  "SemanticAdmin",
+  "Viewer",
 ] as const;
 
 export function ObjectKnowledge({ tableId }: { tableId: string }) {

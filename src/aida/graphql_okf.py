@@ -61,7 +61,7 @@ from aida.graphql_reads import (
     _require_roles,
 )
 from aida.okf_export import document_kind
-from aida.okf_read_model import OKF_ROLES, publication_read
+from aida.okf_read_model import OBJECT_KNOWLEDGE_ROLES, OKF_ROLES, publication_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     SOURCE_BUNDLE_CHANNELS,
@@ -534,7 +534,7 @@ async def read_object_okf(scope: ReadScope, table_id: UUID) -> OkfObjectAnswer:
     """The object's stored knowledge, as the Catalog route reads it: the same two store reads
     (`read_object_knowledge`, then `read_object_source_knowledge` only when no product bundle
     holds it), decided and recorded once per request on GraphQL's own channels."""
-    _require_roles(scope, OKF_ROLES)
+    _require_roles(scope, OBJECT_KNOWLEDGE_ROLES)
     key = ("object", table_id)
     async with scope.lock:
         remembered = scope.okf.get(key)

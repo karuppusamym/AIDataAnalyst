@@ -61,6 +61,22 @@ OKF_ROLES = (
     "Analyst",
 )
 
+#: R11-OKF02, decided 2026-09-25: the one-object read (the Catalog's Knowledge section and its
+#: MCP and GraphQL twins) admits every role that reads the same object's evidence and
+#: documentation beside it -- the governance readers who review and approve that very meaning.
+#: A knowledge document holds approved metadata and no source value, and the datasource's own
+#: `READ_METADATA` decision and every product's consumer, purpose and quality gates still apply
+#: inside the store. Whole-bundle manifests, downloads, history and question context stay at
+#: `OKF_ROLES`: a bulk export is a different act from reading one object's page.
+OBJECT_KNOWLEDGE_ROLES = (
+    *OKF_ROLES,
+    "Auditor",
+    "DataAdmin",
+    "Reviewer",
+    "SemanticAdmin",
+    "Viewer",
+)
+
 
 def publication_read(
     publication: OkfBundlePublication, *, is_current: bool

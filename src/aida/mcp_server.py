@@ -146,7 +146,7 @@ from aida.okf_context import (
     without_sections,
 )
 from aida.okf_export_api import OKF_ROLES, context_read, publication_read, source_context_read
-from aida.okf_read_model import object_source_read
+from aida.okf_read_model import OBJECT_KNOWLEDGE_ROLES, object_source_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     MAX_AUDITED_SECTIONS,
@@ -542,6 +542,12 @@ NATIVE_KNOWLEDGE_TOOL_SLUGS = frozenset(
 SOURCE_KNOWLEDGE_TOOL_SLUG = "get_source_knowledge_context"
 #: R11-OKF02: the Catalog's object read (`GET /v1/metadata/tables/{id}/okf-knowledge`).
 OBJECT_KNOWLEDGE_TOOL_SLUG = "get_object_knowledge"
+
+
+def _knowledge_tool_roles(slug: str) -> tuple[str, ...]:
+    """The roles a knowledge tool admits: its REST twin's (`OBJECT_KNOWLEDGE_ROLES` for the
+    one-object read, `OKF_ROLES` for bundle context)."""
+    return OBJECT_KNOWLEDGE_ROLES if slug == OBJECT_KNOWLEDGE_TOOL_SLUG else OKF_ROLES
 
 #: Every tool `tools/call` serves without a `GovernedToolVersion` behind it.
 #: R11-C6: the three families were dispatched by three near-identical
@@ -973,8 +979,10 @@ async def _handle_tools_list(
                 }
             )
 
-    if eligible_version_ids is None and _tool_role_eligible(context.roles, OKF_ROLES):
+    if eligible_version_ids is None:
         for native in NATIVE_KNOWLEDGE_TOOL_DEFINITIONS:
+            if not _tool_role_eligible(context.roles, _knowledge_tool_roles(native["slug"])):
+                continue
             tools.append(
                 {
                     "name": f"atlas__{native['slug']}",
@@ -1022,7 +1030,7 @@ async def _handle_native_knowledge_tool_call(
     Markdown an LLM reads; the second is the structured selection with its receipts.
     """
     if slug not in NATIVE_KNOWLEDGE_TOOL_SLUGS or not _tool_role_eligible(
-        context.roles, OKF_ROLES
+        context.roles, _knowledge_tool_roles(slug)
     ):
         return {
             "isError": True,

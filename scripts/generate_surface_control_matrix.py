@@ -349,6 +349,7 @@ def _graphql_rows() -> list[SurfaceRow]:
         "CONTEXT_COMPILER_ROLES": set(graphql_reads.CONTEXT_COMPILER_ROLES),
         # R11-GQL01: the stored OKF bundle reads decide as the OKF routes do, with their roles.
         "OKF_ROLES": set(okf_read_model.OKF_ROLES),
+        "OBJECT_KNOWLEDGE_ROLES": set(okf_read_model.OBJECT_KNOWLEDGE_ROLES),
     }
     module = "aida.graphql_schema"
     source_path = REPO_ROOT / "src" / "aida" / "graphql_schema.py"

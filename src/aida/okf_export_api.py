@@ -57,6 +57,7 @@ from aida.db import get_session
 from aida.okf_context import OkfContext, citation_ids, render_markdown
 from aida.okf_export import OkfBundle, bundle_archive_bytes
 from aida.okf_read_model import (
+    OBJECT_KNOWLEDGE_ROLES,
     OKF_ROLES,
     bundle_read,
     document_read,
@@ -601,7 +602,7 @@ async def select_source_okf_context(
 )
 async def read_object_okf_knowledge(
     table_id: UUID,
-    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    context: SecurityContext = Depends(require_roles(*OBJECT_KNOWLEDGE_ROLES)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> OkfObjectKnowledgeRead:

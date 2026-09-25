@@ -150,3 +150,29 @@ async def test_an_unknown_object_and_another_tenants_read_the_same(
         "corr",
     )
     assert malformed["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_reads_one_objects_knowledge_but_not_bundle_context(
+    session: AsyncSession, settings: Settings
+) -> None:
+    """R11-OKF02, decided 2026-09-25: the one-object read admits the evidence pane's readers;
+    bundle context stays at `OKF_ROLES`."""
+    from dataclasses import replace
+
+    from aida.mcp_server import SOURCE_KNOWLEDGE_TOOL_SLUG, _handle_tools_list
+
+    estate = await _estate(session)
+    viewer = replace(_context(estate["organization"].id), roles=frozenset({"Viewer"}))
+    listed = await _handle_tools_list(session, viewer, {}, settings)
+    names = {tool["name"] for tool in listed["tools"]}
+    assert TOOL in names
+    assert f"atlas__{SOURCE_KNOWLEDGE_TOOL_SLUG}" not in names
+    result = await _handle_tools_call(
+        {"name": TOOL, "arguments": {"table_id": str(estate["tables"]["warehouse.orders"].id)}},
+        session,
+        viewer,
+        settings,
+        "corr",
+    )
+    assert "isError" not in result
