@@ -96,6 +96,7 @@ atlas-manifest.json                      # Atlas extension, OUTSIDE the OKF bund
 bundle/index.md                          # bundle root; the only index with frontmatter
 bundle/sources/source-<key>/index.md
 bundle/sources/source-<key>/schemas/schema-<key>/index.md
+bundle/sources/source-<key>/schemas/schema-<key>/index-pages/page-<nnnn>/index.md  # large schemas
 bundle/sources/source-<key>/schemas/schema-<key>/tables/table-<key>.md
 bundle/sources/source-<key>/schemas/schema-<key>/tables/table-<key>-columns-<n>.md  # wide objects
 bundle/sources/source-<key>/schemas/schema-<key>/views/view-<key>.md
@@ -131,6 +132,19 @@ the sets before it. A range the source reported no usable ordinals for is split 
 position (`-columns-<n>-<m>`), so no set exceeds the limit. Each set says which object and which
 part it is, and links back to the object and to its neighbours, so a reader handed one set
 alone can place it. An object at or under the limit renders as it did under profile `2`.
+
+**Large schemas list their index in pages** (profile `5`, R11-OKF02, 2026-09-25). A schema's
+`index.md` lists every table, view, routine and package in it, so at a few thousand entries it
+passed `MAX_DOCUMENT_BYTES` (256 KiB) and the whole bundle was refused -- measured at 5,000
+tables (`scripts/measure_okf_source_bundle_cost.py`). Past `SCHEMA_INDEX_PAGE_ENTRIES` (1,000)
+entries the schema index keeps its `# Schema` section and lists its pages under `# Index
+pages`, each with its entry count and first and last name; each page is itself an `index.md`
+in `index-pages/page-<nnnn>/`, so it carries no frontmatter and an OKF reader navigates it like
+any index. A page lists at most 1,000 entries, in the schema index's own order, under the same
+section headings, and links back to the schema index. Pages are cut by position, so an entry
+added early shifts every later page: an incremental rebuild re-renders all of a schema's pages
+whenever any entry in it moves. A schema at or under the limit renders as it did under
+profile `4`. The document kind is `SCHEMA_INDEX_PAGE`.
 
 ### Stable identities
 

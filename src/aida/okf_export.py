@@ -109,7 +109,10 @@ EXPORT_PROFILE: Final = "atlas-okf-export"
 #: single document must be re-rendered rather than served as current.
 #: "4": catalog labels and table cells are escaped as literal Markdown (`md_text`, `md_code`).
 #: A name made of letters, digits and `_ . - $` renders exactly as under "3".
-EXPORT_PROFILE_VERSION: Final = "4"
+#: "5" (R11-OKF02, 2026-09-25): a schema listing more than `SCHEMA_INDEX_PAGE_ENTRIES` entries
+#: publishes its index as pages. Smaller schemas render exactly as under "4"; a schema too large
+#: for one index document could not be bundled at all before.
+EXPORT_PROFILE_VERSION: Final = "5"
 #: The actor convention of spec §7: `process:<id>` for an automated process.
 EXPORTER_ACTOR: Final = "process:atlas-okf-export"
 MANIFEST_VERSION: Final = "1"
@@ -171,6 +174,11 @@ DEFINITION_ABSENT: Final = "DEFINITION_NOT_CAPTURED"
 #: "split unusually large definitions by stable structural section only when retrieval limits
 #: require it" -- an object at or under the limit renders exactly as before.
 MAX_COLUMNS_PER_DOCUMENT: Final = 100
+#: R11-OKF02: a schema's `index.md` lists every object, routine and package in it, and at a few
+#: thousand entries it passed `MAX_DOCUMENT_BYTES`, refusing the whole bundle. Past this many
+#: entries the schema index lists its pages instead, and each page -- itself an `index.md` in a
+#: page directory, so an OKF reader navigates it like any index -- lists at most this many.
+SCHEMA_INDEX_PAGE_ENTRIES: Final = 1_000
 MAX_DOCUMENT_BYTES: Final = 256 * 1024
 MAX_FRONTMATTER_BYTES: Final = 32 * 1024
 MAX_DOCUMENTS: Final = 20_000
@@ -1158,6 +1166,8 @@ class _Paths:
     tools: dict[str, str] = field(default_factory=dict)
     #: Object key -> its column sets, empty for an object that fits in one document.
     column_sets: dict[str, tuple[_ColumnSet, ...]] = field(default_factory=dict)
+    #: Schema key -> its index pages, empty for a schema whose index fits in one document.
+    schema_pages: dict[str, tuple[_IndexPage, ...]] = field(default_factory=dict)
 
     def any_path(self, key: str) -> str | None:
         for table in (self.objects, self.routines, self.packages, self.concepts, self.tools):
@@ -1196,6 +1206,20 @@ def _resolve_paths(snapshot: OkfSnapshot) -> _Paths:
         paths.concepts[concept.key] = f"concepts/concept-{concept.key}.md"
     for tool in snapshot.tools:
         paths.tools[tool.key] = f"tools/tool-version-{tool.key}.md"
+    for schema in snapshot.schemas:
+        entries = _schema_entries(schema, snapshot)
+        if len(entries) > SCHEMA_INDEX_PAGE_ENTRIES:
+            base = _schema_dir(schema.source_key, schema.key)
+            paths.schema_pages[schema.key] = tuple(
+                _IndexPage(
+                    path=f"{base}/index-pages/page-{number:04d}/index.md",
+                    number=number,
+                    entries=tuple(entries[start : start + SCHEMA_INDEX_PAGE_ENTRIES]),
+                )
+                for number, start in enumerate(
+                    range(0, len(entries), SCHEMA_INDEX_PAGE_ENTRIES), start=1
+                )
+            )
     return paths
 
 
@@ -1964,22 +1988,51 @@ def _source_index(source: OkfSourceFacts, snapshot: OkfSnapshot, paths: _Paths) 
     )
 
 
-def _schema_index(schema: OkfSchemaFacts, snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
-    def label(text: str) -> str:
-        return text
+@dataclass(frozen=True, slots=True)
+class _IndexEntry:
+    """One line of a schema index: the section it sits under, and what it links to."""
 
-    tables = [
-        _entry(obj.qualified_name, f"tables/table-{obj.key}.md", _one_line(obj))
-        for obj in sorted(snapshot.objects, key=lambda item: item.qualified_name)
+    section: str
+    key: str
+    label: str
+    #: Relative to the schema directory.
+    target: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexPage:
+    """One page of a large schema's index (`SCHEMA_INDEX_PAGE_ENTRIES`)."""
+
+    path: str
+    number: int
+    entries: tuple[_IndexEntry, ...]
+
+
+_INDEX_SECTIONS: Final = ("Tables", "Views", "Routines", "Packages")
+
+
+def _schema_entries(schema: OkfSchemaFacts, snapshot: OkfSnapshot) -> list[_IndexEntry]:
+    """Every entry a schema index lists, in the order it lists them."""
+    ordered = sorted(snapshot.objects, key=lambda item: item.qualified_name)
+    entries = [
+        _IndexEntry(
+            "Tables", obj.key, obj.qualified_name, f"tables/table-{obj.key}.md", _one_line(obj)
+        )
+        for obj in ordered
         if obj.schema_key == schema.key and obj.kind == KIND_TABLE
     ]
-    views = [
-        _entry(obj.qualified_name, f"views/view-{obj.key}.md", _one_line(obj))
-        for obj in sorted(snapshot.objects, key=lambda item: item.qualified_name)
+    entries += [
+        _IndexEntry(
+            "Views", obj.key, obj.qualified_name, f"views/view-{obj.key}.md", _one_line(obj)
+        )
+        for obj in ordered
         if obj.schema_key == schema.key and obj.kind != KIND_TABLE
     ]
-    routines = [
-        _entry(
+    entries += [
+        _IndexEntry(
+            "Routines",
+            routine.key,
             f"{routine.qualified_name}{routine.signature}",
             f"routines/routine-{routine.key}.md",
             _one_line_routine(routine),
@@ -1989,8 +2042,10 @@ def _schema_index(schema: OkfSchemaFacts, snapshot: OkfSnapshot, paths: _Paths) 
         )
         if routine.schema_key == schema.key
     ]
-    packages = [
-        _entry(
+    entries += [
+        _IndexEntry(
+            "Packages",
+            package.key,
             package.qualified_name,
             f"packages/package-{package.key}.md",
             f"{len(package.member_keys)} member(s) in scope",
@@ -1998,6 +2053,42 @@ def _schema_index(schema: OkfSchemaFacts, snapshot: OkfSnapshot, paths: _Paths) 
         for package in sorted(snapshot.packages, key=lambda item: item.qualified_name)
         if package.schema_key == schema.key
     ]
+    return entries
+
+
+def _entry_sections(
+    entries: Sequence[_IndexEntry], *, prefix: str = ""
+) -> list[tuple[str, Sequence[str]]]:
+    return [
+        (
+            section,
+            [
+                _entry(item.label, f"{prefix}{item.target}", item.description)
+                for item in entries
+                if item.section == section
+            ],
+        )
+        for section in _INDEX_SECTIONS
+        if any(item.section == section for item in entries)
+    ]
+
+
+def _schema_index_page(
+    schema: OkfSchemaFacts, page: _IndexPage, pages: int
+) -> OkfDocument:
+    """One page of a large schema's index: its entries, linked from the page directory."""
+    overview = [
+        f"* Page {page.number} of {pages} of the index of {md_code(schema.catalog_name)}"
+        f".{md_code(schema.name)}: {len(page.entries)} entries.",
+        "* Back to the [schema index](../../index.md).",
+    ]
+    return _index_document(
+        page.path, [("Index page", overview), *_entry_sections(page.entries, prefix="../../")]
+    )
+
+
+def _schema_index(schema: OkfSchemaFacts, snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
+    pages = paths.schema_pages.get(schema.key, ())
     sections: list[tuple[str, Sequence[str]]] = [
         (
             "Schema",
@@ -2008,14 +2099,28 @@ def _schema_index(schema: OkfSchemaFacts, snapshot: OkfSnapshot, paths: _Paths) 
             ],
         )
     ]
-    if tables:
-        sections.append(("Tables", tables))
-    if views:
-        sections.append(("Views", views))
-    if routines:
-        sections.append(("Routines", routines))
-    if packages:
-        sections.append(("Packages", packages))
+    if not pages:
+        sections.extend(_entry_sections(_schema_entries(schema, snapshot)))
+        return _index_document(paths.schemas[schema.key], sections)
+    total = sum(len(page.entries) for page in pages)
+    sections.append(
+        (
+            "Index pages",
+            [
+                f"* {total} entries, listed in {len(pages)} pages of at most "
+                f"{SCHEMA_INDEX_PAGE_ENTRIES} so each page stays readable on its own.",
+                *(
+                    _entry(
+                        f"Page {page.number}",
+                        f"index-pages/page-{page.number:04d}/index.md",
+                        f"{len(page.entries)} entries, {md_text(page.entries[0].label)} to "
+                        f"{md_text(page.entries[-1].label)}",
+                    )
+                    for page in pages
+                ),
+            ],
+        )
+    )
     return _index_document(paths.schemas[schema.key], sections)
 
 
@@ -2285,6 +2390,7 @@ DOCUMENT_KINDS: Final = (
     "BUNDLE_INDEX",
     "SOURCE_INDEX",
     "SCHEMA_INDEX",
+    "SCHEMA_INDEX_PAGE",
     "TABLE",
     "VIEW",
     "COLUMN_SET",
@@ -2304,6 +2410,7 @@ _KIND_PATTERNS: Final = (
     ("LOG", re.compile(r"(?:sources/source-[^/]+/)?log\.md")),
     ("SOURCE_INDEX", re.compile(r"sources/source-[^/]+/index\.md")),
     ("SCHEMA_INDEX", re.compile(rf"{_SCHEMA_DIR}/index\.md")),
+    ("SCHEMA_INDEX_PAGE", re.compile(rf"{_SCHEMA_DIR}/index-pages/page-\d{{4}}/index\.md")),
     (
         "COLUMN_SET",
         re.compile(rf"{_SCHEMA_DIR}/(?:tables/table|views/view)-[^/]+-columns-[^/]+\.md"),
@@ -2600,6 +2707,19 @@ def _plan(snapshot: OkfSnapshot) -> list[_Planned]:
                 partial(_schema_index, schema, snapshot, paths),
             )
         )
+        # Every page owns every child: an entry added early shifts every later page's range.
+        pages = paths.schema_pages.get(schema.key, ())
+        for page in pages:
+            plan.append(
+                _Planned(
+                    page.path,
+                    None,
+                    _PLAN_SCHEMA_INDEX,
+                    (schema.key, *children),
+                    (),
+                    partial(_schema_index_page, schema, page, len(pages)),
+                )
+            )
     for obj in snapshot.objects:
         plan.append(
             _Planned(

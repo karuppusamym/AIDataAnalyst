@@ -471,8 +471,9 @@ def test_the_two_fixtures_between_them_exercise_every_kind_a_renderer_produces()
         seen.update(
             document_kind(document.path) for document in export_okf_bundle(build()).documents
         )
-    # LOG is a stored bundle's alone; OTHER is what no renderer produces.
-    assert seen == set(DOCUMENT_KINDS) - {"OTHER", "LOG"}
+    # LOG is a stored bundle's alone; OTHER is what no renderer produces; SCHEMA_INDEX_PAGE
+    # needs a schema of over a thousand entries (`tests/test_okf_schema_index_pages.py`).
+    assert seen == set(DOCUMENT_KINDS) - {"OTHER", "LOG", "SCHEMA_INDEX_PAGE"}
 
 
 def test_a_path_the_renderer_does_not_produce_is_other() -> None:
