@@ -80,15 +80,15 @@ read the deployment's secret store for the values.
 
 ## Coverage
 
-- Settings inventoried: **45** (27 destinations, 18 credential references)
-- Rows with at least one `unknown` cell: **45**
-- `unknown` cells in total: **45** (of which 45 are the `Verified` column, by construction)
+- Settings inventoried: **46** (27 destinations, 19 credential references)
+- Rows with at least one `unknown` cell: **46**
+- `unknown` cells in total: **46** (of which 46 are the `Verified` column, by construction)
 
 ### Gap list -- cells the analysis could not determine
 
 | Cell | Rows | Which |
 |---|---|---|
-| verified | 45 | every row |
+| verified | 46 | every row |
 
 ### Findings
 
@@ -105,6 +105,7 @@ read the deployment's secret store for the values.
 | `audit_archive_bucket_name` | destination | an object-store bucket, named by this setting (name not shown) | bare literal (value not shown) | yes -- names nothing | `aida.main` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | `audit_archive_enabled` defaults on | no readiness probe | unknown |
 | `audit_archive_filesystem_root` | destination | a local filesystem path | empty string | yes -- names nothing | `aida.main` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | `audit_archive_enabled` defaults on | no readiness probe | unknown |
 | `audit_hmac_key` | credential | a credential held in process configuration | placeholder literal | yes -- development placeholder | `aida.signing` | no -- the shipped default is a placeholder | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
+| `azure_openai_api_key` | credential | a credential held in process configuration | unset (None) | yes -- names nothing | `aida.model_gateway` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `database_url` | destination | `localhost:5432` over `postgresql+asyncpg` | localhost default (host only shown) | yes -- local only, not an external destination | `aida.workflows.scheduler`, `atlas.platform.db` | no external target -- localhost default only | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | probed by `/health/ready` | unknown |
 | `dq_itsm_webhook_token` | credential | a credential held in process configuration | unset (None) | yes -- names nothing | `aida.quality_service` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `dq_itsm_webhook_url` | destination | whatever the deployment supplies -- unset by default | unset (None) | yes -- names nothing | `aida.quality_service` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |

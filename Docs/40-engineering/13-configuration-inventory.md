@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**323 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
+**325 settings.** 0 are read nowhere. 75 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -113,6 +113,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
 | `anthropic_api_key` | `SecretStr | None` | `None` | 2 | Supplied: the provider credential |
 | `openrouter_api_key` | `SecretStr | None` | `None` | 1 | Supplied: the provider credential |
+| `azure_openai_api_key` | `SecretStr | None` | `None` | 1 | Supplied: R11-MP01: the Azure OpenAI resource's key, for routes naming env://AZURE_OPENAI_API_KEY |
 | `hmac_signing_vault_url` | `str | None` | `None` | 2 | Supplied: production refuses the local HMAC signer |
 | `hmac_signing_vault_token_reference` | `str` | `''` | 2 | Supplied: the signing vault credential |
 | `tokenization_vault_url` | `str | None` | `None` | 2 | Supplied: production refuses the local tokenization provider |
@@ -392,6 +393,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `gemini_base_url` | `str` | `'https://generativelanguage.googleapis.com/v1beta'` | 3 |
 | `anthropic_base_url` | `str` | `'https://api.anthropic.com/v1'` | 2 |
 | `openrouter_base_url` | `str` | `'https://openrouter.ai/api/v1'` | 2 |
+| `azure_openai_api_version` | `str` | `'2024-10-21'` | 1 |
 | `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 |
 | `openrouter_require_pinned_provider` | `bool` | `True` | 2 |
 | `model_endpoint_urls` | `dict[str, str]` | `dict` | 4 |
@@ -403,6 +405,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 |
 | `anthropic_api_key` | `SecretStr | None` | `None` | 2 |
 | `openrouter_api_key` | `SecretStr | None` | `None` | 1 |
+| `azure_openai_api_key` | `SecretStr | None` | `None` | 1 |
 | `allow_development_sql_override` | `bool` | `True` | 2 |
 | `audit_hmac_key` | `str` | `'development-only-change-me'` | 1 |
 | `hmac_signing_provider` | `Literal['local', 'vault_transit']` | `'local'` | 1 |

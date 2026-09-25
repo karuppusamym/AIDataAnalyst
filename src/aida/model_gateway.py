@@ -29,13 +29,15 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
         "OPENROUTER",
         "OPENAI_COMPATIBLE_PRIVATE",
         "ON_PREM",
+        # R11-MP01, 2026-09-25: a bank's own Azure OpenAI resource.
+        "AZURE_OPENAI",
     }
 )
 #: Provider types with no public default endpoint: a route of one of these types
 #: is callable only once `settings.model_endpoint_urls` maps its `endpoint_alias`
 #: to the bank's own URL. Falling back to some public URL would send the
 #: prompt somewhere the route's approval never named.
-PRIVATE_ENDPOINT_PROVIDERS = frozenset({"OPENAI_COMPATIBLE_PRIVATE", "ON_PREM"})
+PRIVATE_ENDPOINT_PROVIDERS = frozenset({"OPENAI_COMPATIBLE_PRIVATE", "ON_PREM", "AZURE_OPENAI"})
 #: Anthropic API version header. Pinned: the Messages API contract this adapter
 #: parses is the one this version defines.
 ANTHROPIC_API_VERSION = "2023-06-01"
@@ -642,6 +644,24 @@ class OpenAICompatibleChatProvider:
         self.client = client
         self.provider_type = provider_type
 
+    def _chat_url(self, route: ApprovedModelRoute) -> str:
+        """The chat-completions URL. Azure OpenAI addresses a *deployment* -- the route's
+        `model_id` names it -- under the bank's own resource, with the pinned API version."""
+        base_url = self._base_url(route).rstrip("/")
+        if self.provider_type == "AZURE_OPENAI":
+            deployment = quote(route.model_id, safe="-_.")
+            version = quote(self.settings.azure_openai_api_version, safe="-_.")
+            return (
+                f"{base_url}/openai/deployments/{deployment}/chat/completions"
+                f"?api-version={version}"
+            )
+        return f"{base_url}/chat/completions"
+
+    def _headers(self, credential: str) -> dict[str, str]:
+        if self.provider_type == "AZURE_OPENAI":
+            return {"api-key": credential, "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+
     def _base_url(self, route: ApprovedModelRoute) -> str:
         if self.provider_type == "OPENROUTER":
             return _resolve_endpoint_base_url(
@@ -666,7 +686,7 @@ class OpenAICompatibleChatProvider:
         schema_name: str,
         max_output_tokens: int,
     ) -> ProviderCompletion:
-        base_url = self._base_url(route)
+        url = self._chat_url(route)
         body: dict[str, Any] = {
             "model": route.model_id,
             "messages": [
@@ -692,11 +712,8 @@ class OpenAICompatibleChatProvider:
         client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
         response = await post_with_retry(
             client=client,
-            url=f"{base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {credential}",
-                "Content-Type": "application/json",
-            },
+            url=url,
+            headers=self._headers(credential),
             body=body,
             attempts=self.settings.model_provider_max_attempts,
         )
@@ -744,6 +761,7 @@ def build_model_providers(settings: Settings) -> dict[str, StructuredModelProvid
             settings, provider_type="OPENAI_COMPATIBLE_PRIVATE"
         ),
         "ON_PREM": OpenAICompatibleChatProvider(settings, provider_type="ON_PREM"),
+        "AZURE_OPENAI": OpenAICompatibleChatProvider(settings, provider_type="AZURE_OPENAI"),
     }
 
 
@@ -824,6 +842,7 @@ def _resolve_model_credential(reference: str, settings: Settings, resolver: Secr
         "env://GEMINI_API_KEY": settings.gemini_api_key,
         "env://ANTHROPIC_API_KEY": settings.anthropic_api_key,
         "env://OPENROUTER_API_KEY": settings.openrouter_api_key,
+        "env://AZURE_OPENAI_API_KEY": settings.azure_openai_api_key,
     }
     configured = local_keys.get(reference)
     if configured is not None:

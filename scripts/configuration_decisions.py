@@ -178,6 +178,10 @@ DECISIONS: dict[str, tuple[str, str]] = {
         OPT_IN,
         "needs Redis, like the MCP and GraphQL budgets; the model-token quota bounds spend without it",
     ),
+    "azure_openai_api_key": (
+        SUPPLIED,
+        "R11-MP01: the Azure OpenAI resource's key, for routes naming env://AZURE_OPENAI_API_KEY",
+    ),
     "source_query_concurrency_enabled": (
         OPT_IN,
         "R11-MP25: needs Redis; the per-process line-of-business bound applies without it",

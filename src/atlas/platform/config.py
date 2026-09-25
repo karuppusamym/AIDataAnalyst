@@ -1135,6 +1135,10 @@ class Settings(BaseSettings):
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     anthropic_base_url: str = "https://api.anthropic.com/v1"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # R11-MP01: Azure OpenAI has no public default -- a route's alias must map to the bank's
+    # own resource in `model_endpoint_urls` -- and every call names this API version, the
+    # first GA version with structured outputs.
+    azure_openai_api_version: str = "2024-10-21"
     # R11-MP01: OpenRouter forwards a request to whichever upstream provider it
     # picks, which is a residency decision nobody approved. Keyed by a route's
     # `endpoint_alias`, the upstream providers that route may use, in preference
@@ -1166,6 +1170,9 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     openrouter_api_key: SecretStr | None = Field(
         default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    azure_openai_api_key: SecretStr | None = Field(
+        default=None, validation_alias="AZURE_OPENAI_API_KEY"
     )
     allow_development_sql_override: bool = True
     audit_hmac_key: str = "development-only-change-me"
