@@ -118,7 +118,7 @@ mako==1.4.1
     # via alembic
 markupsafe==3.0.3
     # via mako
-neo4j==5.28.2
+neo4j==6.3.1
     # via bank-data-intelligence-platform
 nexus-rpc==1.4.0
     # via temporalio
