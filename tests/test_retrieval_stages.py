@@ -352,3 +352,160 @@ def test_hits_keep_their_public_shape() -> None:
         "reason_codes",
         "metadata",
     }
+
+
+async def _ungoverned(_session: object, _settings: object, **kwargs: object) -> object:
+    """The provider the call site resolved, with no governance around it."""
+    return kwargs["inner"]
+
+
+async def test_vector_channel_ranks_nothing_when_nothing_is_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty authorized set is the policy filter's answer, not an absent filter.
+
+    `search_persisted_index(candidates=None)` means "no candidate filter" and
+    ranks the whole organization's index. The stage used to pass
+    `candidates=refs or None`, so a caller authorized for nothing got the
+    estate's top-N semantic hits back -- policy applied before ranking, then
+    discarded by a falsy empty tuple.
+    """
+    from aida import retrieval_stages as stages
+    from aida import vector_index_service
+    from aida.vector_index_service import IndexFreshness
+
+    recorded: dict[str, object] = {}
+
+    class _Batch:
+        vectors = ([0.1, 0.2],)
+
+    class _Provider:
+        async def embed(self, texts: list[str]) -> _Batch:
+            return _Batch()
+
+    async def _fresh(session: object, organization_id: object, **kwargs: object) -> IndexFreshness:
+        return IndexFreshness(
+            usable=True,
+            reason="FRESH",
+            entries=1_000,
+            signature="sig",
+            built_at=None,
+            age_minutes=1.0,
+        )
+
+    async def _search(session: object, organization_id: object, query: object, **kwargs: object):
+        recorded["candidates"] = kwargs.get("candidates")
+        return ()
+
+    monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
+    # R11-MP15: this test is about ranking, not governance; the governed
+    # wrapper reads the database, which this session-less test has none of.
+    monkeypatch.setattr(stages, "governed_embedding_provider", _ungoverned)
+    monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
+    monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
+
+    result = await stages.run_vector_channel(
+        None,  # type: ignore[arg-type]
+        _request(),
+        CandidatePool(authorized=[], candidates={}),
+    )
+
+    assert recorded["candidates"] == ()
+    assert result.contributions == []
+
+
+async def test_a_candidate_the_index_does_not_cover_still_gets_a_vector_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-B2: the persisted index covers TABLE, COLUMN and GLOSSARY_TERM only.
+
+    A `GOVERNED_TOOL` candidate has no index entry, so the persisted search
+    cannot score it -- and it used to leave this stage with no vector signal at
+    all while the live path scored it, reported as `PERSISTED_INDEX / USABLE`
+    with nothing saying a whole candidate class had been dropped. Measured on
+    the AG-8 corpus that cost 6 points of recall-within-bound.
+
+    The assertion is about the *tool*, not the table: an index that covers the
+    table is working as designed, and this test exists only because the
+    candidate it does not cover was silently losing its score.
+    """
+    from aida import retrieval_stages as stages
+    from aida import vector_index_service
+    from aida.vector_index_service import IndexFreshness
+
+    table_id = str(uuid4())
+    tool_id = str(uuid4())
+    authorized = [
+        HybridRetrievalHit(
+            object_type="TABLE",
+            object_id=table_id,
+            display_name="fact_account_balances",
+            score=0.9,
+            reason_codes=("lexical",),
+            metadata={},
+        ),
+        HybridRetrievalHit(
+            object_type="GOVERNED_TOOL",
+            object_id=tool_id,
+            display_name="customer-account-summary",
+            score=0.8,
+            reason_codes=("lexical",),
+            metadata={},
+        ),
+    ]
+
+    class _Batch:
+        def __init__(self, count: int) -> None:
+            self.vectors = tuple([0.1, 0.2] for _ in range(count))
+
+    embedded: list[list[str]] = []
+
+    class _Provider:
+        async def embed(self, texts: list[str]) -> _Batch:
+            embedded.append(list(texts))
+            return _Batch(len(texts))
+
+    async def _fresh(session: object, organization_id: object, **kwargs: object) -> IndexFreshness:
+        return IndexFreshness(
+            usable=True,
+            reason="USABLE",
+            entries=10,
+            signature="sig",
+            built_at=None,
+            age_minutes=1.0,
+        )
+
+    async def _search(session: object, organization_id: object, query: object, **kwargs: object):
+        # The index knows the table and has never heard of the tool.
+        return (("TABLE", table_id, 0.77),)
+
+    async def _nothing_stale(*args: object, **kwargs: object) -> set[tuple[str, str]]:
+        # R11-FP08: the table's stored entry encodes its current text. This test is about the
+        # uncovered *type*; a stale entry is `test_vector_routine_descriptions`'s subject.
+        return set()
+
+    monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
+    # R11-MP15: this test is about ranking, not governance; the governed
+    # wrapper reads the database, which this session-less test has none of.
+    monkeypatch.setattr(stages, "governed_embedding_provider", _ungoverned)
+    monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
+    monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
+    monkeypatch.setattr(vector_index_service, "stale_index_entries", _nothing_stale)
+
+    result = await stages.run_vector_channel(
+        None,  # type: ignore[arg-type]
+        _request(),
+        CandidatePool(authorized=authorized, candidates={}),
+    )
+
+    scored_ids = {contribution.object_id for contribution in result.contributions}
+    assert tool_id in scored_ids, (
+        "the governed tool left the vector stage with no score; the persisted index "
+        "does not cover GOVERNED_TOOL and the stage must embed what it cannot look up"
+    )
+    assert table_id in scored_ids
+    # Two calls, not one batch of everything: the question is embedded for the
+    # index search, then only the uncovered candidates. Embedding every
+    # candidate again would throw away the saving the index exists for.
+    assert len(embedded) == 2
+    assert embedded[1] == ["GOVERNED_TOOL customer-account-summary"]

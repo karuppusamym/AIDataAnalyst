@@ -1,0 +1,41 @@
+{
+  "description": "R11-B2 execution-match corpus. Each case is a question Ask is expected to answer by model generation against the Customer Master sample datasource, and a gold SQL statement whose result set is the correct answer. Scoring runs both through the same governed gateway and compares result sets, not SQL text: two different queries that return the same rows are both right. Questions avoid the one governed tool's wording (branch lookups) so generation is what answers them, and gold SQL avoids masked columns (email, card last4) so masking cannot make a comparison trivially equal or unequal. Expected results are deliberately not stored here: gold SQL is executed live at scoring time, so this file holds no source values (ADR-0014).",
+  "datasource_name_prefix": "Customer Master",
+  "cases": [
+    {
+      "id": "customer-count",
+      "question": "How many customers are there in total?",
+      "gold_sql": "SELECT count(*) AS customer_count FROM customer.customer"
+    },
+    {
+      "id": "active-customer-count",
+      "question": "How many customers are currently active?",
+      "gold_sql": "SELECT count(*) AS active_customers FROM customer.customer WHERE is_active = true"
+    },
+    {
+      "id": "accounts-per-type",
+      "question": "How many accounts are there of each account type?",
+      "gold_sql": "SELECT account_type, count(*) AS account_count FROM customer.account GROUP BY account_type"
+    },
+    {
+      "id": "balance-by-currency",
+      "question": "What is the total current balance of all accounts for each currency?",
+      "gold_sql": "SELECT currency_code, sum(current_balance) AS total_balance FROM customer.account GROUP BY currency_code"
+    },
+    {
+      "id": "open-account-count",
+      "question": "How many accounts have not been closed?",
+      "gold_sql": "SELECT count(*) AS open_accounts FROM customer.account WHERE closed_at IS NULL"
+    },
+    {
+      "id": "cards-per-network",
+      "question": "How many cards are there for each card network?",
+      "gold_sql": "SELECT card_network, count(*) AS card_count FROM customer.card GROUP BY card_network"
+    },
+    {
+      "id": "accounts-per-customer",
+      "question": "How many accounts does each customer have?",
+      "gold_sql": "SELECT customer_id, count(*) AS account_count FROM customer.account GROUP BY customer_id"
+    }
+  ]
+}

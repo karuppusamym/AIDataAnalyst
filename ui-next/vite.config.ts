@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { resolveDemoData } from "./src/lib/demoDataMode";
 
 // `@types/node` is intentionally not part of this browser-only TypeScript
 // project. Vite's config does run in Node, so read its environment through a
@@ -10,12 +11,56 @@ const runtimeEnvironment = (
   }
 ).process?.env;
 
+/* HTTPS for the dev server, opt-in. The Excel add-in's pages must be served
+   over HTTPS -- Office refuses a plain-HTTP task pane, localhost included -- so
+   `VITE_DEV_HTTPS_CERT` / `VITE_DEV_HTTPS_KEY` name a certificate and key the
+   developer created and trusted themselves (`ui-next/excel-addin/README.md`).
+   Unset, the dev server stays on plain HTTP exactly as before, which is what
+   the in-app browser preview expects. The files are read through a non-literal
+   dynamic import for the same reason `runtimeEnvironment` is narrowly typed:
+   this browser-only project does not carry `@types/node`. */
+async function devHttps(): Promise<{ cert: string; key: string } | undefined> {
+  const certPath = runtimeEnvironment?.VITE_DEV_HTTPS_CERT;
+  const keyPath = runtimeEnvironment?.VITE_DEV_HTTPS_KEY;
+  if (!certPath || !keyPath) return undefined;
+  const specifier = "node:fs/promises";
+  const fs = (await import(/* @vite-ignore */ specifier)) as {
+    readFile(path: string, encoding: "utf8"): Promise<string>;
+  };
+  return { cert: await fs.readFile(certPath, "utf8"), key: await fs.readFile(keyPath, "utf8") };
+}
+
 // The API runs as a modular monolith on :8000. In dev we proxy rather than turn
 // on CORS server-side, so the browser sees one origin and cookie/OIDC behaviour
 // matches production, where nginx serves the SPA and the API from one host.
-export default defineConfig({
+export default defineConfig(async ({ mode }) => ({
   plugins: [react()],
+  /* Settle the demo/live question here, in Node, and hand the client a literal
+     (review 2026-09-11, R11-X1).
+
+     Vite substitutes only the `VITE_*` keys it was actually given, so an
+     *unset* `import.meta.env.VITE_USE_FIXTURES` survives into the bundle as a
+     property read on a runtime object -- which no amount of tree-shaking can
+     fold. Defining the key unconditionally makes it a string literal in every
+     module, and that is the entire mechanism by which `api/transport.ts` can
+     shed its `import("../fixtures")` and Rollup can drop `lib/fixtures.ts`
+     (~340 kB, a third of the shipped JavaScript) along with it.
+
+     The define deliberately overrides whatever the ambient environment holds:
+     `resolveDemoData` has already read that value and applied the mode default
+     to it, so there is one answer rather than two spellings of the question
+     that could disagree. */
+  define: {
+    "import.meta.env.VITE_USE_FIXTURES": JSON.stringify(
+      resolveDemoData(mode, {
+        VITE_USE_FIXTURES: runtimeEnvironment?.VITE_USE_FIXTURES,
+      })
+        ? "1"
+        : "0",
+    ),
+  },
   server: {
+    https: await devHttps(),
     // `VITE_API_PROXY_TARGET` lets the same configuration work on the host
     // (`localhost`) and inside the Docker development network (`api`).
     // Bind explicitly so Docker can publish the dev server, and use polling
@@ -43,7 +88,23 @@ export default defineConfig({
           runtimeEnvironment?.VITE_API_PROXY_TARGET ?? "http://localhost:8000",
         changeOrigin: true,
       },
+      "/graphql": {
+        target:
+          runtimeEnvironment?.VITE_API_PROXY_TARGET ?? "http://localhost:8000",
+        changeOrigin: true,
+      },
     },
   },
-  build: { outDir: "dist", sourcemap: true },
-});
+  build: {
+    outDir: "dist",
+    sourcemap: true,
+    rollupOptions: {
+      // The shell, plus the two pages the Excel add-in loads inside Office.
+      input: {
+        main: "index.html",
+        excelAddin: "excel-addin.html",
+        excelAddinAuth: "excel-addin-auth.html",
+      },
+    },
+  },
+}));

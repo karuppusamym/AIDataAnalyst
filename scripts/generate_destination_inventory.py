@@ -86,6 +86,38 @@ DEFAULT_OUTPUT = REPO_ROOT / "Docs" / "50-security" / "destination-and-credentia
 CONFIG_MODULE = SRC_ROOT / "atlas" / "platform" / "config.py"
 READINESS_MODULE = SRC_ROOT / "aida" / "readiness.py"
 
+#: Modules `aida.readiness` imports that must NOT make their settings count as
+#: health-probed, by the leaf-name rule in `ReadinessScope`.
+#:
+#: * `atlas.platform.config` is imported by everything, `readiness` included, and
+#:   its own validators reference most of the settings in this table. Counting
+#:   those as "a readiness probe reads this" reported `oidc_issuer` and
+#:   `openai_base_url` as health-probed, which is nonsense; the module that
+#:   DEFINES the settings is excluded.
+#: * `aida.delivery_intents` arrived with R11-B10's delivery-backlog probe. That
+#:   probe observes the **ledger** -- queue depth, dead letters, the age of the
+#:   oldest undelivered row -- and observes no destination at all. Without this
+#:   exclusion the inventory reported `slack_webhook_url` and `teams_webhook_url`
+#:   as probed by `/health/ready`, contradicting B10's own finding that delivery
+#:   to a real Slack or Teams endpoint remains unverified. A queue being
+#:   watched is not its destinations being watched.
+#: * `aida.model_route_health` arrived with R11-B18 and is the subtler case,
+#:   because it really does contact the provider -- just never from this
+#:   endpoint. `/health/ready` calls `unreachable_route_summary`, which reads
+#:   the verdict already **recorded** in the database and deliberately makes no
+#:   provider call, precisely so a readiness scrape cannot be made slow or
+#:   expensive by a third party. The listing lives in the scheduled sweep.
+#:   Without this exclusion the inventory reported `gemini_base_url`,
+#:   `openai_base_url` and both provider keys as probed by `/health/ready`,
+#:   which would credit the endpoint with a check it does not perform.
+#:   Reporting a stored verdict is not taking a measurement.
+NOT_EVIDENCE_OF_A_PROBE = {
+    CONFIG_MODULE,
+    SRC_ROOT / "aida" / "config.py",
+    SRC_ROOT / "aida" / "delivery_intents.py",
+    SRC_ROOT / "aida" / "model_route_health.py",
+}
+
 UNKNOWN = "unknown"
 
 # --- Which fields are in scope ---------------------------------------------
@@ -425,12 +457,7 @@ def readiness_scope() -> ReadinessScope:
             if not base.startswith(("aida", "atlas")):
                 continue
             candidate = SRC_ROOT / Path(*base.split(".")).with_suffix(".py")
-            # `atlas.platform.config` is imported by everything, `readiness`
-            # included, and its own validators reference most of the settings in
-            # this table. Counting those references as "a readiness probe reads
-            # this" reported `oidc_issuer` and `openai_base_url` as health-probed,
-            # which is nonsense; the module that DEFINES the settings is excluded.
-            if candidate in {CONFIG_MODULE, SRC_ROOT / "aida" / "config.py"}:
+            if candidate in NOT_EVIDENCE_OF_A_PROBE:
                 continue
             leaves.add(base.rsplit(".", 1)[-1])
             if candidate.is_file():
@@ -454,7 +481,7 @@ def enabling_flag(name: str, boolean_fields: dict[str, bool]) -> tuple[str, bool
     """The longest-prefix boolean switch that gates this destination.
 
     `siem_endpoint` -> `siem_enabled`; `audit_archive_bucket_name` ->
-    `audit_archive_enabled`; `dq_itsm_webhook_url` -> `dq_itsm_webhook_enabled`.
+    `audit_archive_enabled`.
     Longest prefix wins so `audit_archive_*` is not matched by a shorter,
     unrelated `audit_*` flag.
     """
@@ -616,6 +643,13 @@ def render(rows: list[Row]) -> str:
         "- `Healthy` says a probe observes the destination. It does NOT say the probe",
         "  gates: per F18, PostgreSQL is the only required probe; Temporal is",
         "  reported and never gating.",
+        "- `Healthy` is about what the endpoint observes **when it is scraped**. A",
+        "  destination checked on a cadence by a background pass, whose verdict",
+        "  `/health/ready` then reports from storage, reads as `no readiness probe`",
+        "  here -- correctly for this column, and not the same as unwatched. Reading",
+        "  a recorded verdict is not taking a measurement, and conflating the two",
+        "  would let a sweep that stopped running months ago still look like a live",
+        "  probe.",
         "- A destination reached through a dynamically-built string, or configured",
         "  per-organization in a database row rather than in `Settings`, is not a",
         "  field on this model and is therefore not in this table.",

@@ -3,34 +3,47 @@
 > Status: Authoritative **as a target naming scheme**. Owner: Architecture.
 > The named set of domain events Atlas publishes. Adding an event means adding a row here.
 
-> **Implementation status (2026-08-30). Most event names in §2 are not the names the code
-> emits.** Verified by extracting every `event_type=` argument passed to `record_outbox` across
-> `src/aida/` and comparing it to this catalog:
+> **Implementation status (2026-09-20).** **Many event names in §2 are not the names the code
+> emits.** Re-verified 2026-09-20 by extracting every `event_type=` argument passed to
+> `record_outbox` across `src/` (the scanner in `tests/event_catalog_lib.py`, which the CI gate
+> below also uses) and comparing it to this catalog:
 >
-> * The platform emits **~55 event types, all suffixed `.v1`** — e.g.
+> * The platform passes **129 distinct literal event types** to `record_outbox` as of 2026-09-20,
+>   plus 13 call sites whose type is computed (a helper, a table lookup or an f-string) and so
+>   cannot be read statically. All but ten are suffixed `.v1` — e.g.
 >   `datasource.registered.v1`, `metadata.discovery.snapshot.v1`, `query.execution.completed.v1`,
 >   `context.product_consumed.v1`, `relationship_candidate.approved.v1` /
 >   `relationship_candidate.rejected.v1` (RL-4, 2026-08-30: split from a single
 >   `relationship_candidate.decided.v1` because the graph projector already listened for
 >   these two distinct names and they never matched — decided candidates were silently
 >   never projected to Neo4j),
->   `governance.review_requested.v1`, `workspace.created.v1`.
-> * **Most rows below match nothing in the code.** Spot-checked and absent:
->   `principal.created`, `tenant.created`, `ingestion.delivered`, `catalog.object.created`,
->   `catalog.object.changed`, `profile.completed`, `classification.assigned`, `key.inferred`,
+>   `governance.review_requested.v1`, `workspace.created.v1`. The ten literals without the suffix
+>   are `classification.assigned`, `contract.violations_detected`,
+>   `data_quality.incident_opened`, `data_quality.incident_resolved`, `delegation.granted`,
+>   `delegation.revoked`, `model.kill_switch_engaged`, `model.kill_switch_released`,
+>   `studio.change_set.submitted` and `tool_plan.execution_completed`.
+> * **The catalog is a superset of what is emitted, on purpose.** Every emitted literal has a
+>   row (none is undocumented), but of the 279 event names in this file only 129 are emitted
+>   literally; 51 more appear only as strings inside helper code, and 99 appear nowhere in
+>   `src/`. Those rows are the target vocabulary and are kept. Spot-checked and absent as of
+>   2026-09-20: `principal.created`, `tenant.created`, `ingestion.delivered`,
+>   `catalog.object.created`, `catalog.object.changed`, `profile.completed`, `key.inferred`,
 >   `relationship.candidate_generated`, `relationship.approved`, `table_family.detected`,
 >   `semantic.proposal_created`, `lineage.edge_created`, `quality.observation_recorded`,
 >   `quality.sla_breached`, `agent.run_started`, `execution.requested`,
->   `model.route_version_created`, `model.kill_switch_engaged`, `policy.version_published`,
->   `audit.event_recorded`, `graph.rebuild.started`, `retrieval.index_lagging`.
+>   `model.route_version_created`, `policy.version_published`, `audit.event_recorded`,
+>   `graph.rebuild.started`, `retrieval.index_lagging`.
 > * **The Semantics-and-glossary section is the exception** and is broadly accurate: its `.v1`
 >   rows were written against the code and match it.
 > * **Topics are wrong.** All eight `atlas.*.v1` topic headings below are target. Everything
 >   goes to the single topic `aida.platform.events.v1`, with the event type in a Kafka header
 >   (`src/aida/projectors/outbox_publisher.py`).
-> * **"publishing an uncatalogued event fails CI" is false.** There is no such check;
->   `.github/workflows/ci.yml` runs `ruff`, `mypy`, `lint-imports`, an Alembic head check and
->   `pytest`. The same applies to step 3 and the closing line of §3 below.
+> * **Publishing an uncatalogued event does fail CI, for a literal `event_type=`.** This bullet
+>   said the opposite on 2026-08-30. The `pytest` run in `.github/workflows/ci.yml` includes
+>   `tests/test_event_catalog_gate.py` (ST-14 / TS-11, see below), which fails on any literal
+>   `event_type=` passed to `record_outbox` that has no row here. It cannot check the 13
+>   computed call sites, and it does not check payloads. Step 3 of §3 below (a schema registry) is
+>   still target.
 >
 > **ST-14 update (2026-09-01): reconciled.** The two directions above are now joined. The
 > "restate the catalog" resolution (U2) was chosen — consumers key on the emitted `.v1` names,
@@ -44,12 +57,14 @@
 
 Every event carries the same envelope (see `10-architecture/07-event-and-messaging-model.md` §4). Payload shapes vary; the envelope never does.
 
-**Payload rules, enforced at publish:**
+**Payload rules (the design; the note below says what runs today):**
 
 - No source business values (INV-6).
 - No credentials or secret material.
 - Bounded size.
 - Tenancy fields mandatory.
+
+> **Implementation status (2026-09-20).** No validator enforces these rules at publish. `record_outbox` (`src/aida/events.py`) only adds an `OutboxEvent` row to the caller's session: it checks no payload, sets no size bound, and `organization_id` is nullable, so an event can be published with no tenancy field. The publisher (`src/aida/projectors/outbox_publisher.py`) relays the row as-is in an envelope of `event_id`, `event_type`, `aggregate_type`, `aggregate_id`, `organization_id`, `occurred_at` and `payload`; there is no `event_version` field, and the version is the `.v1` suffix in most event-type names.
 
 ## 2. Catalog
 
@@ -168,8 +183,15 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `glossary.link_proposal_approved.v1` / `.link_proposal_rejected.v1` | Governed inferred-link decision | proposal_id, table_id, term_id, review_id |
 | `ownership.assigned.v1` | Approved bulk/rule ownership applied | operation_id, subject_type, applied_count |
 | `glossary.term_linked_bulk.v1` | Approved bulk term links applied | operation_id, term_id, applied_count |
+| `glossary.term_unlinked_bulk.v1` | AR-11: an approved reversal of a bulk term-link operation was applied, removing exactly the links that operation created (`applied_subject_ids`), never links that predated it. Raised by `stewardship_service.request_bulk_operation_reversal`, often from a DISAGREED reviewer-agent sample; the operation carries `reverses_operation_id` and is therefore T2, so no agent may decide it | operation_id, operation_type, subject_count, applied_count, review_id |
 | `glossary.term_deprecated.v1` | Approved term deprecation applied | operation_id, applied_count |
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
+| `certification.withdrawn_bulk.v1` | AR-11: an approved reversal of a bulk certify operation was applied. The certifications it granted move to `WITHDRAWN` -- deliberately not `REVOKED`, which `asset_usage_decision` reads as a standing refusal (BLOCKED); a retracted certification leaves the asset *uncertified*, and the catalog projection reports it as `NONE`. What the original superseded is not resurrected | operation_id, operation_type, subject_count, applied_count, review_id |
+| `catalog.asset_tag.restored.v1` | R11-C8: an approved reversal of a bulk TAG operation was applied. Each tag the original overwrote gets back the value and author it held (its before-image), and a tag the original created is removed; a tag a person has changed since the original is skipped rather than overwritten. Refused for an operation applied before before-images were recorded. T2 like every reversal, so no agent may decide it | operation_id, operation_type, subject_count, applied_count, review_id |
+| `catalog.column.classification_restored.v1` | R11-C8: an approved reversal of a bulk CLASSIFY operation was applied. Each column the original reclassified gets back exactly its prior classification, UNCLASSIFIED included; a column changed since the original is skipped. Refused for an operation applied before before-images were recorded. T2 like every reversal | operation_id, operation_type, subject_count, applied_count, review_id |
+| `ownership.assignment_withdrawn_bulk.v1` | R11-C8: an approved reversal of a bulk ASSIGN_OWNERSHIP operation was applied. An assignment the original created moves to `WITHDRAWN` -- retained as evidence of who was named, never read as the owner -- and one it reactivated gets back its prior status, assigner, expiry and warning stamp. An assignment reaffirmed, lapsed or reassigned since is skipped. Refused for an operation applied before before-images were recorded. T2 like every reversal | operation_id, operation_type, subject_count, applied_count, review_id |
+| `glossary.term_restored.v1` | R11-C8: an approved reversal of a bulk DEPRECATE_TERM operation was applied. Each term gets back its prior lifecycle and deprecation fields, and exactly the versions the original moved from APPROVED to DEPRECATED are APPROVED again; a version deprecated before the original is left alone, and a term re-deprecated or reinstated since is skipped. Term links the reaper removed in the meantime are not restored. T2 like every reversal | operation_id, operation_type, subject_count, applied_count, review_id |
+| `ownership.leaver_reassignment_reversed.v1` | R11-C8: an approved reversal of a bulk REASSIGN_LEAVER operation was applied. The leaver's assignments return to `ACTIVE` -- deliberately, since that is what each subject held -- and a successor assignment the original created moves to `WITHDRAWN`, while one it reactivated gets back its prior status and assigner. Skipped where either row has moved on since. T2 like every reversal | operation_id, operation_type, subject_count, applied_count, review_id |
 | `ownership.leaver_reassigned.v1` | Approved leaver-reassignment bulk operation applied | operation_id, applied_count |
 | `ownership.assignment.expiry_warning.v1` | An ownership assignment is inside its expiry-warning window, emitted once per cooldown so the owner can reaffirm before it lapses | assignment_id, notify_principal, expires_at, days_until |
 | `ownership.assignment.lapsed.v1` | An ownership assignment passed its `expires_at` without being reaffirmed and was flipped to LAPSED; routed for reassignment when it was the subject's last owner | assignment_id, subject_type, subject_id, was_last_owner |
@@ -188,10 +210,11 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `stewardship.unowned_asset_escalated_tier2.v1` | Backlog entry still unaddressed after tier-1 escalation; opened as an ITSM ticket unconditionally (GL-6) | table_id |
 | `stewardship.unowned_asset_resolved.v1` | Backlog entry resolved (ownership since assigned) | table_id |
 | `asset_description.approved.v1` / `.rejected.v1` | Governed description-draft decision | draft_id, table_id, overall_score, published_version_id, review_id |
+| `routine_description.approved.v1` / `.rejected.v1` | Governed decision on one routine description draft -- from the routine description workflow, or (with `origin` `OKF_IMPORT`) from an edited OKF bundle's routine purpose. `published_version_id` is set only on approval | draft_id, routine_id, datasource_id, overall_score, published_version_id, review_id, origin (import only) |
 | `model_import.submitted.v1` | An uploaded model workbook entered the review queue as one batch | batch_id, datasource_id, review_id, change_count |
-| `model_import.applied.v1` / `.rejected.v1` | Governed decision on one workbook import batch. `applied_count` can be lower than `change_count`: a change superseded between export and approval is skipped, not applied | batch_id, datasource_id, filename, content_sha256, change_count, applied_count, skipped_count, review_id |
+| `model_import.applied.v1` / `.rejected.v1` | Governed decision on one workbook import batch. `applied_count` can be lower than `change_count`: a change superseded between export and approval is skipped, not applied. Since R11-C8 the batch may be a reversal of an applied one (`reverses_batch_id`), raised from a disputed reviewer-agent decision: its changes put back what the reversed batch replaced | batch_id, datasource_id, filename, content_sha256, change_count, applied_count, skipped_count, review_id, reverses_batch_id |
 | `description.withdrawal.requested.v1` | A steward asked for an approved table or column description to be retired. Nothing is un-published yet | withdrawal_id, subject_type, subject_id, review_id |
-| `description.withdrawal.approved.v1` / `.rejected.v1` | Governed decision on a withdrawal. Approval moves the version to `WITHDRAWN`, preserving its text | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
+| `description.withdrawal.approved.v1` / `.rejected.v1` | Governed decision on a withdrawal of a table or column description or, since R11-C8, a business annotation (`subject_type` `ANNOTATION`). Approval moves the version to `WITHDRAWN`, preserving its content | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
 | `description.withdrawal.superseded.v1` | The withdrawal was approved, but a newer version had been published since it was raised, so nothing was retired | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
 | `description.reinstatement.approved.v1` / `.rejected.v1` | Governed decision on bringing a withdrawn description back. Approval republishes the retired text as a **new** version; the withdrawn row is never flipped back, so the chain still records that it was retired | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
 | `description.reinstatement.superseded.v1` | The reinstatement was approved, but the asset had been described again since it was raised, so nothing was republished | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
@@ -219,6 +242,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `quality.incident_acknowledged` / `.resolved` | Operator action | incident_id, actor, rationale_ref |
 | `quality.incident_auto_recovered` | Signal normalized | incident_id |
 | `quality.sla_breached` | SLA missed | sla_id, table_id |
+| `data_quality.freshness.evaluated.v1` | R11-B8: a scheduled freshness sweep evaluated one datasource's watermark contracts and settled the incidents they imply | datasource_id, contracts_evaluated, incidents_opened, incidents_updated, incidents_resolved, truncated |
 | `data_quality.freshness_config.changed.v1` | Watermark freshness config created or updated for a table | datasource_id, table_id, watermark_column |
 | `data_quality.freshness_config.approved.v1` | DQ-2: a maker-checker approval activated a table's freshness watermark config (moves it out of PENDING_APPROVAL) | datasource_id, table_id |
 | `data_quality.rule_pack.created.v1` | DQ-4: a custom quality rule pack created | datasource_id, name |
@@ -273,6 +297,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `context.budget_exceeded` | Consumer budget hit | consumer, period |
 | `context.product_draft_created.v1` | New context product version drafted | context_product_id, context_product_version_id, version |
 | `context.product_compiled.v1` | Context product compiled for a target consumer surface | context_product_version_id, target, artifact_hash |
+| `context.okf_bundle_exported.v1` | OKF v0.2 bundle rendered from a frozen content snapshot of a context product version, inspected or downloaded (R11-OKF01) | context_product_version_id, bundle_content_digest, documents, channel |
+| `datasource.okf_bundle_exported.v1` | A stored OKF v0.2 source bundle -- one datasource's discovered, authorized objects -- inspected, downloaded, read by document or publication history, read as the Catalog's document about one object, or selected from for a question (R11-OKF02) | datasource_id (aggregate), bundle_content_digest, documents, channel, publication_id |
 | `context.product_tool_consumed.v1` | Governed tool invoked while scoped to a published context product | product_key, version, tool_version_id, principal_id |
 | `context.product_consumer_binding_set.v1` | Consumer pinned (or moved) to a specific version for staged rollout (AT-7b) | product_key, consumer_principal_id, bound_version |
 | `context.product_consumer_binding_removed.v1` | Consumer unpinned; falls back to the current published version (AT-7b) | product_key, consumer_principal_id |
@@ -297,6 +323,8 @@ and carry no actions: a notification here is never a control surface.
 | `agent.kill_switch_engaged.v1` | AG-10: an agent's kill switch was engaged. Takes effect on the agent's very next run -- the orchestrator queries the switch live rather than caching it | ai_asset_version_id, kill_scope, agent_principal_id |
 | `agent.kill_switch_released.v1` | AG-10: an agent's kill switch was released and its runs may resume | ai_asset_version_id, kill_scope, agent_principal_id |
 | `reviewer_agent.sample_resolved.v1` | ADR-0027 condition (b): a human resolved one sampled agent decision. The DISAGREED rate per object type is the metric ADR-0027's revisit trigger watches | sample_id, human_outcome, object_type, risk_tier |
+| `reviewer_agent.audit_backlog_exceeded.v1` | AR-11: the reviewer agent refused a run because its unread audit sample had reached `reviewer_agent_max_unresolved_samples`. Recorded after the refused run's rollback, beside a DENIED `reviewer_agent.run` audit row and a `REVIEWER_AGENT_AUDIT_BACKLOG` notification. The agent resumes by itself once humans bring the backlog under the bound | unresolved_samples, max_unresolved_samples |
+| `reviewer_agent.sample_age_exceeded.v1` | AR-11: the reviewer agent refused a run because its *oldest* unread sample had been waiting `reviewer_agent_max_sample_age_hours` or longer. The count bound above and this one fail differently -- a small queue nobody ever drains stays inside the count bound forever -- so they are separate events, though both share the DENIED `reviewer_agent.run` audit row and the `REVIEWER_AGENT_AUDIT_BACKLOG` notification. The agent resumes by itself once the oldest sample is resolved | oldest_pending_hours, max_sample_age_hours |
 
 ### AI registry — topic `atlas.governance.v1`
 
@@ -314,6 +342,20 @@ and carry no actions: a notification here is never a control surface.
 | `data_product.draft_created.v1` | New data product version drafted | data_product_id, version |
 | `data_product.access_requested.v1` | Maker-checker access request created for a published product version | review_id, data_product_version_id |
 | `data_product.access_revoked.v1` | Access entitlement revoked | data_product_version_id |
+| `data_product.entitlement_pending.v1` | Fulfilment staged and not yet acknowledged — `webhook` provider only, and the grant still denies while it sits here | action, provider |
+| `data_product.entitlement_provisioned.v1` | Fulfilment succeeded; this is the transition after which the grant actually permits consumption | action, provider |
+| `data_product.entitlement_revoked.v1` | Revocation fulfilled. Distinct from `data_product.access_revoked.v1` above, which records the *decision* to revoke — this one records that the revocation took effect | action, provider |
+| `data_product.entitlement_failed.v1` | Fulfilment gave up (delivery dead-lettered or discarded). The grant does not permit consumption | action, provider |
+
+The four `data_product.entitlement_*.v1` names are built by
+`aida.entitlements.entitlement_event_type` from the fulfilment status rather
+than written as literals, so `tests/test_event_catalog_gate.py` cannot resolve
+them statically and did not force this row. They are documented here because a
+consumer keys on the name either way, and because the pair
+`data_product.access_revoked.v1` / `data_product.entitlement_revoked.v1` is
+exactly the kind of near-duplicate that is misread when only one of them is
+written down: the first is the decision, the second is its effect, and only the
+second means access has actually stopped.
 
 ### Notifications — topic `atlas.operational.v1`
 
@@ -325,7 +367,11 @@ and carry no actions: a notification here is never a control surface.
 
 | Event | Trigger | Key payload |
 |---|---|---|
-| `observability.slo.created.v1` | SLO definition created | slo_key, target |
+
+`observability.slo.created.v1` was the only event on this topic. It was retired
+on 2026-09-12 with the SLO feature that emitted it (R11-D10): nothing ever wrote
+`slo_measurement`, and no indicator source existed to write one from, so the
+error budget could only ever answer NO_DATA.
 
 ### Workspace — topic `atlas.governance.v1`
 
@@ -333,6 +379,8 @@ and carry no actions: a notification here is never a control surface.
 |---|---|---|
 | `workspace.created.v1` | Workspace created under an organization | workspace_id, slug |
 | `source_binding.requested.v1` | Datasource binding requested for a workspace, pending approval | binding_id, workspace_id, datasource_id |
+| `access_policy.activated.v1` / `.rejected.v1` | Governed decision on one proposed access policy (R11-AUD02): approval activates the draft, rejection marks it `REJECTED`. Proposing it emits `governance.review_requested.v1` | access_policy_id, code, version, effect, review_id |
+| `workspace_membership.approved.v1` / `.rejected.v1` | Governed decision on one proposed workspace member (R11-AUD02): approval makes the membership `ACTIVE`, rejection marks it `REJECTED`. Proposing it emits `governance.review_requested.v1` | membership_id, workspace_id, role, principal_kind, review_id |
 
 ### Studio — topic `atlas.governance.v1`
 
@@ -422,9 +470,9 @@ and carry no actions: a notification here is never a control surface.
 ## 3. Adding an event
 
 1. Add the row to this catalog.
-2. Define the payload schema in the owning module's `events.py`.
-3. Register with the schema registry (`BACKWARD` compatibility) — **planned; no schema registry exists (2026-08-30)**.
-4. Confirm the payload carries no values or secrets — the publish-time validator enforces this.
+2. Define the payload shape. Today that is an inline dict at the `record_outbox` call site; no module has an `events.py`.
+3. Register with the schema registry (`BACKWARD` compatibility) — **planned; no schema registry exists (2026-09-20)**.
+4. Confirm the payload carries no values or secrets, by review — there is no publish-time validator (see §1).
 5. Document consumers, or state explicitly that there are none yet.
 
 CI asserts that every published event type appears in this catalog. **This gate now exists (ST-14 / TS-11, `tests/test_event_catalog_gate.py`):** it scans every `event_type=` passed to `record_outbox` in `src/` and fails the build if one is neither documented here nor named in the (now-empty) `KNOWN_ST14_DRIFT` baseline. Before it existed, the drift documented in the status note at the top of this file was able to accumulate unnoticed.

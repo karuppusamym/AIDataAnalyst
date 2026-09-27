@@ -22,6 +22,7 @@ from aida.asset_description_service import (
     evidence_payload,
     gather_evidence,
     score_evidence,
+    table_refusal,
     text_fingerprint,
 )
 from aida.context import get_correlation_id
@@ -255,14 +256,14 @@ async def generate_asset_description_drafts(
         evidence = await gather_evidence(session, table)
         drafted_text = compose_draft_text(evidence)
         fingerprint = text_fingerprint(drafted_text)
-        duplicate_rejected = await session.scalar(
-            select(AssetDescriptionDraft.id).where(
-                AssetDescriptionDraft.table_id == table.id,
-                AssetDescriptionDraft.status == "REJECTED",
-                AssetDescriptionDraft.text_fingerprint == fingerprint,
+        # R11-FP10: the text, the machine text it was edited from, or the evidence it stands on
+        # was already refused -- or the same words were approved and withdrawn.
+        if (
+            await table_refusal(
+                session, table.id, drafted_text=drafted_text, payload=evidence_payload(evidence)
             )
-        )
-        if duplicate_rejected is not None:
+            is not None
+        ):
             skipped_duplicate += 1
             continue
         scores = score_evidence(evidence)

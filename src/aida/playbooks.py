@@ -106,6 +106,21 @@ class PlaybookRunOutcome:
     governance_review_id: UUID | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PlaybookMatches:
+    """What a playbook's filter matched, and whether a cap cut the match set short.
+
+    R11-REV01: ``resolve_playbook_matches`` has always discarded the matchers'
+    ``truncated`` flag, so a run over a large estate acted on the first
+    ``CATALOG_BULK_ACTION_MAX_ITEMS`` subjects and said nothing about the rest.
+    The run's behavior is unchanged; the dry-run reports the flag.
+    """
+
+    subject_ids: list[UUID]
+    tables_truncated: bool
+    columns_truncated: bool
+
+
 async def resolve_playbook_matches(
     session: AsyncSession, playbook: MetadataPlaybook
 ) -> list[UUID]:
@@ -113,6 +128,15 @@ async def resolve_playbook_matches(
     playbook's filter currently matches, capped the same way CT-1's own
     filter-mode bulk endpoints are (``CATALOG_BULK_ACTION_MAX_ITEMS``).
     """
+    return (await resolve_playbook_matches_detailed(session, playbook)).subject_ids
+
+
+async def resolve_playbook_matches_detailed(
+    session: AsyncSession, playbook: MetadataPlaybook
+) -> PlaybookMatches:
+    """``resolve_playbook_matches`` plus the truncation flags -- the one matcher both the
+    run and the dry-run (``aida.playbook_dry_run``) use, so a preview cannot match a
+    different set than the run it previews."""
     rows = (
         await session.execute(
             select(MetadataTable, MetadataSchema.name)
@@ -127,16 +151,16 @@ async def resolve_playbook_matches(
         )
     ).all()
     table_candidates = [(row[0], row[1]) for row in rows]
-    matched_table_ids, _truncated = match_tables_by_filter(
+    matched_table_ids, tables_truncated = match_tables_by_filter(
         table_candidates,
         match_field=playbook.match_field,
         match_pattern=playbook.match_pattern,
         cap=CATALOG_BULK_ACTION_MAX_ITEMS,
     )
     if playbook.action != "CLASSIFY":
-        return matched_table_ids
+        return PlaybookMatches(matched_table_ids, tables_truncated, False)
     if not matched_table_ids:
-        return []
+        return PlaybookMatches([], tables_truncated, False)
     column_rows = (
         await session.scalars(
             select(MetadataColumn).where(
@@ -145,12 +169,12 @@ async def resolve_playbook_matches(
             )
         )
     ).all()
-    matched_column_ids, _truncated = match_columns_by_pattern(
+    matched_column_ids, columns_truncated = match_columns_by_pattern(
         column_rows,
         name_pattern=playbook.column_name_pattern or "*",
         cap=CATALOG_BULK_ACTION_MAX_ITEMS,
     )
-    return matched_column_ids
+    return PlaybookMatches(matched_column_ids, tables_truncated, columns_truncated)
 
 
 async def evaluate_and_run_playbook(

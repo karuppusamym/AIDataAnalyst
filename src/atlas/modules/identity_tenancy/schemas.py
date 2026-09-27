@@ -19,12 +19,9 @@ splitting it into a module not yet extracted would just relocate the
 problem, and it carries no policy-authoring logic of its own, only
 decision/reason strings for display.
 
-`ApiModel` stays defined in `aida.schemas` rather than moving here or to
-`atlas.platform` -- it is the shared pydantic base for every module's
-schemas, not identity-tenancy-owned, and moving it is out of scope for
-this pass. Importing it back from `aida.schemas` here works safely only
-because `aida.schemas`' shim import of this module comes *after*
-`ApiModel` is defined in that file -- see the comment there.
+`ApiModel` is imported from `atlas.platform.schemas`, the neutral base this module and
+`aida.schemas` both use, so this module no longer imports `aida.schemas` and the two
+no longer form an import cycle (review 2026-09-05 R03, completed 2026-09-21).
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from aida.integration_catalog import normalized_transformation_metadata_integrations
-from aida.schemas import ApiModel
+from atlas.platform.schemas import ApiModel
 
 
 class OrganizationCreate(ApiModel):
@@ -152,14 +149,12 @@ class WorkspaceCreate(ApiModel):
     name: str = Field(min_length=2, max_length=200)
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
     purpose: str = Field(default="", max_length=1000)
-    isolation_boundary_id: UUID | None = None
     monthly_cost_ceiling: int | None = Field(default=None, ge=0)
 
 
 class WorkspaceRead(ApiModel):
     id: UUID
     organization_id: UUID
-    isolation_boundary_id: UUID | None
     name: str
     slug: str
     purpose: str
@@ -172,7 +167,8 @@ class WorkspaceRead(ApiModel):
 class WorkspaceMembershipCreate(ApiModel):
     principal_id: str = Field(min_length=1, max_length=255)
     principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
-    role: Literal["viewer", "analyst", "steward", "reviewer", "workspace_owner"]
+    # `auditor` (R11-B9) extracts audit records and reads metadata, never data.
+    role: Literal["viewer", "analyst", "steward", "reviewer", "auditor", "workspace_owner"]
     expires_at: datetime | None = None
 
 
@@ -188,6 +184,19 @@ class WorkspaceMembershipRead(ApiModel):
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+class WorkspaceMembershipProposalRead(WorkspaceMembershipRead):
+    """R11-AUD02: what `POST /v1/workspaces/{id}/members` answers.
+
+    A `WorkspaceMembershipRead` plus the review the add opened. Adding a member is a
+    proposal: the membership is `PENDING_APPROVAL` and grants nothing until a second
+    principal approves the `WORKSPACE_MEMBERSHIP` review named here. Its own type for the
+    reason `AccessPolicyProposalRead` is: the list route returns `WorkspaceMembershipRead`,
+    and a member read back from a list has no review to name.
+    """
+
+    governance_review_id: UUID
 
 
 class SourceBindingCreate(ApiModel):

@@ -342,6 +342,8 @@ export function ConfirmDialog({
 }) {
   const [reason, setReason] = useState("");
   const reasonRef = useRef<HTMLTextAreaElement>(null);
+  const reasonFieldId = useId();
+  const reasonHintId = useId();
   const blocked = requireReason && reason.trim().length === 0;
   return (
     <Dialog
@@ -366,19 +368,35 @@ export function ConfirmDialog({
       }
     >
       {requireReason ? (
-        <label className="field">
-          <span className="field__label">{reasonLabel}</span>
+        /* R11-C2: the hint is a DESCRIPTION, not part of the name.
+         *
+         * This was a `<label>` wrapping the textarea, the label text and the
+         * hint, so the field's accessible name was the whole lot concatenated
+         * -- "Reason A written rationale is recorded with this decision" --
+         * and, because the hint is rendered only while the box is empty, that
+         * name silently changed to "Reason" as soon as the reviewer typed a
+         * character. A control that renames itself mid-edit is exactly the
+         * kind of thing `getByRole(name:)` catches and a snapshot does not.
+         * `aria-describedby` is what announces a hint after the name. */
+        <div className="field">
+          <label className="field__label" htmlFor={reasonFieldId}>
+            {reasonLabel}
+          </label>
           <textarea
+            id={reasonFieldId}
             ref={reasonRef}
             className="dlg__reason"
             rows={4}
             value={reason}
             onChange={(event) => setReason(event.target.value)}
+            aria-describedby={blocked ? reasonHintId : undefined}
           />
           {blocked ? (
-            <span className="dlg__hint">A written rationale is recorded with this decision.</span>
+            <span className="dlg__hint" id={reasonHintId}>
+              A written rationale is recorded with this decision.
+            </span>
           ) : null}
-        </label>
+        </div>
       ) : null}
       {error ? (
         <p className="dlg__err" role="alert">
@@ -497,11 +515,30 @@ export function FormErrors({
   error: unknown;
   title?: string;
 }) {
+  /* R11-C2: the summary takes focus the moment it appears.
+   *
+   * `role="alert"` alone announces the text, which is necessary and not
+   * sufficient: on a long form the submit button is usually far below the
+   * fields the server rejected, so a keyboard user hears "this could not be
+   * saved" and is left at the bottom of the page with no idea which field to
+   * go back to. Moving focus here puts them at the list of what to fix, which
+   * is WCAG 3.3.1's whole point. Hooks run before the early return below --
+   * a conditional hook is not allowed, and the effect's own guard is what
+   * makes it a no-op when there is nothing to report. */
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const hadError = useRef(false);
+  useEffect(() => {
+    // Only on the transition into failure: re-focusing on every re-render
+    // would trap the user in the summary while they try to fix the form.
+    if (error && !hadError.current) summaryRef.current?.focus();
+    hadError.current = Boolean(error);
+  }, [error]);
+
   if (!error) return null;
   const fields = error instanceof ApiError ? error.fieldErrors : [];
   const reference = errorReference(error);
   return (
-    <div className="formerr" role="alert">
+    <div className="formerr" role="alert" ref={summaryRef} tabIndex={-1}>
       <div className="formerr__t">{title}</div>
       {fields.length > 0 ? (
         <ul className="formerr__list">
@@ -674,25 +711,13 @@ export function CopyLinkButton({
 /**
  * Warn before losing unsaved edits.
  *
- * Covers both ways the edit can be lost: closing or reloading the tab (the
- * browser's own prompt, the only thing allowed there) and navigating away
- * inside the app (our own confirmation). Screens previously did neither, so a
- * half-written description died on a stray click.
+ * R11-S10: this is now a re-export of `lib/unsavedChanges.ts`, which is where
+ * the implementation moved. The behaviour it advertised was only half real
+ * here -- it installed `beforeunload`, and it returned a confirm function for
+ * in-app navigation that no caller ever invoked and that the shell had no way
+ * to reach. The hook now also REGISTERS the dirty state, so the shell's
+ * `navigate` asks before discarding it. The signature and the returned
+ * function are unchanged, so existing callers keep working and simply start
+ * being guarded.
  */
-export function useUnsavedChanges(dirty: boolean) {
-  useEffect(() => {
-    if (!dirty) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [dirty]);
-
-  /** Call before an in-app navigation that would discard the edit. */
-  return useCallback(
-    (message = "Discard your unsaved changes?") => !dirty || window.confirm(message),
-    [dirty],
-  );
-}
+export { useUnsavedChanges } from "../lib/unsavedChanges";

@@ -8,6 +8,7 @@ import {
   submitContextProductVersion,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { navigateTo } from "../lib/navigate";
 import { useOrgId } from "../lib/org";
 import { VirtualList } from "../components/VirtualList";
@@ -21,8 +22,19 @@ import {
   useVersionLifecycle,
 } from "../components/screenState";
 import { CompilerPanel, useCompiler } from "./ContextProductCompiler";
+import { KnowledgeView } from "../components/KnowledgeView";
 import { NO_ROLLOUT, RolloutPanel, useRollout } from "./ContextProductRollout";
-import { CreateDraftPanel } from "./ContextProductDraft";
+import { CreateDraftPanel, NewVersionPanel } from "./ContextProductDraft";
+import {
+  FreshnessNote,
+  FreshnessPill,
+  canCheckFreshness,
+  useVersionFreshness,
+  ChangedSincePublishedPill,
+  MeaningMovedPill,
+  useChangesSincePublished,
+} from "./ContextProductFreshness";
+import type { VersionFreshness } from "./ContextProductFreshness";
 import "./ContextProductsScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -46,7 +58,12 @@ import "./ContextProductsScreen.css";
      3. rollout       `ContextProductRollout.tsx` — AT-7(b) consumer bindings.
      4. create draft  `ContextProductDraft.tsx` — every field
                       `ContextProductCreate` accepts, assembled only from
-                      already-approved references.
+                      already-approved references; and, from a row, a new
+                      version of that product built from the same pickers
+                      (R11-FP12), routines included.
+   A fifth, small one hangs off the row itself: `ContextProductFreshness.tsx`,
+   the on-demand "has anything this version covers moved since it was
+   published?" check and the stale badge it puts on the row (R11-FP12).
 
    What stays here is the registry itself plus the one thing the four share:
    the single message strip. That mirrors the legacy screen's own single
@@ -72,6 +89,15 @@ function ProductRow({
   onDeprecate,
   onCompile,
   onRollout,
+  onKnowledge,
+  knowledgeOpen,
+  onAsk,
+  onNewVersion,
+  newVersionOpen,
+  freshness,
+  onCheckFreshness,
+  changedSincePublished,
+  meaningMoved,
 }: {
   product: ContextProductRead;
   busy: string | null;
@@ -80,6 +106,24 @@ function ProductRow({
   onDeprecate: () => void;
   onCompile: () => void;
   onRollout: () => void;
+  /** R11-OKF02: open this version's stored knowledge bundle below the registry. */
+  onKnowledge: () => void;
+  knowledgeOpen: boolean;
+  /** R11-FP12 (F08): open Ask on this product, or `null` when there is nothing
+   *  to ask it against -- see `askDatasourceId` below. */
+  onAsk: (() => void) | null;
+  /** R11-FP12: open the new-version panel for this product. */
+  onNewVersion: () => void;
+  newVersionOpen: boolean;
+  /** R11-FP12: what an on-demand check for changes since publication said about this
+   *  version -- `undefined` until it was asked, which shows nothing (never "fresh"). */
+  freshness: VersionFreshness | undefined;
+  onCheckFreshness: () => void;
+  /** R11-FP12: how many covered subjects moved since this version was published, from the
+   *  one project-wide read made when the screen opens; `undefined` is no reading. */
+  changedSincePublished: number | null | undefined;
+  /** R11-FP12: how many of the meaning versions it pins no longer stand. */
+  meaningMoved: number | undefined;
 }) {
   const v = product.latest_version;
   const isBusy = busy === v.id;
@@ -88,6 +132,14 @@ function ProductRow({
       <div className="cprow__main">
         <div className="cprow__badges">
           <Pill tone={versionStatusTone(v.status)}>{v.status.toLowerCase().replace(/_/g, " ")}</Pill>
+          {/* The on-demand check, once someone ran it, says more (which subjects), so it
+              replaces the passive count rather than sitting beside it. */}
+          {freshness ? (
+            <FreshnessPill state={freshness} />
+          ) : (
+            <ChangedSincePublishedPill count={changedSincePublished} />
+          )}
+          <MeaningMovedPill count={meaningMoved} />
         </div>
         <h3 className="cprow__title">{v.name}</h3>
         <div className="cprow__key">
@@ -107,6 +159,7 @@ function ProductRow({
             <code>{v.fingerprint.slice(0, 12)}</code>
           </div>
         </div>
+        <FreshnessNote state={freshness} version={v.version} />
       </div>
       {/* Which actions exist is decided by the version's real lifecycle
           status, never by a client-side guess: a DRAFT cannot be deprecated
@@ -115,6 +168,46 @@ function ProductRow({
         <Button onClick={onRollout} title="Pin named consumers to a specific version">
           {selected ? "Rollout ✓" : "Rollout"}
         </Button>
+        <Button
+          onClick={onKnowledge}
+          title="Read the stored knowledge bundle agents receive for this version"
+        >
+          {knowledgeOpen ? "Knowledge ✓" : "Knowledge"}
+        </Button>
+        {/* R11-FP12: has anything this version covers moved since it was published?
+            Asked per row, on request, and only for a version consumers are served:
+            each read is recorded as a consumption of the version (see
+            `fetchContextProductChangesSincePublished`), so nothing probes on load. */}
+        {canCheckFreshness(v.status) ? (
+          <Button
+            onClick={onCheckFreshness}
+            disabled={freshness?.kind === "checking"}
+            title="Read whether a view, routine or approved description this version covers has changed since it was published"
+          >
+            {freshness?.kind === "checking" ? "Checking…" : freshness ? "Check again" : "Check for changes"}
+          </Button>
+        ) : null}
+        {/* R11-FP12 (F08): the consumer's own door. A published product was
+            something you could roll out, deprecate and compile from here, with
+            no way to actually ask a question through it -- so demonstrating one
+            meant knowing to go to Ask and find it in a picker. Offered only for
+            PUBLISHED, because that is the only status the ask path resolves
+            (`_load_published_context_product`, agent_orchestrator.py:487); a
+            SUPPORTED version is readable but not askable. */}
+        {v.status === "PUBLISHED" && onAsk ? (
+          <Button onClick={onAsk} title="Open Ask with this product preselected">
+            Ask through this product
+          </Button>
+        ) : null}
+        {/* R11-FP12: the next version of an ACTIVE product, built from this one.
+            Not while a draft or a review is open: a second draft beside it
+            would split one product's review into two decisions, and the
+            DRAFT itself is what an author changes and submits. */}
+        {product.lifecycle_status === "ACTIVE" && v.status !== "DRAFT" && v.status !== "REVIEW_REQUIRED" ? (
+          <Button onClick={onNewVersion} title="Draft the next version of this product from this one">
+            {newVersionOpen ? "New version ✓" : "New version"}
+          </Button>
+        ) : null}
         {v.status === "DRAFT" ? (
           <Button disabled={isBusy} onClick={onSubmit}>
             {isBusy ? "Submitting…" : "Submit"}
@@ -164,10 +257,38 @@ export function ContextProductsScreen() {
 
   const lifecycle = useVersionLifecycle(channel, reloadRegistry);
   const compiler = useCompiler(channel);
+  /* R11-FP12: which versions were asked whether what they cover has moved since
+     publication, and the answer. Empty until a person asks; never filled on load. */
+  const freshness = useVersionFreshness(channel);
+  /* R11-FP12 (2026-09-22): the count for every row, asked once when the list opens and only
+     by a session the coverage roles admit. The badge needs no click; the detail still does. */
+  const changes = useChangesSincePublished(projectId);
+
+  /* R11-FP12 (F08): Ask is scoped to a DATASOURCE and resolves its product list
+     from that datasource's project, so "ask through this product" has to hand it
+     one -- a link carrying the key alone would land on a picker that offers
+     nothing and a blank selection, which is worse than no link at all. This
+     project's own sources are what can be asked; under the shell's scope layer
+     `useDatasourcePicker` reads them from context rather than issuing a request
+     (see its header comment), so the entry point costs nothing to offer.
+
+     `null` when the project has no source yet: the button is then not shown,
+     rather than shown and broken. */
+  const { datasources } = useDatasourcePicker(ORG);
+  const askDatasourceId = useMemo(
+    () => datasources.find((d) => d.project_id === projectId)?.id ?? null,
+    [datasources, projectId],
+  );
 
   const [rolloutProduct, setRolloutProduct] = useState<ContextProductRead | null>(null);
   const rollout = useRollout(rolloutProduct, channel);
   const { versions, bindings } = rollout.resource.data ?? NO_ROLLOUT;
+  /* R11-OKF02: the stored knowledge bundle of one row's latest version. A panel
+     in this screen, never a route of its own -- the design's knowledge view
+     lives inside Context Products and Catalog object details. */
+  const [knowledgeProduct, setKnowledgeProduct] = useState<ContextProductRead | null>(null);
+  /* R11-FP12: the product whose next version is being drafted, if any. */
+  const [versionProduct, setVersionProduct] = useState<ContextProductRead | null>(null);
 
   /* Compiling blocks the row that started it, the same way a lifecycle
      request does, but it does not change the version's status -- so it is
@@ -264,11 +385,49 @@ export function ContextProductsScreen() {
                     }
                     onCompile={() => void compiler.compile(p.latest_version.id)}
                     onRollout={() => setRolloutProduct((current) => (current?.id === p.id ? null : p))}
+                    onKnowledge={() =>
+                      setKnowledgeProduct((current) => (current?.id === p.id ? null : p))
+                    }
+                    knowledgeOpen={knowledgeProduct?.id === p.id}
+                    onNewVersion={() => setVersionProduct((current) => (current?.id === p.id ? null : p))}
+                    newVersionOpen={versionProduct?.id === p.id}
+                    freshness={freshness.byVersion[p.latest_version.id]}
+                    changedSincePublished={changes.byVersion.get(p.latest_version.id)}
+                    meaningMoved={changes.meaningByVersion.get(p.latest_version.id)}
+                    onCheckFreshness={() =>
+                      void freshness.check(
+                        p.latest_version.id,
+                        `${p.product_key} v${p.latest_version.version}`,
+                      )
+                    }
+                    onAsk={
+                      askDatasourceId
+                        ? () =>
+                            navigateTo("analyst", {
+                              ds: askDatasourceId,
+                              product: p.product_key,
+                            })
+                        : null
+                    }
                   />
                 )}
               />
             )}
           </article>
+
+          {versionProduct ? (
+            <NewVersionPanel
+              key={versionProduct.latest_version.id}
+              orgId={ORG}
+              product={versionProduct}
+              channel={channel}
+              onCreated={() => {
+                setVersionProduct(null);
+                reloadRegistry();
+              }}
+              onClose={() => setVersionProduct(null)}
+            />
+          ) : null}
 
           {rolloutProduct ? (
             <RolloutPanel
@@ -282,6 +441,15 @@ export function ContextProductsScreen() {
               onUnbind={rollout.unbind}
               onReload={rollout.resource.reload}
               onClose={() => setRolloutProduct(null)}
+            />
+          ) : null}
+
+          {knowledgeProduct ? (
+            <KnowledgeView
+              key={knowledgeProduct.latest_version.id}
+              versionId={knowledgeProduct.latest_version.id}
+              title={`${knowledgeProduct.latest_version.name} · v${knowledgeProduct.latest_version.version}`}
+              onClose={() => setKnowledgeProduct(null)}
             />
           ) : null}
 

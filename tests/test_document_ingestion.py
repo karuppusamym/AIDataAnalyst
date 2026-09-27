@@ -4,6 +4,10 @@ Real-sqlite-engine pattern (matching `test_playbooks.py`/
 `test_catalog_bulk_actions_endpoints.py`): `resolve_structural_mappings`
 issues real queries against `MetadataTable`/`MetadataColumn`/`DataSource`,
 and `extract_description_claims` needs real flush-generated ids.
+
+R11-FP16 added the last two tests: a row naming a table an approved rename
+retired follows it to what it became, and a name the source has again is read
+as itself rather than as the successor of the row that once carried it.
 """
 
 import itertools
@@ -16,11 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from aida.db import Base
 from aida.document_ingestion import (
+    CLAIM_SUBJECT_RETIRED,
     DOCUMENT_MAX_CONTENT_BYTES,
     DOCUMENT_MAX_SECTIONS,
     create_document_from_csv,
     extract_description_claims,
     parse_csv_data_dictionary,
+    remap_document,
     resolve_structural_mappings,
 )
 from aida.document_ingestion_api import (
@@ -39,6 +45,8 @@ from aida.models import (
     DataDomain,
     DataSource,
     DocumentClaim,
+    DocumentMapping,
+    DocumentSection,
     GovernanceReview,
     LineOfBusiness,
     MetadataCatalog,
@@ -566,6 +574,34 @@ async def test_extract_claims_refuses_a_document_not_yet_mapped(session: AsyncSe
     assert exc_info.value.status_code == 409
 
 
+async def test_extract_claims_refuses_to_propose_a_document_twice(session: AsyncSession) -> None:
+    """Extraction leaves the document MAPPED, so before this guard a second
+    call raised every claim, and every review, a second time."""
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    table = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, table, name="customer_id")
+    await _seed_column(session, table, name="ssn")
+    context = _context(project)
+    document = await upload_document(
+        project.id,
+        DocumentCreate(filename="dictionary.csv", content=_DICTIONARY_CSV),
+        context,
+        session,
+    )
+    await map_document(document.id, context, session)
+    first = await extract_claims(document.id, context, session)
+    assert first.total == 2
+
+    with pytest.raises(HTTPException) as exc_info:
+        await extract_claims(document.id, context, session)
+
+    assert exc_info.value.status_code == 409
+    assert "already proposed" in str(exc_info.value.detail)
+    claims = await list_document_claims(document.id, 100, 0, context, session)
+    assert claims.total == 2
+
+
 async def test_get_document_rejects_cross_organization_access(session: AsyncSession) -> None:
     project = await _seed_project(session)
     context = _context(project)
@@ -585,3 +621,176 @@ async def test_get_document_rejects_cross_organization_access(session: AsyncSess
     with pytest.raises(HTTPException) as exc_info:
         await get_document(document.id, other_context, session)
     assert exc_info.value.status_code == 403
+
+
+def _checker(project: Project) -> SecurityContext:
+    return SecurityContext(
+        principal_id="checker@example.com",
+        principal_type="USER",
+        organization_id=project.organization_id,
+        roles=frozenset({"DataSteward"}),
+    )
+
+
+async def test_a_claim_is_not_approved_once_its_column_left_the_source(
+    session: AsyncSession,
+) -> None:
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    table = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, table, name="customer_id")
+    ssn = await _seed_column(session, table, name="ssn")
+    document = await create_document_from_csv(
+        session,
+        organization_id=project.organization_id,
+        project_id=project.id,
+        filename="dictionary.csv",
+        content=_DICTIONARY_CSV,
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    claims = await extract_description_claims(session, document, requested_by="maker@example.com")
+    (ssn_claim,) = [claim for claim in claims if claim.subject_id == str(ssn.id)]
+    claim_id, review_id = ssn_claim.id, ssn_claim.governance_review_id
+    ssn.status = "DEPRECATED"
+    await session.commit()
+
+    with pytest.raises(HTTPException) as refused:
+        await decide_governance_review(
+            review_id,
+            GovernanceDecisionRequest(decision="APPROVE"),
+            _checker(project),
+            session,
+        )
+
+    assert refused.value.status_code == 409
+    detail = refused.value.detail
+    assert isinstance(detail, dict) and detail["code"] == CLAIM_SUBJECT_RETIRED
+    await session.rollback()
+    refreshed = await session.get(DocumentClaim, claim_id)
+    assert refreshed is not None and refreshed.status == "PENDING"
+
+
+async def test_mapping_again_proposes_what_now_matches_and_unmaps_what_left_the_source(
+    session: AsyncSession,
+) -> None:
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    table = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, table, name="customer_id")
+    ssn = await _seed_column(session, table, name="ssn")
+    document = await create_document_from_csv(
+        session,
+        organization_id=project.organization_id,
+        project_id=project.id,
+        filename="dictionary.csv",
+        content=_DICTIONARY_CSV,
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    assert len(await extract_description_claims(session, document, requested_by="steward")) == 2
+    # The source gains the orders table the dictionary already describes, and loses ssn.
+    orders = await _seed_table(session, datasource, name="orders")
+    ssn.status = "DEPRECATED"
+    await session.flush()
+
+    first = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+    again = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+
+    assert (first.remapped, first.unmatched, len(first.claims)) == (1, 1, 1)
+    (orders_claim,) = first.claims
+    assert (
+        orders_claim.subject_type,
+        orders_claim.subject_id,
+        orders_claim.status,
+        orders_claim.created_by,
+    ) == ("TABLE", str(orders.id), "PENDING", "maker@example.com")
+    review = await session.get(GovernanceReview, orders_claim.governance_review_id)
+    assert review is not None and review.requested_by == "scheduler:context-rebuild"
+    assert (again.remapped, again.unmatched, again.claims) == (0, 0, [])
+
+    # ssn returns: it maps back, and its text was already proposed for it, so nothing new.
+    ssn.status = "ACTIVE"
+    await session.flush()
+    back = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+    assert (back.remapped, back.unmatched, back.claims) == (1, 0, [])
+
+
+async def test_a_row_naming_a_renamed_table_follows_it_to_what_it_became(
+    session: AsyncSession,
+) -> None:
+    """R11-FP16: a rename does not make a data dictionary wrong, only out of date."""
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    customers = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, customers, name="customer_id")
+    await _seed_column(session, customers, name="ssn")
+    orders = await _seed_table(session, datasource, name="orders")
+    document = await create_document_from_csv(
+        session,
+        organization_id=project.organization_id,
+        project_id=project.id,
+        filename="dictionary.csv",
+        content=_DICTIONARY_CSV,
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    assert len(await extract_description_claims(session, document, requested_by="steward")) == 3
+
+    # A steward approves a rename: `orders` is tombstoned, pointing at what it became.
+    renamed = await _seed_table(session, datasource, name="orders_2026")
+    orders.status = "DEPRECATED"
+    orders.superseded_by_table_id = renamed.id
+    await session.flush()
+
+    outcome = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+
+    assert (outcome.remapped, outcome.unmatched) == (1, 0)
+    (claim,) = outcome.claims
+    assert (claim.subject_type, claim.subject_id) == ("TABLE", str(renamed.id))
+    # Followed once: the row now names the table it is about, so nothing moves again.
+    assert (await remap_document(session, document, requested_by="scheduler")).remapped == 0
+
+
+async def test_a_table_back_under_its_old_name_is_read_as_itself_not_as_its_successor(
+    session: AsyncSession,
+) -> None:
+    """A renamed-then-restored table keeps its stale successor pointer; the live name wins."""
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    customers = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, customers, name="customer_id")
+    await _seed_column(session, customers, name="ssn")
+    orders = await _seed_table(session, datasource, name="orders")
+    document = await create_document_from_csv(
+        session,
+        organization_id=project.organization_id,
+        project_id=project.id,
+        filename="dictionary.csv",
+        content=_DICTIONARY_CSV,
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    renamed = await _seed_table(session, datasource, name="orders_2026")
+    orders.status = "DEPRECATED"
+    orders.superseded_by_table_id = renamed.id
+    await session.flush()
+    # The source then has `orders` again: rediscovery reactivates the row it tombstoned, which
+    # still carries the pointer written when the rename was approved.
+    orders.status = "ACTIVE"
+    await session.flush()
+
+    await remap_document(session, document, requested_by="scheduler:context-rebuild")
+
+    mapping = (
+        await session.scalars(
+            select(DocumentMapping)
+            .join(DocumentSection, DocumentSection.id == DocumentMapping.document_section_id)
+            .where(
+                DocumentSection.document_id == document.id,
+                DocumentSection.raw_table_name == "orders",
+                DocumentSection.raw_column_name.is_(None),
+            )
+        )
+    ).one()
+    assert mapping.subject_id == str(orders.id) and mapping.subject_id != str(renamed.id)

@@ -10,6 +10,7 @@ import {
 } from "react";
 import { HomeScreen } from "./screens/HomeScreen";
 import { AgentInboxScreen } from "./screens/AgentInboxScreen";
+import { PaletteAssetResults } from "./components/PaletteAssetResults";
 import { PersonaNav } from "./components/PersonaNav";
 import { Dialog } from "./components/primitives";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
@@ -27,23 +28,34 @@ import {
 import { beginSignIn, canStartSignIn, signOut } from "./lib/oidcClient";
 import { OrgProvider } from "./lib/org";
 import { ScopeProvider } from "./lib/scope";
-import { pushLocation, replaceLocation } from "./lib/location";
-import { SCREEN_IDS, type ScreenId } from "./lib/routes";
+import { normalizeLocation, pushLocation, replaceLocation } from "./lib/location";
+import { resolveScreenRef, SCREEN_IDS, SCREEN_JOURNEY, type ScreenId } from "./lib/routes";
 import { describeSession, SessionProvider, useSession } from "./lib/session";
-import { useCurrentScreen } from "./lib/useUrlState";
+import { useAppLocation, useCurrentScreen } from "./lib/useUrlState";
 import { asIdentityProvider, asPersona } from "./lib/ui-types";
 import type { Persona } from "./lib/ui-types";
-import { landingWorkArea, WORK_AREAS, type WorkArea } from "./lib/workAreas";
+import {
+  landingWorkArea,
+  WORK_AREA_OF_JOURNEY,
+  WORK_AREAS,
+  type WorkArea,
+} from "./lib/workAreas";
+import { useUnsavedNavigationGuard } from "./lib/unsavedChanges";
 import "./App.css";
 
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
-const DescriptionDraftsScreen = lazy(() => import("./screens/DescriptionDraftsScreen").then((module) => ({ default: module.DescriptionDraftsScreen })));
+const SearchScreen = lazy(() => import("./screens/SearchScreen").then((module) => ({ default: module.SearchScreen })));
+/* R11-S10: one review surface. The parsed-lineage queue is a tab inside this
+   screen now, and lazily loaded from there -- it is no longer a route of its
+   own, so the shell no longer names it. */
 const ReviewQueueScreen = lazy(() => import("./screens/ReviewQueueScreen").then((module) => ({ default: module.ReviewQueueScreen })));
-const ParsedLineageReviewScreen = lazy(() => import("./screens/ParsedLineageReviewScreen").then((module) => ({ default: module.ParsedLineageReviewScreen })));
 const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then((module) => ({ default: module.MarketplaceScreen })));
 const LineageRefusalScreen = lazy(() => import("./screens/LineageRefusalScreen").then((module) => ({ default: module.LineageRefusalScreen })));
 const StudioChangeSetsScreen = lazy(() => import("./screens/StudioChangeSetsScreen").then((module) => ({ default: module.StudioChangeSetsScreen })));
-const NarratedLineageScreen = lazy(() => import("./screens/NarratedLineageScreen").then((module) => ({ default: module.NarratedLineageScreen })));
+/* R11-S13 (M1): one lineage destination. The narrated traversal and the merged
+   graph were two routes over one question; they are three views of one screen
+   now, each still its own lazy chunk, loaded from the workspace. */
+const LineageWorkspace = lazy(() => import("./screens/LineageWorkspace").then((module) => ({ default: module.LineageWorkspace })));
 const CrossSourceScreen = lazy(() => import("./screens/CrossSourceScreen").then((module) => ({ default: module.CrossSourceScreen })));
 const AskScreen = lazy(() => import("./screens/AskScreen").then((module) => ({ default: module.AskScreen })));
 const RelationshipsScreen = lazy(() => import("./screens/RelationshipsScreen").then((module) => ({ default: module.RelationshipsScreen })));
@@ -58,10 +70,15 @@ const ContextProductsScreen = lazy(() => import("./screens/ContextProductsScreen
 const AgentGatewayScreen = lazy(() => import("./screens/AgentGatewayScreen").then((module) => ({ default: module.AgentGatewayScreen })));
 const AdministrationScreen = lazy(() => import("./screens/AdministrationScreen").then((module) => ({ default: module.AdministrationScreen })));
 const ToolRegistryScreen = lazy(() => import("./screens/ToolRegistryScreen").then((module) => ({ default: module.ToolRegistryScreen })));
-const UnifiedLineageScreen = lazy(() => import("./screens/UnifiedLineageScreen").then((module) => ({ default: module.UnifiedLineageScreen })));
 const AiGovernanceScreen = lazy(() => import("./screens/AiGovernanceScreen").then((module) => ({ default: module.AiGovernanceScreen })));
 const TransformationsScreen = lazy(() => import("./screens/TransformationsScreen").then((module) => ({ default: module.TransformationsScreen })));
-const StewardshipScreen = lazy(() => import("./screens/StewardshipScreen").then((module) => ({ default: module.StewardshipScreen })));
+/* R11-S13 (items 15/17): one stewardship workspace -- Work queue, Bulk actions
+   and Automation. Playbooks is its Automation view now, lazily loaded from the
+   workspace rather than named here; `#/playbooks` is a retired alias. */
+const StewardshipWorkspace = lazy(() => import("./screens/StewardshipWorkspace").then((module) => ({ default: module.StewardshipWorkspace })));
+/* R11-AUD08 (part 2): ownership rules, assignments and leaver reassignment -- one
+   screen in the Steward area, three views. */
+const OwnershipScreen = lazy(() => import("./screens/OwnershipScreen").then((module) => ({ default: module.OwnershipScreen })));
 const WorkspaceAccessScreen = lazy(() => import("./screens/WorkspaceAccessScreen").then((module) => ({ default: module.WorkspaceAccessScreen })));
 const AccessPolicyScreen = lazy(() => import("./screens/AccessPolicyScreen").then((module) => ({ default: module.AccessPolicyScreen })));
 const ReliabilityScreen = lazy(() => import("./screens/ReliabilityScreen").then((module) => ({ default: module.ReliabilityScreen })));
@@ -69,11 +86,21 @@ const ComplianceScreen = lazy(() => import("./screens/ComplianceScreen").then((m
 const ToolPlansScreen = lazy(() => import("./screens/ToolPlansScreen").then((module) => ({ default: module.ToolPlansScreen })));
 const AgentRosterScreen = lazy(() => import("./screens/AgentRosterScreen").then((module) => ({ default: module.AgentRosterScreen })));
 const ReviewerAgentScreen = lazy(() => import("./screens/ReviewerAgentScreen").then((module) => ({ default: module.ReviewerAgentScreen })));
-const PlaybooksScreen = lazy(() => import("./screens/PlaybooksScreen").then((module) => ({ default: module.PlaybooksScreen })));
 const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
 const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
+/* R11-AUD08: glossary conflicts and term-link proposals, two tabs of one
+   destination -- each still its own lazy chunk, loaded from the workspace. */
+const GlossaryReviewWorkspace = lazy(() => import("./screens/GlossaryReviewWorkspace").then((module) => ({ default: module.GlossaryReviewWorkspace })));
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
-const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
+/* R11-S13 (M3): one documentation workspace. The worklist, the description
+   drafts and the dictionary imports were three routes over three steps of one
+   job; they are three tabs now, each still its own lazy chunk, loaded from the
+   workspace rather than named here. */
+const DocumentationWorkspace = lazy(() => import("./screens/DocumentationWorkspace").then((module) => ({ default: module.DocumentationWorkspace })));
+/* R11-S10: the steward, lineage and quality agent consoles were three routes
+   over one component with a different `kind`. They are one screen with the
+   agent as a filter. */
+const TaskAgentsScreen = lazy(() => import("./screens/TaskAgentsScreen").then((module) => ({ default: module.TaskAgentsScreen })));
 
 /* UX-20: navigation is organised by *work area*, not by feature area. Thirty
    flat items grouped by what the code does is a feature map; a person opening
@@ -87,7 +114,13 @@ const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWo
    the sidebar regardless of persona.
 
    F09: `id` is a `ScreenId`, so a typo here is a compile error rather than a
-   nav button that silently renders nothing. */
+   nav button that silently renders nothing.
+
+   R11-S10: `group` is no longer declared here. It is read from
+   `SCREEN_JOURNEY` in `lib/routes.ts`, which is also what writes the journey
+   segment into the URL -- so a screen's group and its route cannot disagree.
+   They previously could: this table was the only place a group was written
+   down, and nothing checked it against anything. */
 type NavItem = {
   id: ScreenId;
   label: string;
@@ -96,21 +129,27 @@ type NavItem = {
   keywords: string;
 };
 
-const NAV: NavItem[] = [
+type NavEntry = Omit<NavItem, "group">;
+
+const NAV_ENTRIES: NavEntry[] = [
   // --- Inbox: the supervisor's front door ---------------------------------
-  { id: "home", label: "Overview", group: "Inbox", icon: "⌂", keywords: "home dashboard get started" },
-  { id: "inbox", label: "Agent inbox", group: "Inbox", icon: "⧉", keywords: "agents proposals waiting decisions auto-applied sampled kill switch supervise" },
+  { id: "home", label: "Overview", icon: "⌂", keywords: "home dashboard get started" },
+  { id: "inbox", label: "Agent inbox", icon: "⧉", keywords: "agents proposals waiting decisions auto-applied sampled kill switch supervise" },
   // --- Analyst: answer a question, and trust the answer -------------------
-  { id: "analyst", label: "Ask Atlas", group: "Analyst", icon: "✦", keywords: "question query analyst ai" },
-  { id: "catalog", label: "Catalog", group: "Analyst", icon: "▦", keywords: "assets tables columns definitions descriptions data search" },
-  { id: "semantics", label: "Semantic layer", group: "Analyst", icon: "ƒ", keywords: "metrics models measures" },
-  { id: "tools", label: "Tool registry", group: "Analyst", icon: "⛭", keywords: "sql tool version execute registry" },
-  { id: "tool-plans", label: "Tool plans", group: "Analyst", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
-  { id: "lineage", label: "Lineage", group: "Analyst", icon: "↗", keywords: "impact upstream downstream narrated" },
-  { id: "unified-lineage", label: "Unified lineage", group: "Analyst", icon: "⇄", keywords: "graph impact upstream downstream unified" },
+  { id: "analyst", label: "Ask Atlas", icon: "✦", keywords: "question query analyst ai" },
+  { id: "catalog", label: "Catalog", icon: "▦", keywords: "assets tables columns definitions descriptions data search" },
+  { id: "search", label: "Search", icon: "⌕", keywords: "find global search tables columns names typeahead suggest everything" },
+  { id: "semantics", label: "Semantic layer", icon: "ƒ", keywords: "metrics models measures" },
+  { id: "tools", label: "Tool registry", icon: "⛭", keywords: "sql tool version execute registry" },
+  { id: "tool-plans", label: "Tool plans", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
+  /* R11-S13 (M1): one lineage destination with three views. The keywords of
+     the entry it absorbed are merged in, so an analyst searching "unified
+     lineage" or "graph" in the palette is still offered the page that now
+     answers for them. */
+  { id: "lineage", label: "Lineage", icon: "↗", keywords: "impact upstream downstream narrated explain graph unified topology nodes edges dbt openlineage foreign key domain cross boundary grant blast radius" },
   // --- Consumer: use what has been approved -------------------------------
-  { id: "marketplace", label: "Marketplace", group: "Consumer", icon: "◇", keywords: "products access request" },
-  { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
+  { id: "marketplace", label: "Marketplace", icon: "◇", keywords: "products access request" },
+  { id: "portfolio-analytics", label: "Portfolio analytics", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
   // --- Developer: the audience that consumes context rather than reads it --
   //
   //   Context products sit here deliberately. A Consumer browses the
@@ -118,40 +157,71 @@ const NAV: NavItem[] = [
   //   context and points an agent at it. Those are different jobs, and
   //   keeping them in one group is why the gateway had nowhere obvious to
   //   live. Screen ids are unchanged, so `#/context` still resolves.
-  { id: "context", label: "Context products", group: "Developer", icon: "◫", keywords: "context compile mcp rest yaml osi odcs snowflake databricks bindings rollout" },
-  { id: "developer", label: "Agent gateway", group: "Developer", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
+  { id: "context", label: "Context products", icon: "◫", keywords: "context compile mcp rest yaml osi odcs snowflake databricks bindings rollout" },
+  { id: "developer", label: "Agent gateway", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
   // --- Steward: make the estate mean something ----------------------------
-  { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
-  { id: "worklist", label: "Documentation worklist", group: "Steward", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
-  { id: "playbooks", label: "Playbooks", group: "Steward", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
-  { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
-  { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
-  { id: "description-drafts", label: "Description drafts", group: "Steward", icon: "✎", keywords: "asset description draft generate submit steward" },
-  { id: "relationships", label: "Relationships", group: "Steward", icon: "⌁", keywords: "keys graph links" },
-  { id: "cross-source", label: "Cross-source", group: "Steward", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
-  { id: "transformations", label: "Transformations", group: "Steward", icon: "▤", keywords: "dbt models sql transforms manifest" },
-  { id: "quality", label: "Data quality", group: "Steward", icon: "◎", keywords: "incidents score checks" },
-  { id: "studio", label: "Studio", group: "Steward", icon: "△", keywords: "change sets author" },
+  /* R11-S13 (items 15/17): one stewardship workspace with Work queue, Bulk
+     actions and Automation views. The keywords of the Playbooks entry it
+     absorbed are merged in, so a steward searching "playbook" or "scheduled"
+     in the palette is still offered the page that now holds them. */
+  { id: "stewardship", label: "Stewardship", icon: "⚑", keywords: "work queue bulk actions tag classify own certify unowned backlog route escalation ownership expiry reaffirm automation playbook playbooks scheduled at-1 coverage scorecard snapshot snapshots history" },
+  { id: "ownership", label: "Ownership", icon: "⚐", keywords: "ownership owner rules assignments leaver reassignment reassign successor reaffirm expiry expiring assign owners apply rule gl-7 p2-07" },
+  /* R11-S13 (M3): one destination for documenting the estate. The keywords of
+     the two entries it absorbed are merged in, so a steward searching "csv
+     import" or "description draft" in the palette is still offered the page
+     that now answers for them. */
+  { id: "worklist", label: "Documentation", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next asset description draft drafts generate submit steward data dictionary dictionaries csv import upload column table descriptions claims workspace" },
+  /* R11-S10: one console for all three task agents. The keywords of the three
+     routes it replaces are merged, so searching "quality agent" or "lineage
+     agent" in the palette still finds the page that now answers for them. */
+  { id: "task-agents", label: "Task agents", icon: "✧", keywords: "steward agent lineage agent quality agent adr-0029 draft propose descriptions glossary links worklist view definitions parse edges rules row count floor null rate ceiling profiles autonomy tier kill switch acceptance t2" },
+  { id: "negative-knowledge", label: "Negative knowledge", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
+  { id: "meaning", label: "Business meaning", icon: "Aa", keywords: "glossary terms annotations" },
+  /* R11-AUD08: what the platform found about what the glossary means -- terms
+     that collide, and tables it suggests a term for -- and the reviews a
+     steward opens from them. */
+  { id: "glossary-review", label: "Glossary review", icon: "≟", keywords: "glossary conflicts detect resolve synonym collision definition disagreement link proposals generate submit evidence confidence maker checker" },
+  { id: "relationships", label: "Relationships", icon: "⌁", keywords: "keys graph links" },
+  { id: "cross-source", label: "Cross-source", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
+  { id: "transformations", label: "Transformations", icon: "▤", keywords: "dbt models sql transforms manifest" },
+  { id: "quality", label: "Data quality", icon: "◎", keywords: "incidents score checks" },
+  { id: "studio", label: "Studio", icon: "△", keywords: "change sets author" },
   // --- Reviewer: decide, with the evidence in one pane --------------------
-  { id: "governance", label: "Review queue", group: "Reviewer", icon: "✓", keywords: "approve reject proposals" },
-  { id: "parsed-lineage-review", label: "Parsed lineage review", group: "Reviewer", icon: "↯", keywords: "lineage parsed view procedure dbt openlineage proposed approve reject p1-05" },
-  { id: "refusals", label: "Policy refusals", group: "Reviewer", icon: "!", keywords: "lineage blocked denied" },
-  { id: "reviewer-agent", label: "Reviewer agent", group: "Reviewer", icon: "◈", keywords: "reviewer agent adr-0027 auto-decide suspend disagreement sample audit tier0 tier1" },
+  /* R11-S10: one review destination. The parsed-lineage queue is a tab of this
+     screen, so its keywords belong to this entry -- a reviewer searching
+     "parsed lineage" must still be offered the page that decides those edges. */
+  { id: "governance", label: "Review queue", icon: "✓", keywords: "approve reject proposals parsed lineage view procedure dbt openlineage edges p1-05 governance" },
+  { id: "reviewer-agent", label: "Reviewer agent", icon: "◈", keywords: "reviewer agent adr-0027 auto-decide suspend disagreement sample audit tier0 tier1" },
   // --- Operator: keep the estate and the AI running -----------------------
-  { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health model workbook excel columns import export" },
-  { id: "operations", label: "Operations", group: "Operator", icon: "↻", keywords: "runs jobs ingestion outbox" },
-  { id: "agents", label: "AI governance", group: "Operator", icon: "⌬", keywords: "model routes agents evaluations runtime" },
-  { id: "ai", label: "AI registry", group: "Operator", icon: "◆", keywords: "agents models tools" },
-  { id: "agent-roster", label: "Agent roster", group: "Operator", icon: "▥", keywords: "agent roster purpose method tool-first confidence auto-apply inspect" },
-  { id: "access-policies", label: "Access policies", group: "Operator", icon: "⚖", keywords: "abac policy authorization simulation mask deny allow filter" },
-  { id: "workspace-access", label: "Workspace access", group: "Operator", icon: "⚿", keywords: "members roles bindings approve reject bi tableau lineage connections" },
-  { id: "delegations", label: "Delegations", group: "Operator", icon: "⇌", keywords: "delegation grant revoke governance authority pg-4 time-bounded" },
-  { id: "reliability", label: "Reliability", group: "Operator", icon: "⏱", keywords: "slo error budget notification escalation archive worm audit archive data contract sla violations" },
-  { id: "administration", label: "Administration", group: "Operator", icon: "⚙", keywords: "organization project datasource setup" },
-  // --- Auditor: see everything, change nothing ----------------------------
-  { id: "audit", label: "Audit ledger", group: "Auditor", icon: "≣", keywords: "events evidence history" },
-  { id: "compliance", label: "Compliance packs", group: "Auditor", icon: "▣", keywords: "evidence audit framework generate download checksum" },
+  { id: "sources", label: "Sources", icon: "▱", keywords: "connectors databases health model workbook excel columns import export" },
+  { id: "operations", label: "Operations", icon: "↻", keywords: "runs jobs ingestion outbox" },
+  { id: "agents", label: "AI governance", icon: "⌬", keywords: "model routes agents evaluations runtime" },
+  { id: "ai", label: "AI registry", icon: "◆", keywords: "agents models tools" },
+  { id: "agent-roster", label: "Agent roster", icon: "▥", keywords: "agent roster purpose method tool-first confidence auto-apply inspect" },
+  { id: "access-policies", label: "Access policies", icon: "⚖", keywords: "abac policy authorization simulation mask deny allow filter" },
+  { id: "workspace-access", label: "Workspace access", icon: "⚿", keywords: "members roles bindings approve reject bi tableau lineage connections" },
+  { id: "delegations", label: "Delegations", icon: "⇌", keywords: "delegation grant revoke governance authority pg-4 time-bounded" },
+  { id: "reliability", label: "Reliability", icon: "⏱", keywords: "slo error budget notification escalation archive worm audit archive data contract sla violations" },
+  { id: "administration", label: "Administration", icon: "⚙", keywords: "organization project datasource setup" },
+  /* --- Auditor: see everything, change nothing --------------------------
+   *
+   * R11-S10 moved "Policy refusals" here from Reviewer. It was filed under
+   * Reviewer because its name contains a governance word, but nothing on it
+   * can be decided: it is a read-only record of refusals an agent run already
+   * made (`GET /v1/ai-decisions/refusals`, PlatformAdmin/DataAdmin/Auditor), with
+   * no approve, no reject and no queue. Grouping it with the two queues taught
+   * reviewers there was a third thing waiting for them. It is evidence, which
+   * is what the Auditor area is. */
+  { id: "audit", label: "Audit ledger", icon: "≣", keywords: "events evidence history" },
+  { id: "refusals", label: "Policy refusals", icon: "!", keywords: "lineage blocked denied refusal ai decision evidence" },
+  { id: "compliance", label: "Compliance packs", icon: "▣", keywords: "evidence audit framework generate download checksum" },
 ];
+
+/* The one place a nav item's group comes from: the route table. */
+const NAV: NavItem[] = NAV_ENTRIES.map((entry) => ({
+  ...entry,
+  group: WORK_AREA_OF_JOURNEY[SCREEN_JOURNEY[entry.id]],
+}));
 
 const NAV_BY_ID = new Map<ScreenId, NavItem>(NAV.map((item) => [item.id, item]));
 
@@ -180,19 +250,19 @@ function Screen({
 }) {
   switch (view) {
     case "catalog": return <CatalogScreen />;
+    case "search": return <SearchScreen />;
     case "governance": return <ReviewQueueScreen />;
-    case "parsed-lineage-review": return <ParsedLineageReviewScreen />;
-    case "description-drafts": return <DescriptionDraftsScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;
     case "reviewer-agent": return <ReviewerAgentScreen />;
     case "studio": return <StudioChangeSetsScreen />;
-    case "lineage": return <NarratedLineageScreen />;
+    case "lineage": return <LineageWorkspace />;
     case "analyst": return <AskScreen />;
     case "relationships": return <RelationshipsScreen />;
     case "cross-source": return <CrossSourceScreen />;
     case "semantics": return <SemanticsScreen />;
     case "meaning": return <BusinessMeaningScreen />;
+    case "glossary-review": return <GlossaryReviewWorkspace />;
     case "quality": return <QualityScreen />;
     case "ai": return <AiRegistryScreen />;
     case "agent-roster": return <AgentRosterScreen />;
@@ -203,13 +273,13 @@ function Screen({
     case "developer": return <AgentGatewayScreen />;
     case "portfolio-analytics": return <PortfolioAnalyticsScreen />;
     case "tools": return <ToolRegistryScreen />;
-    case "unified-lineage": return <UnifiedLineageScreen />;
     case "transformations": return <TransformationsScreen />;
     case "agents": return <AiGovernanceScreen />;
     case "administration": return <AdministrationScreen />;
-    case "stewardship": return <StewardshipScreen />;
-    case "worklist": return <DocumentationWorklistScreen />;
-    case "playbooks": return <PlaybooksScreen />;
+    case "stewardship": return <StewardshipWorkspace />;
+    case "ownership": return <OwnershipScreen />;
+    case "worklist": return <DocumentationWorkspace />;
+    case "task-agents": return <TaskAgentsScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
     case "access-policies": return <AccessPolicyScreen />;
     case "compliance": return <ComplianceScreen />;
@@ -390,12 +460,37 @@ function AuthBlockedScreen({ block }: { block: AuthBlock }) {
 
 function AppShell() {
   const view = useCurrentScreen();
+  const canonicalUrl = useAppLocation().canonical;
   const session = useSession();
-  const [devPersona, setDevPersona] = useState<Persona>("Steward");
+  const confirmNavigation = useUnsavedNavigationGuard();
+  const [devPersona, setDevPersona] = useState<Persona>(APP_CONFIG.devPersona ?? "Steward");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteInputRef = useRef<HTMLInputElement>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const mainRef = useRef<HTMLElement>(null);
+  const viewRef = useRef<HTMLDivElement>(null);
+  const navCloseRef = useRef<HTMLButtonElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  /* R11-C2: closing the drawer is a focus move, not just a state change.
+   *
+   * Every non-navigating way out of it -- the ×, the scrim, Escape -- returns
+   * focus to the control that opened it. Navigation deliberately does NOT go
+   * through here: it closes the drawer too, but the route effect further down
+   * owns where focus lands in that case, and two effects fighting over focus
+   * in a single commit is how a fix becomes a flicker. */
+  const closeNav = useCallback(() => {
+    setNavOpen(false);
+    menuButtonRef.current?.focus();
+  }, []);
+
+  /* The window-level Escape listener below is bound once, so it reads the
+   * drawer's state through a ref rather than a stale closure. The guard is
+   * load-bearing: without it, Escape pressed anywhere in the app -- dismissing
+   * a screen's own popover, say -- would drag focus up to the menu button. */
+  const navOpenRef = useRef(false);
+  navOpenRef.current = navOpen;
   const [expandedGroup, setExpandedGroup] = useState<WorkArea | null>(
     () => NAV_BY_ID.get(view)?.group ?? GROUPS[0]!,
   );
@@ -429,12 +524,33 @@ function AppShell() {
       }
       if (event.key === "Escape") {
         setPaletteOpen(false);
-        setNavOpen(false);
+        // R11-C2: Escape out of the drawer returns focus to the control that
+        // opened it, exactly as the × does. Closing it and leaving focus on a
+        // control that has just become invisible is where a keyboard user
+        // loses their place entirely. Read through a ref, not from the
+        // closure: this listener is bound once.
+        if (navOpenRef.current) closeNav();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [closeNav]);
+
+  /* R11-S10: a URL that resolved through an alias is rewritten to the
+   * canonical `#/journey/screen` spelling.
+   *
+   * Every route that worked before this row still works -- the flat
+   * `#/catalog`, a stale journey segment, and the four routes that were merged
+   * away -- and each of them lands on the right screen with the right filters.
+   * This is what stops the two spellings from both staying in circulation: the
+   * next link the user copies is the current one.
+   *
+   * `replaceState`, so a bookmark does not cost a Back press to leave. Keyed on
+   * `canonicalUrl` rather than run once, because Back/Forward can put a
+   * non-canonical URL back in the address bar at any time. */
+  useEffect(() => {
+    if (!canonicalUrl) normalizeLocation();
+  }, [canonicalUrl, view]);
 
   // UX-20: with no explicit route, land in the persona's own work area rather
   // than always on Overview. Runs once, and only when the URL names no screen
@@ -454,6 +570,43 @@ function AppShell() {
   const current = NAV_BY_ID.get(view) ?? NAV[0]!;
   const sectionItems = NAV.filter((item) => item.group === current.group);
 
+  /* Opening it is the other half: without this the drawer appears and focus
+   * stays behind it on the menu button, so the next Tab walks the topbar
+   * underneath the open drawer instead of its contents. */
+  const navWasOpen = useRef(false);
+  useEffect(() => {
+    if (navOpen && !navWasOpen.current) navCloseRef.current?.focus();
+    navWasOpen.current = navOpen;
+  }, [navOpen]);
+
+  /* R11-C2: a route change has to be perceivable without sight.
+   *
+   * Choosing a nav item replaces the entire content pane and leaves focus on
+   * the button that was clicked, inside the navigation. A screen-reader user
+   * is told nothing -- the page they asked for arrived silently -- and a
+   * keyboard user's next Tab carries on through the remaining nav items
+   * rather than entering the screen they just opened. axe sees none of this:
+   * the markup is equally valid before and after.
+   *
+   * So two things happen. The new screen's region takes focus, which both
+   * announces it (the region's accessible name is read out) and puts the Tab
+   * position where the user expects; and the polite live region states the
+   * screen by name, which is what covers a user who has moved focus elsewhere
+   * while the lazy chunk downloads.
+   *
+   * Deliberately not on first render: taking focus off the document on load
+   * is its own defect, and there is no navigation yet to report. */
+  const [announcement, setAnnouncement] = useState("");
+  const firstView = useRef(true);
+  useEffect(() => {
+    if (firstView.current) {
+      firstView.current = false;
+      return;
+    }
+    setAnnouncement(`${current.label}, ${current.group}`);
+    viewRef.current?.focus();
+  }, [view, current.label, current.group]);
+
   /* F09: navigation goes through the one location store, which writes the
    * screen hash and keeps only the fields the TARGET screen declares.
    *
@@ -463,14 +616,34 @@ function AppShell() {
    * entirely. Dropping them is the fix, not a regression: estate context
    * (`ds`/`project`/`dom`) is still inherited by screens that declare it. */
   const navigate = (id: string, params?: Record<string, string>) => {
-    setPaletteOpen(false);
-    setNavOpen(false);
-    const target = SCREEN_IDS.find((screen) => screen === id);
-    if (!target) {
+    /* R11-S13: resolved through the retired-alias table, not matched against
+     * the live list. `onNavigate` takes a `string` -- `HomeScreen`,
+     * `AgentInboxScreen`, `FirstSourceSetup` and `OnboardingWizard` all pass
+     * literals the compiler never checks -- so a screen merged away under one
+     * of those literals would silently do nothing here. Same contract a pasted
+     * URL gets from `resolveHash`. */
+    const resolved = resolveScreenRef(id);
+    if (!resolved) {
       if (import.meta.env?.DEV) console.warn(`App.navigate: unknown screen "${id}"`);
       return;
     }
-    pushLocation({ screen: target, params });
+    /* R11-S10: ask before discarding a half-written form.
+     *
+     * Asked BEFORE the drawer and palette are closed, so declining leaves the
+     * user exactly where they were rather than dismissing the navigation they
+     * just chose not to make. This is the single choke point for in-app
+     * navigation -- the sidebar, the section nav, the palette and every
+     * screen's `onNavigate` all arrive here -- which is why the guard lives at
+     * this one call rather than on each control. */
+    if (!confirmNavigation()) return;
+    setPaletteOpen(false);
+    setNavOpen(false);
+    // The caller's selection, with the retired route's implied filter overlaid
+    // -- the same order `normalizeLocation` folds them in.
+    pushLocation({
+      screen: resolved.screen,
+      params: { ...params, ...(resolved.params ?? {}) },
+    });
   };
 
   const matches = useMemo(() => {
@@ -481,6 +654,20 @@ function AppShell() {
 
   return (
     <div className={`shell${navOpen ? " shell--nav-open" : ""}`}>
+      {/* R11-C2: the first thing the keyboard reaches, so the ~30 navigation
+          controls are one keystroke to bypass rather than thirty to sit
+          through. A button and not the usual `<a href="#main-content">`: the
+          fragment is this app's router (`#/catalog`), so an anchor that wrote
+          `#main-content` into it would navigate the app to a screen that does
+          not exist. */}
+      <button
+        type="button"
+        className="skiplink"
+        onClick={() => mainRef.current?.focus()}
+      >
+        Skip to main content
+      </button>
+
       <nav className="snav" aria-label="Main">
         <div className="snav__brand">
           <span className="snav__mark" aria-hidden="true">A</span>
@@ -488,7 +675,7 @@ function AppShell() {
             <span className="snav__name">Atlas</span>
             <span className="snav__edition">Data intelligence</span>
           </span>
-          <button className="snav__mobile-close" onClick={() => setNavOpen(false)} aria-label="Close navigation">×</button>
+          <button ref={navCloseRef} className="snav__mobile-close" onClick={closeNav} aria-label="Close navigation">×</button>
         </div>
 
         <div className="snav__context">
@@ -521,12 +708,17 @@ function AppShell() {
         </div>
       </nav>
 
-      <button className="shell__scrim" onClick={() => setNavOpen(false)} aria-label="Close navigation" />
+      {/* A pointer affordance only, and now labelled as one: it duplicates the
+          × inside the drawer, so exposing it as a second "Close navigation"
+          button gave a screen-reader user two controls for one action and put
+          an extra stop in the Tab order *outside* the drawer it closes.
+          Escape and the × are the keyboard's two ways out. */}
+      <button className="shell__scrim" onClick={closeNav} aria-hidden="true" tabIndex={-1} />
 
-      <main className="smain">
+      <main className="smain" id="main-content" ref={mainRef} tabIndex={-1}>
         <header className="topbar">
           <div className="topbar__trail">
-            <button className="topbar__menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button>
+            <button ref={menuButtonRef} className="topbar__menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button>
             <span className="topbar__workspace">Workspace</span>
             <span className="topbar__slash" aria-hidden="true">/</span>
             <strong>{current.label}</strong>
@@ -577,13 +769,34 @@ function AppShell() {
             fails to download costs this screen and not the whole app. The
             boundary resets on the screen id, which is what lets the user
             navigate away from a broken route without reloading. */}
-        <div className="sview" key={view} data-screen={view}>
+        {/* R11-C2: the destination of the route-change focus move above, and
+            a landmark in its own right so "the page" is something a screen
+            reader can jump to. `tabIndex={-1}` makes it programmatically
+            focusable without adding a Tab stop. */}
+        <div
+          className="sview"
+          key={view}
+          data-screen={view}
+          ref={viewRef}
+          tabIndex={-1}
+          role="region"
+          aria-label={current.label}
+        >
           <RouteErrorBoundary resetKey={view} label={current.label}>
             <Suspense fallback={<div className="screenloading" role="status">Loading {current.label}…</div>}>
               {view === "home" ? <HomeScreen persona={persona} onNavigate={navigate} /> : <Screen view={view} personaKey={personaKey} onNavigate={navigate} />}
             </Suspense>
           </RouteErrorBoundary>
         </div>
+
+        {/* R11-C2: rendered always and empty to start, because a live region
+            only announces text that CHANGES while it is already in the
+            document -- one mounted at the same moment as its message says
+            nothing at all. This is the announcement channel for the shell
+            itself (which screen you are now on); screens own their own. */}
+        <p className="sr-only" role="status" aria-live="polite" data-testid="route-announcer">
+          {announcement}
+        </p>
       </main>
 
       {/* F21: this palette was the review's own example of ARIA standing in for
@@ -630,6 +843,7 @@ function AppShell() {
             ) : (
               <div className="palette__empty">No matching page</div>
             )}
+            <PaletteAssetResults query={query} pagesMatched={matches.length > 0} onOpen={navigate} />
           </div>
         </Dialog>
       ) : null}

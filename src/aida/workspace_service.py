@@ -38,11 +38,6 @@ from aida.workspace_access import (
     rule_derived_roles,
 )
 
-# Workspace roles, weakest first. Roles are additive across memberships; a DENY from
-# policy always wins over a grant from a role, and maker != checker (INV-8) holds
-# regardless of role -- a workspace_owner who proposes still cannot approve.
-WORKSPACE_ROLES = ("viewer", "analyst", "steward", "reviewer", "workspace_owner")
-
 _ROLE_ACTIONS: dict[str, frozenset[str]] = {
     "viewer": frozenset({"READ_METADATA"}),
     "analyst": frozenset(
@@ -54,8 +49,40 @@ _ROLE_ACTIONS: dict[str, frozenset[str]] = {
     "reviewer": frozenset(
         {"READ_METADATA", "READ_DATA", "EXECUTE_TOOL", "CONSUME_CONTEXT", "APPROVE"}
     ),
+    # R11-B9: "may extract the audit ledger, may not read the data it describes".
+    # `EXPORT` without `READ_DATA`, and nothing that runs, consumes, proposes or
+    # approves: an auditor reads metadata and extracts what `EXPORT` gates.
+    # Before this role the only grant that reached `EXPORT` was
+    # `workspace_owner`, which also reads data and approves changes. The role
+    # ceiling is checked before any policy is loaded (`authorize`, step 2), so
+    # no ALLOW policy can widen this role into `READ_DATA`.
+    "auditor": frozenset({"READ_METADATA", "EXPORT"}),
+    # `EXPORT` was declared in `policy_engine.ACTIONS` from the beginning and
+    # granted by no role here, which made it unreachable: a surface gating on
+    # it was refused `ROLE_DOES_NOT_PERMIT_ACTION` in every enforcing workspace
+    # no matter what policy said, so the verb could be written into a policy
+    # and never take effect. R11-B9's audit export is the first enforcement
+    # point for it (`aida.audit_export_api`), and found the gap.
+    #
+    # Granted to `workspace_owner` and `auditor` only, deliberately. Bulk
+    # extraction of a governed corpus is an elevated act, and widening it to
+    # `analyst` or `steward` would hand every member of every migrated
+    # workspace the ability to walk out with the audit ledger -- a decision
+    # nobody has made. Identity-provider auditors reach `auditor` through the
+    # organization-wide `WorkspaceAccessRule` migration `b7e3d1f9a254` seeds,
+    # by the principle every seeded rule follows: an IdP role maps onto the
+    # workspace role matching what it could already do, so the rule grants
+    # nothing new. Revoking that rule revokes it.
     "workspace_owner": frozenset(
-        {"READ_METADATA", "READ_DATA", "EXECUTE_TOOL", "CONSUME_CONTEXT", "PROPOSE", "APPROVE"}
+        {
+            "READ_METADATA",
+            "READ_DATA",
+            "EXECUTE_TOOL",
+            "CONSUME_CONTEXT",
+            "PROPOSE",
+            "APPROVE",
+            "EXPORT",
+        }
     ),
 }
 
@@ -247,7 +274,6 @@ async def authorize(
             roles=frozenset(context.roles) | roles,
             workspace_id=workspace_id,
             purpose=context.business_purpose,
-            isolation_boundary_id=workspace.isolation_boundary_id,
         ),
         Resource(
             resource_type=resource_type,
@@ -356,7 +382,6 @@ async def create_workspace(
     slug: str,
     purpose: str,
     owner_principal: str,
-    isolation_boundary_id: UUID | None = None,
     monthly_cost_ceiling: int | None = None,
 ) -> Workspace:
     """Create a workspace and seat its first owner in one step.
@@ -371,7 +396,6 @@ async def create_workspace(
         name=name,
         slug=slug,
         purpose=purpose,
-        isolation_boundary_id=isolation_boundary_id,
         monthly_cost_ceiling=monthly_cost_ceiling,
     )
     session.add(workspace)

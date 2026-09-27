@@ -1,0 +1,773 @@
+{
+  "artifact_kind": "OFFLINE_SAMPLE_ANALYSIS",
+  "analyzed_form": "STORED_LITERAL_REDACTED",
+  "published_context_product": false,
+  "ontology": {
+    "status": "SCHEMA_VALIDATED_ONLY",
+    "definition": {
+      "name": "Sample customer revenue",
+      "owner": "sample-revenue-steward",
+      "provenance": "Synthetic SQL Server and PostgreSQL footprint fixtures; proposed business meaning, not a published ontology",
+      "lifecycle": "ACTIVE",
+      "concepts": [
+        {
+          "key": "customer",
+          "name": "Customer",
+          "description": "A synthetic customer identified by customer_id",
+          "aliases": [
+            "buyer"
+          ],
+          "deprecated": false
+        },
+        {
+          "key": "order",
+          "name": "Order",
+          "description": "A synthetic order associated with exactly one customer",
+          "aliases": [
+            "purchase"
+          ],
+          "deprecated": false
+        },
+        {
+          "key": "customer_revenue",
+          "name": "Customer revenue",
+          "description": "Sum of order amount minus discount at one row per customer and region; this fixture's definition is not a universal revenue definition",
+          "aliases": [
+            "net sales"
+          ],
+          "deprecated": false
+        }
+      ],
+      "relations": [
+        {
+          "key": "places",
+          "source": "customer",
+          "target": "order",
+          "description": "Customer places orders; physical evidence is the orders.customer_id foreign key",
+          "cardinality": "ONE_TO_MANY",
+          "deprecated": false
+        },
+        {
+          "key": "has_revenue",
+          "source": "customer",
+          "target": "customer_revenue",
+          "description": "At most one aggregate row per customer in this fixture; customers without orders have no row because the view uses an inner join",
+          "cardinality": "ONE_TO_ONE",
+          "deprecated": false
+        }
+      ],
+      "mappings": []
+    },
+    "mapping_note": "Bind real catalog IDs after ingestion; no synthetic IDs are published."
+  },
+  "engines": {
+    "sqlserver": {
+      "view": {
+        "evidence_ref": "tests/fixtures/database_footprint/sqlserver/view.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "footprint_context_sample.customers",
+              "source_column": "customer_id",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true
+            },
+            {
+              "source_table": "footprint_context_sample.customers",
+              "source_column": "region",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "region",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "amount",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "discount",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true
+            }
+          ],
+          "confidence": "FULL",
+          "dialect": "tsql",
+          "sql_hash": "02597d1119f549440a8d2b0590ff82d98942a15fd70b47c72ba129d9c355ee6f",
+          "errors": []
+        }
+      },
+      "read": {
+        "evidence_ref": "tests/fixtures/database_footprint/sqlserver/read.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "footprint_context_sample.customer_revenue",
+              "source_column": "customer_id",
+              "target_table": "<RESULT>",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.customer_revenue",
+              "source_column": "region",
+              "target_table": "<RESULT>",
+              "target_column": "region",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.customer_revenue",
+              "source_column": "net_revenue",
+              "target_table": "<RESULT>",
+              "target_column": "net_revenue",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            }
+          ],
+          "statement_count": 1,
+          "confidence": "FULL",
+          "dialect": "tsql",
+          "sql_hash": "a5d752a83d7da8c2a8131329f488f1ed4a5f1a3962338c9cb652fdae177f9b22",
+          "errors": [],
+          "is_fully_parsed": true,
+          "is_read_only": true
+        },
+        "unresolved_edge_count": 0,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLUEPRINT_ONLY",
+          "sql_template": "SELECT\n  r.customer_id,\n  r.region,\n  r.net_revenue\nFROM footprint_context_sample.customer_revenue AS r"
+        }
+      },
+      "refresh": {
+        "evidence_ref": "tests/fixtures/database_footprint/sqlserver/refresh.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "customer_id",
+              "target_table": "footprint_totals",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": true,
+              "is_intermediate": true,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "amount",
+              "target_table": "footprint_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": true,
+              "is_intermediate": true,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "discount",
+              "target_table": "footprint_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": true,
+              "is_intermediate": true,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_totals",
+              "source_column": "customer_id",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_totals",
+              "source_column": "net_revenue",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "customer_id",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "customer_id",
+              "transformation_type": "DERIVED",
+              "confidence": "PARTIAL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": "footprint_totals"
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "amount",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "PARTIAL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": "footprint_totals"
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "discount",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "PARTIAL",
+              "dialect": "tsql",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": "footprint_totals"
+            }
+          ],
+          "statement_count": 2,
+          "confidence": "PARTIAL",
+          "dialect": "tsql",
+          "sql_hash": "7065db07a5dfd6cadb7521d18be7234f3b4048409d2d2d03ef31d58675d8e381",
+          "errors": [],
+          "is_fully_parsed": true,
+          "is_read_only": false
+        },
+        "unresolved_edge_count": 0,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLOCKED",
+          "reason": "procedure is not eligible for tool generation: 2 write statement(s) found (INSERT/UPDATE/DELETE/MERGE/CREATE/SELECT INTO) -- not read-only"
+        }
+      },
+      "dynamic": {
+        "evidence_ref": "tests/fixtures/database_footprint/sqlserver/dynamic.sql",
+        "stored_redaction_status": "LEXICAL",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "UNRESOLVED",
+              "source_column": "<UNPARSED>",
+              "target_table": "<RESULT>",
+              "target_column": "<UNPARSED>",
+              "transformation_type": "UNPARSED",
+              "confidence": "LOW",
+              "dialect": "tsql",
+              "source_resolved": false,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": "DYNAMIC_SQL: 'EXEC(N:redacted)'",
+              "via_temp_table": null
+            }
+          ],
+          "statement_count": 1,
+          "confidence": "PARTIAL",
+          "dialect": "tsql",
+          "sql_hash": "fc1067c8efe048378213f3b6b57c6c50cfb4fa7a8bb1e48241d6423d25a3eebc",
+          "errors": [
+            "DYNAMIC_SQL: 'EXEC(N:redacted)'"
+          ],
+          "is_fully_parsed": false,
+          "is_read_only": false
+        },
+        "unresolved_edge_count": 1,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLOCKED",
+          "reason": "procedure is not eligible for tool generation: 1 statement(s) could not be parsed, so read-only cannot be proven (not just \"no write statement found\"): [\"DYNAMIC_SQL: 'EXEC(N:redacted)'\"]"
+        }
+      },
+      "nested": {
+        "evidence_ref": "tests/fixtures/database_footprint/sqlserver/nested.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "UNRESOLVED",
+              "source_column": "<UNPARSED>",
+              "target_table": "<RESULT>",
+              "target_column": "<UNPARSED>",
+              "transformation_type": "UNPARSED",
+              "confidence": "LOW",
+              "dialect": "tsql",
+              "source_resolved": false,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": "NESTED_PROCEDURE_CALL: footprint_context_sample.read_revenue",
+              "via_temp_table": null
+            }
+          ],
+          "statement_count": 1,
+          "confidence": "PARTIAL",
+          "dialect": "tsql",
+          "sql_hash": "75461a9cda00a0143edab32a5289350d3197414e42bb21c607499a8b58152613",
+          "errors": [
+            "NESTED_PROCEDURE_CALL: footprint_context_sample.read_revenue"
+          ],
+          "is_fully_parsed": false,
+          "is_read_only": false
+        },
+        "unresolved_edge_count": 1,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLOCKED",
+          "reason": "procedure is not eligible for tool generation: 1 statement(s) could not be parsed, so read-only cannot be proven (not just \"no write statement found\"): ['NESTED_PROCEDURE_CALL: footprint_context_sample.read_revenue']"
+        }
+      }
+    },
+    "postgres": {
+      "view": {
+        "evidence_ref": "tests/fixtures/database_footprint/postgres/view.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "footprint_context_sample.customers",
+              "source_column": "customer_id",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true
+            },
+            {
+              "source_table": "footprint_context_sample.customers",
+              "source_column": "region",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "region",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "amount",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "discount",
+              "target_table": "footprint_context_sample.customer_revenue",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true
+            }
+          ],
+          "confidence": "FULL",
+          "dialect": "postgres",
+          "sql_hash": "02597d1119f549440a8d2b0590ff82d98942a15fd70b47c72ba129d9c355ee6f",
+          "errors": []
+        }
+      },
+      "read": {
+        "evidence_ref": "tests/fixtures/database_footprint/postgres/read.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "footprint_context_sample.customer_revenue",
+              "source_column": "customer_id",
+              "target_table": "<RESULT>",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.customer_revenue",
+              "source_column": "region",
+              "target_table": "<RESULT>",
+              "target_column": "region",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.customer_revenue",
+              "source_column": "net_revenue",
+              "target_table": "<RESULT>",
+              "target_column": "net_revenue",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            }
+          ],
+          "statement_count": 1,
+          "confidence": "FULL",
+          "dialect": "postgres",
+          "sql_hash": "e78579d2dbe7f5b6337197d5f6e113c0c6f0d24772f60267ff691735add92515",
+          "errors": [],
+          "is_fully_parsed": true,
+          "is_read_only": true
+        },
+        "unresolved_edge_count": 0,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLUEPRINT_ONLY",
+          "sql_template": "SELECT\n  r.customer_id,\n  r.region,\n  r.net_revenue\nFROM footprint_context_sample.customer_revenue AS r"
+        }
+      },
+      "refresh": {
+        "evidence_ref": "tests/fixtures/database_footprint/postgres/refresh.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "customer_id",
+              "target_table": "footprint_totals",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": true,
+              "is_intermediate": true,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "amount",
+              "target_table": "footprint_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": true,
+              "is_intermediate": true,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "discount",
+              "target_table": "footprint_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 0,
+              "is_write": true,
+              "is_intermediate": true,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_totals",
+              "source_column": "customer_id",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "customer_id",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_totals",
+              "source_column": "net_revenue",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "DIRECT",
+              "confidence": "FULL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": null
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "customer_id",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "customer_id",
+              "transformation_type": "DERIVED",
+              "confidence": "PARTIAL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": "footprint_totals"
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "amount",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "PARTIAL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": "footprint_totals"
+            },
+            {
+              "source_table": "footprint_context_sample.orders",
+              "source_column": "discount",
+              "target_table": "footprint_context_sample.customer_totals",
+              "target_column": "net_revenue",
+              "transformation_type": "AGGREGATED",
+              "confidence": "PARTIAL",
+              "dialect": "postgres",
+              "source_resolved": true,
+              "statement_ordinal": 1,
+              "is_write": true,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": null,
+              "via_temp_table": "footprint_totals"
+            }
+          ],
+          "statement_count": 2,
+          "confidence": "PARTIAL",
+          "dialect": "postgres",
+          "sql_hash": "18bd15a0987fc5bf089ed3130f849b43f1416dd1e43f0e724f9daf9f026d8005",
+          "errors": [],
+          "is_fully_parsed": true,
+          "is_read_only": false
+        },
+        "unresolved_edge_count": 0,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLOCKED",
+          "reason": "procedure is not eligible for tool generation: 2 write statement(s) found (INSERT/UPDATE/DELETE/MERGE/CREATE/SELECT INTO) -- not read-only"
+        }
+      },
+      "dynamic": {
+        "evidence_ref": "tests/fixtures/database_footprint/postgres/dynamic.sql",
+        "stored_redaction_status": "LEXICAL",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "UNRESOLVED",
+              "source_column": "<UNPARSED>",
+              "target_table": "<RESULT>",
+              "target_column": "<UNPARSED>",
+              "transformation_type": "UNPARSED",
+              "confidence": "LOW",
+              "dialect": "postgres",
+              "source_resolved": false,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": "DYNAMIC_SQL: PL/pgSQL EXECUTE runs a string built at runtime",
+              "via_temp_table": null
+            }
+          ],
+          "statement_count": 1,
+          "confidence": "PARTIAL",
+          "dialect": "postgres",
+          "sql_hash": "2cdaf2144ba6ce3add2df389ca97b2bdac8073b4d9d8d6fc5f58f9785e6f47fb",
+          "errors": [
+            "DYNAMIC_SQL: PL/pgSQL EXECUTE runs a string built at runtime"
+          ],
+          "is_fully_parsed": false,
+          "is_read_only": false
+        },
+        "unresolved_edge_count": 1,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLOCKED",
+          "reason": "procedure is not eligible for tool generation: 1 statement(s) could not be parsed, so read-only cannot be proven (not just \"no write statement found\"): ['DYNAMIC_SQL: PL/pgSQL EXECUTE runs a string built at runtime']"
+        }
+      },
+      "nested": {
+        "evidence_ref": "tests/fixtures/database_footprint/postgres/nested.sql",
+        "stored_redaction_status": "PARSED",
+        "analysis": {
+          "edges": [
+            {
+              "source_table": "UNRESOLVED",
+              "source_column": "<UNPARSED>",
+              "target_table": "<RESULT>",
+              "target_column": "<UNPARSED>",
+              "transformation_type": "UNPARSED",
+              "confidence": "LOW",
+              "dialect": "postgres",
+              "source_resolved": false,
+              "statement_ordinal": 0,
+              "is_write": false,
+              "is_intermediate": false,
+              "control_flow_context": null,
+              "unparsed_reason": "NESTED_PROCEDURE_CALL: footprint_context_sample.refresh_totals",
+              "via_temp_table": null
+            }
+          ],
+          "statement_count": 1,
+          "confidence": "PARTIAL",
+          "dialect": "postgres",
+          "sql_hash": "0bccdd00bafabf4776141c900bba52ed22f6773416364da94d048aa64cf3a2e9",
+          "errors": [
+            "NESTED_PROCEDURE_CALL: footprint_context_sample.refresh_totals"
+          ],
+          "is_fully_parsed": false,
+          "is_read_only": false
+        },
+        "unresolved_edge_count": 1,
+        "tool_candidate": {
+          "published": false,
+          "execution_surface": "EXTRACTED_SELECT",
+          "status": "BLOCKED",
+          "reason": "procedure is not eligible for tool generation: 1 statement(s) could not be parsed, so read-only cannot be proven (not just \"no write statement found\"): ['NESTED_PROCEDURE_CALL: footprint_context_sample.refresh_totals']"
+        }
+      }
+    }
+  }
+}

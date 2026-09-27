@@ -51,12 +51,6 @@ from aida.models import (
 )
 from aida.security import SecurityContext
 
-RULE_TYPES: tuple[str, ...] = (
-    "TABLE_ROW_COUNT_MIN",
-    "TABLE_ROW_COUNT_MAX",
-    "COLUMN_NULL_RATE_MAX",
-)
-
 _SCHEDULER_PRINCIPAL = "fleet-scheduler"
 logger = structlog.get_logger(__name__)
 

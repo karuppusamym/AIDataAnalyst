@@ -2,6 +2,7 @@
 
 > Status: Authoritative. Supersedes the strategy sections of the retired flat `16-market-comparison-and-product-strategy.md`.
 > Owner: Product. Review cadence: quarterly.
+> Claims: assessed 2026-08-28 against vendor-stated public positioning; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`, `10-architecture/15-agent-architecture-critical-review.md` §5 (primary sources checked 2026-09-09). What incumbents do or lack, below, is that assessment, not current fact.
 
 ## 1. One-sentence product definition
 

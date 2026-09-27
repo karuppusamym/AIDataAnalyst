@@ -1,0 +1,286 @@
+{
+  "description": "R11-OKF02 / R11-FP13 retrieval-only corpus for scripts/okf_context_benchmark.py: given a question, does the stored OKF knowledge bundle put the right object in front of the model? It measures aida.okf_context's lexical ranking and assembly and nothing about answer quality -- no model is asked anything. Each case names its expected objects in the corpus vocabulary of footprint_enrichment_corpus.json (TABLE, ROUTINE, ONTOLOGY_CONCEPT, GOVERNED_TOOL; a view or materialized view is a TABLE). `expected` is any-of for the headline hit; `complete` in the report is all-of. `expected_status` is a first-class verdict: NO_MATCH cases carry no object because the bundle holds nothing on the question, and a case with neither an object nor an explicit NO_MATCH is refused by the loader. `forbidden` objects must not be delivered (a gap). `exactly_one_answer` says one object is the right answer, so an AMBIGUOUS status on it is a false ambiguity; `expect_ambiguous` says two objects are equally right and AMBIGUOUS is the correct response. Cases marked `reuse` take their question and expected object from the named case of another corpus at load time, so those two files cannot drift from this one unnoticed; provenance is printed with each result. AUTHORSHIP, STATED PLAINLY: the OWN cases and the `estate` overlay below were written by the same session that read the ranking code, in steward and user voices respectively, and then run once. They are a regression instrument and an ablation illustration -- they show which signal can matter and pin what was measured -- not an estimate of how often production questions are answered. The paraphrase and no_match categories exist so the corpus contains questions a lexical ranker is expected to miss or refuse, and their results are reported as measured. `fixture_only` marks a case whose ground truth exists only in the fixture estate -- approved text the overlay authored (a column meaning, a table description) or an object only the fixture holds (its tool); the API mode skips it, because a stack that does not carry it would score the estate's absence as a ranking miss. Object keys are the harness estate's fixed slugs (ADR-0014); no production data.",
+  "catalog": "core-warehouse",
+  "estate": {
+    "note": "The harness estate (scripts/quality_benchmark.py: TABLE_SEEDS, FOOTPRINT_ROUTINE_SEEDS, FOOTPRINT_CONCEPT, FOOTPRINT_ROUTINE_DESCRIPTION, TOOL_SEEDS) has tables that carry only a source comment, and a bundle deliberately ignores a source comment -- only an APPROVED Atlas description ranks. So this overlay approves descriptions and column meanings for a subset, the way a steward would, and leaves the rest undescribed: fact_orders, dim_product and dim_employee have no approved table description. Wording is steward-voiced and audited by tests/test_okf_context_benchmark.py so that no overlay text re-creates a lexical path from an enrichment question to its target table.",
+    "table_descriptions": {
+      "dim_customer": "One row per retail customer, holding contact details and onboarding attributes.",
+      "fact_payments": "One row per completed payment, whatever channel it arrived on.",
+      "dim_branch": "One row per bank branch, with its street address and region.",
+      "fact_loan_applications": "Every loan application submitted, with the applicant and the decision so far.",
+      "fact_account_balances": "A balance for each account on each date, taken from the ledger.",
+      "dim_merchant": "The merchants that accept the bank's cards, one row per merchant.",
+      "fact_fraud_alerts": "One row per alert the monitoring system has raised, with its severity and how it was resolved."
+    },
+    "columns": {
+      "fact_orders": {
+        "named": [
+          {"name": "order_id"},
+          {"name": "customer_id"},
+          {"name": "order_total"},
+          {"name": "placed_at"}
+        ]
+      },
+      "dim_customer": {
+        "total": 150,
+        "named": [
+          {"name": "customer_id", "ordinal": 5, "meaning": "The customer's identifier."},
+          {"name": "date_of_birth", "ordinal": 120, "meaning": "The customer's date of birth."},
+          {"name": "email_address", "ordinal": 130, "meaning": "The customer's email address."}
+        ]
+      },
+      "dim_product": {
+        "named": [
+          {"name": "product_id"},
+          {"name": "product_name"},
+          {"name": "product_family"}
+        ]
+      },
+      "fact_payments": {
+        "named": [
+          {"name": "payment_id", "meaning": "The payment's identifier."},
+          {"name": "account_id", "meaning": "The account the payment was made from."},
+          {"name": "amount", "meaning": "The payment amount."},
+          {"name": "paid_at", "meaning": "When the payment completed."}
+        ]
+      },
+      "dim_branch": {
+        "named": [
+          {"name": "branch_id"},
+          {"name": "branch_name"},
+          {"name": "street_address", "meaning": "The branch's street address."},
+          {"name": "region", "meaning": "The region the branch belongs to."}
+        ]
+      },
+      "fact_loan_applications": {
+        "named": [
+          {"name": "application_id"},
+          {"name": "applicant_id"},
+          {"name": "requested_amount", "meaning": "The amount the applicant asked to borrow."},
+          {"name": "decision_status", "meaning": "Whether the application is approved, declined or still open."},
+          {"name": "submitted_at", "meaning": "When the application was submitted."}
+        ]
+      },
+      "dim_employee": {
+        "named": [
+          {"name": "employee_id"},
+          {"name": "full_name"},
+          {"name": "job_title"},
+          {"name": "manager_id"},
+          {"name": "email_address", "meaning": "The employee's work email address."}
+        ]
+      },
+      "fact_account_balances": {
+        "named": [
+          {"name": "account_id", "meaning": "The account the balance belongs to."},
+          {"name": "balance_date", "meaning": "The date the balance is taken."},
+          {"name": "ledger_balance", "meaning": "The account's balance from the ledger."}
+        ]
+      },
+      "dim_merchant": {
+        "named": [
+          {"name": "merchant_id"},
+          {"name": "merchant_name"},
+          {"name": "category", "meaning": "The merchant's business category."}
+        ]
+      },
+      "fact_fraud_alerts": {
+        "named": [
+          {"name": "alert_id"},
+          {"name": "account_id", "meaning": "The account the alert concerns."},
+          {"name": "severity", "meaning": "How serious the alert is."},
+          {"name": "raised_at", "meaning": "When the alert was raised."},
+          {"name": "resolution", "meaning": "How the alert was resolved."}
+        ]
+      }
+    },
+    "concept_definition": "The ledger position a day closes on."
+  },
+  "cases": [
+    {
+      "reuse": {"corpus": "footprint_enrichment_corpus.json", "id": "concept-found-by-alias"},
+      "category": "alias",
+      "exactly_one_answer": true,
+      "product_only": true
+    },
+    {
+      "reuse": {"corpus": "footprint_enrichment_corpus.json", "id": "concept-alias-reaches-mapped-table"},
+      "category": "alias",
+      "exactly_one_answer": true,
+      "product_only": true
+    },
+    {
+      "reuse": {"corpus": "footprint_enrichment_corpus.json", "id": "routine-found-by-name"},
+      "category": "routine",
+      "exactly_one_answer": true
+    },
+    {
+      "reuse": {"corpus": "footprint_enrichment_corpus.json", "id": "routine-lineage-reaches-written-table"},
+      "category": "lineage",
+      "exactly_one_answer": true
+    },
+    {
+      "reuse": {"corpus": "footprint_enrichment_corpus.json", "id": "routine-found-by-approved-description"},
+      "category": "description",
+      "exactly_one_answer": true
+    },
+    {
+      "reuse": {"corpus": "footprint_enrichment_corpus.json", "id": "gap-proposed-lineage-steers-nothing"},
+      "category": "gap",
+      "expected": [{"object_type": "ROUTINE", "object_key": "quarterly_fee_accrual"}]
+    },
+    {
+      "reuse": {"corpus": "answer_evaluation_corpus.json", "id": "concept-alias-answers-over-mapped-table"},
+      "category": "alias",
+      "product_only": true
+    },
+    {
+      "reuse": {"corpus": "answer_evaluation_corpus.json", "id": "routine-lineage-answers-over-written-table"},
+      "category": "lineage"
+    },
+    {
+      "reuse": {"corpus": "answer_evaluation_corpus.json", "id": "concept-and-routine-converge-on-one-table"},
+      "category": "lineage",
+      "product_only": true
+    },
+    {
+      "reuse": {"corpus": "answer_evaluation_corpus.json", "id": "gap-proposed-lineage-supports-no-answer"},
+      "category": "gap"
+    },
+    {
+      "reuse": {"corpus": "answer_evaluation_corpus.json", "id": "lexical-control-answers-without-enrichment"},
+      "category": "name",
+      "exactly_one_answer": true
+    },
+    {
+      "id": "tracker-balances-by-date",
+      "category": "name",
+      "note": "ADDED AFTER THE FIRST RUN, and not authored by this session: it is the question the tracker's own live check of R11-OKF02 asked of the sample estate (2026-09-19), which the walkthrough recorded as answered AMBIGUOUS between two documents. The expected object is the table the sample estate's warehouse schema was built to hold this in. Whether a tie on it is a false ambiguity is exactly what exactly_one_answer asks.",
+      "question": "Which table holds account balances by date?",
+      "expected": [{"object_type": "TABLE", "object_key": "fact_account_balances"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "name-loan-applications",
+      "category": "name",
+      "question": "How many loan applications were submitted last month?",
+      "expected": [{"object_type": "TABLE", "object_key": "fact_loan_applications"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "name-merchants",
+      "category": "name",
+      "question": "Which merchants accept our cards?",
+      "expected": [{"object_type": "TABLE", "object_key": "dim_merchant"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "description-branch-offices",
+      "fixture_only": true,
+      "category": "description",
+      "question": "Which offices does the bank run in each region?",
+      "expected": [{"object_type": "TABLE", "object_key": "dim_branch"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "description-declined",
+      "fixture_only": true,
+      "category": "description",
+      "question": "Which requests were declined?",
+      "expected": [{"object_type": "TABLE", "object_key": "fact_loan_applications"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "description-serious",
+      "fixture_only": true,
+      "category": "description",
+      "question": "How serious was each incident?",
+      "expected": [{"object_type": "TABLE", "object_key": "fact_fraud_alerts"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "column-date-of-birth",
+      "fixture_only": true,
+      "category": "column",
+      "question": "What is a customer's date of birth?",
+      "expected": [{"object_type": "TABLE", "object_key": "dim_customer"}],
+      "expected_text": ["The customer's date of birth."],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "ambiguity-email-address",
+      "fixture_only": true,
+      "category": "ambiguity",
+      "question": "Where is the email address stored?",
+      "expected": [
+        {"object_type": "TABLE", "object_key": "dim_customer"},
+        {"object_type": "TABLE", "object_key": "dim_employee"}
+      ],
+      "expect_ambiguous": true
+    },
+    {
+      "id": "tool-account-summary",
+      "fixture_only": true,
+      "category": "tool",
+      "question": "Show a customer's account summary.",
+      "expected": [{"object_type": "GOVERNED_TOOL", "object_key": "customer-account-summary"}],
+      "exactly_one_answer": true,
+      "product_only": true
+    },
+    {
+      "id": "no-match-weather",
+      "category": "no_match",
+      "question": "What will the weather be in Lisbon on Friday?",
+      "expected_status": "NO_MATCH"
+    },
+    {
+      "id": "no-match-exchange-rate",
+      "category": "no_match",
+      "question": "What is today's EUR to USD exchange rate?",
+      "expected_status": "NO_MATCH"
+    },
+    {
+      "id": "no-match-hiring-plan",
+      "category": "no_match",
+      "question": "Show next quarter's hiring plan.",
+      "expected_status": "NO_MATCH"
+    },
+    {
+      "id": "alias-word-alone",
+      "category": "alias",
+      "note": "ADDED AFTER THE FIRST RUN. The first run of the 25 cases above showed no difference when aliases were removed, because every alias question (`closing position`) also contains `position`, a word of the concept's own name. This case uses only the alias word, so the alias ablation has something to remove. It illustrates the mechanism; it was written after seeing that result and is reported as such.",
+      "question": "What were the closing numbers?",
+      "expected": [{"object_type": "ONTOLOGY_CONCEPT", "object_key": "end_of_day_position"}],
+      "exactly_one_answer": true,
+      "product_only": true
+    },
+    {
+      "id": "no-match-adjacent-satisfaction",
+      "category": "no_match",
+      "note": "ADDED AFTER THE FIRST RUN. The three no_match cases above share no word with the estate at all, so they could only ever pass. This one shares a word (`customer`) with a real table while asking for something no object holds -- the false match a lexical ranker is prone to. The ground truth is unambiguous: the estate has no satisfaction data.",
+      "question": "What is our customer satisfaction score?",
+      "expected_status": "NO_MATCH"
+    },
+    {
+      "id": "paraphrase-money-at-day-end",
+      "category": "paraphrase",
+      "question": "How much money do customers hold at the end of each day?",
+      "expected": [{"object_type": "TABLE", "object_key": "fact_account_balances"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "paraphrase-payroll",
+      "category": "paraphrase",
+      "question": "Who is on the payroll?",
+      "expected": [{"object_type": "TABLE", "object_key": "dim_employee"}],
+      "exactly_one_answer": true
+    },
+    {
+      "id": "paraphrase-suspicious",
+      "category": "paraphrase",
+      "question": "Which transactions look suspicious?",
+      "expected": [{"object_type": "TABLE", "object_key": "fact_fraud_alerts"}],
+      "exactly_one_answer": true
+    }
+  ]
+}

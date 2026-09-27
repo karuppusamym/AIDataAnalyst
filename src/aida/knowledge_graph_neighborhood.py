@@ -53,6 +53,7 @@ from aida.models import (
     MetadataTable,
     RelationshipCandidate,
 )
+from aida.relationship_validation import public_relationship_evidence
 from aida.schemas import GraphEdgeRead, GraphNodeRead, KnowledgeGraphRead
 from aida.security_types import SecurityContext
 
@@ -544,7 +545,7 @@ async def project_neighborhood(
             target_columns=[columns_by_id[candidate.target_column_id].name],
             status=candidate.status,
             confidence=candidate.confidence,
-            evidence=candidate.evidence,
+            evidence=public_relationship_evidence(candidate.evidence),
             candidate_id=candidate.id,
         )
         for candidate in final_candidates

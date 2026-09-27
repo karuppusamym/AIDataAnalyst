@@ -24,6 +24,11 @@ Endpoints moved (per session addendum
 * `GET  /v1/datasources/{datasource_id}/scan-policy`       -- get_scan_policy
 * `POST /v1/datasources/{datasource_id}/test`              -- test_datasource
 
+Added 2026-09-15 (R11-FP01), not moved: `GET`/`PUT
+/v1/datasources/{datasource_id}/discovery-selection` and `POST
+.../discovery-selection/preview` -- which object kinds, schemas and names a
+datasource's discovery takes in, logic in `aida.discovery_selection`.
+
 plus three private helpers used only by `create_datasource` and
 `bulk_onboard_datasources` (`_validate_datasource_create`,
 `_build_datasource`, `_record_datasource_registration_events`).
@@ -85,6 +90,13 @@ from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.discovery_selection import (
+    DiscoverySelection,
+    DiscoverySelectionPreviewRead,
+    DiscoverySelectionRead,
+    preview_selection,
+    selection_read,
+)
 from aida.events import record_audit, record_outbox
 from aida.models import DataSource, Project, ScanPolicy
 from aida.schemas import (
@@ -477,6 +489,92 @@ async def get_scan_policy(
     if policy is None:
         raise HTTPException(status_code=404, detail="scan policy not found")
     return policy
+
+
+async def _datasource_for(
+    session: AsyncSession, context: SecurityContext, datasource_id: UUID
+) -> DataSource:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    return datasource
+
+
+@router.get(
+    "/datasources/{datasource_id}/discovery-selection", response_model=DiscoverySelectionRead
+)
+async def get_discovery_selection(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DiscoverySelectionRead:
+    """The selection a datasource's discovery applies, and what its connector can discover."""
+    return selection_read(await _datasource_for(session, context, datasource_id))
+
+
+@router.put(
+    "/datasources/{datasource_id}/discovery-selection", response_model=DiscoverySelectionRead
+)
+async def put_discovery_selection(
+    datasource_id: UUID,
+    body: DiscoverySelection,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DiscoverySelectionRead:
+    """Replace the selection. An empty body removes it: discovery takes in everything again.
+
+    It applies from the next run. Narrowing it never retires what earlier runs found: a FULL
+    run reconciles only the objects the selection covers.
+    """
+    datasource = await _datasource_for(session, context, datasource_id)
+    datasource.discovery_selection = body.model_dump(mode="json") if body.restricted else None
+    record_audit(
+        session,
+        replace(context, organization_id=datasource.organization_id),
+        action="datasource.discovery_selection.update",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "restricted": body.restricted,
+            "fingerprint": body.fingerprint(),
+            "object_kinds": sorted(body.object_kinds),
+            "pattern_counts": {
+                "include_schemas": len(body.include_schemas),
+                "exclude_schemas": len(body.exclude_schemas),
+                "include_objects": len(body.include_objects),
+                "exclude_objects": len(body.exclude_objects),
+            },
+        },
+    )
+    await session.commit()
+    return selection_read(datasource)
+
+
+@router.post(
+    "/datasources/{datasource_id}/discovery-selection/preview",
+    response_model=DiscoverySelectionPreviewRead,
+)
+async def preview_discovery_selection(
+    datasource_id: UUID,
+    body: DiscoverySelection,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DiscoverySelectionPreviewRead:
+    """What `body` would keep and leave out, counted over the last completed scan.
+
+    Reads the catalog only -- it neither stores the selection nor contacts the source.
+    """
+    datasource = await _datasource_for(session, context, datasource_id)
+    return await preview_selection(session, datasource, body)
 
 
 @router.post("/datasources/{datasource_id}/test", response_model=DataSourceRead)

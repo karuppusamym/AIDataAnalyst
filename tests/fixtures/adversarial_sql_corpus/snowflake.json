@@ -3,6 +3,15 @@
   "description": "QG-1 adversarial SQL corpus for the snowflake dialect. Every case must be rejected by aida.query_gateway.QueryExecutionGateway's single validation pipeline -- zero bypasses is the exit condition.",
   "cases": [
     {
+      "id": "snowflake-dialect_specific-unauthorized-udf-unqualified",
+      "category": "dialect_specific",
+      "sql": "SELECT udf_send(c.customer_id) AS sent FROM retail.customer AS c",
+      "description": "a user-defined function the guard does not recognise as a built-in, refused unless authorized",
+      "expected_codes": [
+        "UNAUTHORIZED_FUNCTION"
+      ]
+    },
+    {
       "id": "snowflake-stacked_statement-stacked-ddl",
       "category": "stacked_statement",
       "sql": "SELECT customer_id FROM retail.customer; DROP TABLE retail.customer;",

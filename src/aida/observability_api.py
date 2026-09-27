@@ -14,29 +14,24 @@ Externally-used symbols at the time of the move:
   handler function directly to unit-test the wiring against a live
   `AuditArchiveRecord` row.
 
-The three unused-externally handler functions (`create_slo_definition`,
-`list_slo_definitions`, `get_slo_budget`) are re-exported too so a future
-test that wants to bypass HTTP for one of them doesn't have to change import
-paths first.
+The three SLO handler functions (`create_slo_definition`,
+`list_slo_definitions`, `get_slo_budget`) were re-exported here too, for a
+future test that might want to bypass HTTP. They were retired with the rest of
+the SLO feature on 2026-09-12 (R11-D10) -- nothing ever wrote `slo_measurement`
+and no indicator source existed to write it from.
 
 New code should import from `atlas.modules.observability_audit.router`
 directly.
 """
 
 from atlas.modules.observability_audit.router import (
-    create_slo_definition,
     get_archive_status,
     get_cost_showback,
-    get_slo_budget,
-    list_slo_definitions,
     router,
 )
 
 __all__ = [
     "router",
-    "create_slo_definition",
-    "list_slo_definitions",
-    "get_slo_budget",
     "get_archive_status",
     "get_cost_showback",
 ]

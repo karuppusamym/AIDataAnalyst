@@ -63,15 +63,19 @@ from sqlalchemy.exc import ResourceClosedError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
+from aida.conversations import stale_conversations_stmt
 from aida.db import session_factory
 from aida.events import record_audit
 from aida.models import (
+    AskConversation,
     AssetDescriptionDraft,
     AssetTermLink,
     GlossaryTerm,
     GlossaryTermVersion,
     MetadataEnrichmentProposal,
+    RevokedToken,
 )
+from aida.review_batch_models import PlaybookDryRunRecord
 from aida.security import SecurityContext
 
 logger = structlog.get_logger(__name__)
@@ -263,7 +267,63 @@ def _stale_pending_description_drafts_stmt(
 # steward org can operate against safely; per-rule overrides live in
 # ``Settings.reaper_retention_overrides``.
 
+def _expired_token_revocations_stmt(
+    now: datetime, retention: timedelta
+) -> Select[tuple[UUID]]:
+    """Revocations whose token has already passed its own expiry.
+
+    Anchored on ``token_expires_at``, never ``revoked_at``: a token still
+    inside its original expiry window stays revoked however long ago it was
+    revoked. Once the token has expired the verifier rejects it on expiry
+    alone, so the revocation row can no longer change any decision -- which is
+    what makes deleting it safe rather than merely tidy.
+
+    Without this rule nothing pruned the table at all: the standalone
+    ``token_revocation.prune_expired_revocations`` helper this replaces had no
+    caller outside its own test, so ``revoked_token`` grew without bound for
+    the life of a deployment. ``retention`` stays at zero days to keep that
+    helper's exact semantics; a longer forensic tail is a policy change, and
+    belongs in this rule's ``retention`` rather than in a second sweeper.
+    """
+    cutoff = now - retention
+    return select(RevokedToken.id).where(RevokedToken.token_expires_at < cutoff)
+
+
+def _stale_playbook_dry_runs_stmt(
+    now: datetime, retention: timedelta
+) -> Select[tuple[UUID]]:
+    """R11-REV01: stored playbook dry-runs (`PlaybookDryRunRecord`), past retention.
+
+    A stored preview exists so a run can be bound to it "soon after" previewing
+    (`aida.playbook_dry_run.run_bound_to_dry_run`); once its retention window has passed it is
+    no longer useful for that, bound or not. Deleted rather than status-flipped: the docstring
+    on `PlaybookDryRunRecord` calls it value-free (ids, codes, counts, SHA-256 digests -- no
+    tag values, owners or classifications), and both `store_dry_run` and `run_bound_to_dry_run`
+    already write their own durable `AuditEvent` (`playbook.dry_run_store`, `playbook.
+    bound_run`) carrying the digests, counts and -- once bound -- the binding outcome and which
+    run it bound; deleting the row loses only the enumerated per-subject version list, not
+    whether or what a bound run did. Anchored on `created_at`, not `bound_at`: an unbound
+    preview has no `bound_at` to anchor on, and a preview's own age is what makes it stale
+    either way.
+    """
+    cutoff = now - retention
+    return (
+        select(PlaybookDryRunRecord.id)
+        .where(PlaybookDryRunRecord.created_at < cutoff)
+        .order_by(PlaybookDryRunRecord.created_at)
+    )
+
+
 RULES: list[ReaperRule] = [
+    ReaperRule(
+        name="expired_token_revocations",
+        model=RevokedToken,
+        resource_type="revoked_token",
+        audit_action="REAP_EXPIRED_TOKEN_REVOCATION",
+        retention=timedelta(days=0),
+        action="DELETE",
+        candidates_stmt=_expired_token_revocations_stmt,
+    ),
     ReaperRule(
         name="rejected_enrichment_proposals",
         model=MetadataEnrichmentProposal,
@@ -317,6 +377,29 @@ RULES: list[ReaperRule] = [
         action="STATUS_FLIP",
         new_status="EXPIRED",
         candidates_stmt=_stale_pending_description_drafts_stmt,
+    ),
+    ReaperRule(
+        name="stale_ask_conversations",
+        model=AskConversation,
+        resource_type="ask_conversation",
+        audit_action="REAP_STALE_ASK_CONVERSATION",
+        # R11-MP26: a conversation keeps redacted question text, so it is bounded:
+        # deleted 30 days after its last turn. Its runs stay (they never held the
+        # question text); override per deployment like any other rule.
+        retention=timedelta(days=30),
+        action="DELETE",
+        candidates_stmt=stale_conversations_stmt,
+    ),
+    ReaperRule(
+        name="stale_playbook_dry_runs",
+        model=PlaybookDryRunRecord,
+        resource_type="playbook_dry_run",
+        audit_action="REAP_STALE_PLAYBOOK_DRY_RUN",
+        # Matches rejected_enrichment_proposals: a recorded-but-no-longer-actionable
+        # artifact whose durable audit trail lives in AuditEvent, not in this row.
+        retention=timedelta(days=90),
+        action="DELETE",
+        candidates_stmt=_stale_playbook_dry_runs_stmt,
     ),
 ]
 
@@ -670,10 +753,3 @@ async def run_reaper_scheduler_pass(
     return report
 
 
-def _reset_reaper_due_state_for_tests() -> None:
-    """Test-only helper -- clears the in-process due tracker so each test's
-    ``run_reaper_scheduler_pass`` call runs regardless of a prior test's
-    run time. Nothing in production calls this.
-    """
-    global _reaper_last_run_at
-    _reaper_last_run_at = None

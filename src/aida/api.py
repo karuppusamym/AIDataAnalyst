@@ -1,16 +1,20 @@
-from collections.abc import Sequence
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aida.agent_contracts import AgentContractValidationError, load_contract_for_principal
 from aida.agent_evals import run_control_evaluation
 from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
 from aida.agent_orchestrator import (
@@ -20,11 +24,22 @@ from aida.agent_orchestrator import (
     ModelRouteUnavailable,
 )
 from aida.agent_run_replay import resolve_grounding
-from aida.authorization_gate import gate_read
+from aida.authorization_gate import AuthorizationDenied, gate, gate_read
 from aida.classification import SENSITIVE_CLASSES
 from aida.classification_feed import ExternalClassificationRecord, ingest_classification_feed
 from aida.config import Settings, get_settings
+from aida.connectors.base import OBSERVATION_SCOPES, UNCOMPUTED_FACET_STATUS
 from aida.context import get_correlation_id
+from aida.context_product_execution_scope import load_execution_scope
+from aida.conversations import (
+    ConversationFull,
+    ConversationNotFound,
+    ConversationOnAnotherSource,
+    EarlierTurn,
+    conversation_for_follow_up,
+    earlier_turns,
+    record_turn,
+)
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
@@ -32,6 +47,7 @@ from aida.graph_store import GraphStoreUnavailable, build_graph_store, resolve_g
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
+    AgentContract,
     AgentEvaluationRun,
     AgentRun,
     AnalysisRun,
@@ -59,6 +75,8 @@ from aida.query_gateway import (
     QueryExecutionGateway,
     QueryRejected,
 )
+from aida.question_redaction import redact_question
+from aida.request_budget import budget_headers, consume_window_budget, principal_hash
 from aida.schemas import (
     AgentAnalysisRequest,
     AgentAnalysisResponse,
@@ -86,6 +104,7 @@ from aida.schemas import (
     OrganizationIntegrationPolicyRead,
     OrganizationIntegrationPolicyWrite,
     Page,
+    ProfileFacetStatusRead,
     ProfilingExceptionDecisionRequest,
     ProfilingExceptionPolicyCreate,
     ProfilingExceptionPolicyRead,
@@ -101,6 +120,7 @@ from aida.secrets import SecretResolver
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_guard import SqlGuard
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
+from atlas.modules.profiling.facets import WITHHELD_BY_POLICY, facet_status_from_stored
 
 router = APIRouter(prefix="/v1")
 
@@ -207,6 +227,7 @@ async def preview_agent_retrieval(
         candidate_sql_available=body.candidate_sql_available,
         tool_parameters={},
         prompt_risk=prompt_risk,
+        question=body.question,
     )
     return AgentRetrievalPreviewRead(
         datasource_id=datasource.id,
@@ -1074,6 +1095,65 @@ async def get_latest_table_profile(
             .order_by(MetadataColumn.ordinal_position)
         )
     ).all()
+    withheld_reasons = await _withheld_profile_classifications(
+        session,
+        context,
+        settings,
+        datasource_id=table.datasource_id,
+        classifications=frozenset(column.classification for _, column in profile_rows),
+    )
+    columns: list[ColumnProfileRead] = []
+    for column_profile, column in profile_rows:
+        reason_code = withheld_reasons.get(column.classification)
+        base = {
+            "column_id": column.id,
+            "column_name": column.name,
+            "classification": column.classification,
+            "null_count": column_profile.null_count,
+            "non_null_count": column_profile.non_null_count,
+            "approximate_distinct_count": column_profile.approximate_distinct_count,
+            "min_length": column_profile.min_length,
+            "max_length": column_profile.max_length,
+        }
+        if reason_code is not None:
+            # R11-FP04: the column still appears, with a marker and a reason.
+            # Dropping it would let a reader conclude something about the table
+            # from a fact about their own entitlement, and dropping only its
+            # facets silently would be indistinguishable from an engine that
+            # could not compute them.
+            #
+            # The four counts above are deliberately still served: they are the
+            # payload this route has always returned under this same table-level
+            # gate, and narrowing them here would be a breaking response change
+            # (`scripts/openapi_diff.py`) rather than part of gating the new
+            # egress. The facets this task adds are the new egress, and they are
+            # what the classification decision governs.
+            columns.append(
+                ColumnProfileRead(
+                    **base,
+                    facets_withheld=True,
+                    withheld_marker=WITHHELD_BY_POLICY,
+                    withheld_reason_code=reason_code,
+                )
+            )
+            continue
+        columns.append(
+            ColumnProfileRead(
+                **base,
+                distinct_ratio=column_profile.distinct_ratio,
+                effectively_unique=column_profile.effectively_unique,
+                cardinality_class=column_profile.cardinality_class,
+                blank_count=column_profile.blank_count,
+                whitespace_only_count=column_profile.whitespace_only_count,
+                length_bucket_scheme=column_profile.length_bucket_scheme,
+                length_bucket_counts=column_profile.length_bucket_counts,
+                frequency_entropy_bits=column_profile.frequency_entropy_bits,
+                unavailable_facets=[
+                    ProfileFacetStatusRead(**entry)
+                    for entry in facet_status_from_stored(column_profile.unavailable_facets)
+                ],
+            )
+        )
     return TableProfileRead(
         id=profile.id,
         analysis_run_id=profile.analysis_run_id,
@@ -1083,20 +1163,64 @@ async def get_latest_table_profile(
         profile_version=profile.profile_version,
         status=profile.status,
         created_at=profile.created_at,
-        columns=[
-            ColumnProfileRead(
-                column_id=column.id,
-                column_name=column.name,
-                classification=column.classification,
-                null_count=column_profile.null_count,
-                non_null_count=column_profile.non_null_count,
-                approximate_distinct_count=column_profile.approximate_distinct_count,
-                min_length=column_profile.min_length,
-                max_length=column_profile.max_length,
+        columns=columns,
+        # R11-FP04: the sampling limitation travels with the statistics, never
+        # separately. `None` here means the profile predates the facet, which
+        # is not the same claim as UNKNOWN.
+        observation_scope=(
+            profile.observation_scope if profile.observation_scope in OBSERVATION_SCOPES else None
+        ),
+        uncomputed_facets=[
+            ProfileFacetStatusRead(
+                facet=status.facet, status=status.status, reason_code=status.reason_code
             )
-            for column_profile, column in profile_rows
+            for status in UNCOMPUTED_FACET_STATUS
         ],
+        withheld_column_count=sum(1 for column in columns if column.facets_withheld),
     )
+
+
+async def _withheld_profile_classifications(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    datasource_id: UUID,
+    classifications: frozenset[str],
+) -> dict[str, str]:
+    """R11-FP04: which classifications this principal may not read profile facets for.
+
+    One `gate` call per distinct classification present on the table, with
+    `classifications=` populated -- which is the whole point: the table-level
+    `gate_read` above cannot carry a classification, so a MASK or DENY rule
+    written against `RESTRICTED` columns had nothing to act on and the new
+    aggregate facets would have gone out for every column or none.
+
+    Per classification rather than per column because the policy decision is a
+    function of the classification, so a wide table costs a handful of
+    decisions rather than one per column.
+
+    A refusal is not an error here. It withholds that classification's facets
+    and the read continues, because the alternative -- 403 for the whole table
+    because one column is restricted -- would make the statistics unusable on
+    exactly the tables they are most needed for, and FP-04 has to "remain
+    useful when row sampling is disabled" (module 05 §16.3).
+    """
+    withheld: dict[str, str] = {}
+    for classification in sorted(classifications):
+        try:
+            await gate(
+                session,
+                context,
+                settings=settings,
+                action="READ_METADATA",
+                resource_type="column",
+                datasource_id=datasource_id,
+                classifications=frozenset({classification}),
+            )
+        except AuthorizationDenied as exc:
+            withheld[classification] = exc.reason_code
+    return withheld
 
 
 # ---------------------------------------------------------------------------
@@ -1480,6 +1604,7 @@ async def validate_query(
     guard = SqlGuard(
         default_row_limit=settings.default_query_row_limit,
         hard_row_limit=settings.hard_query_row_limit,
+        allowed_functions=settings.sql_guard_allowed_functions,
     )
     result = guard.validate(body.sql, dialect=body.dialect, requested_limit=body.max_rows)
     record_audit(
@@ -1527,6 +1652,25 @@ async def execute_query(
         ensure_datasource_enabled(datasource)
     except RunAdmissionRejected as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # F01: this route takes arbitrary caller SQL, and until now it had no product
+    # concept at all -- so the principal who was product-scoped through Ask could
+    # submit the identical statement here unscoped, and the acceptance criterion
+    # names "direct SQL" explicitly. The key is optional, so a request that omits
+    # it is unchanged; a request that supplies one is held to that product's
+    # tables by the gateway, which refuses before an execution session opens.
+    # 404 for an unknown, unpublished or role-forbidden product, matching
+    # `load_execution_scope`'s single answer -- distinguishing them would report
+    # which products exist to a caller who cannot read them.
+    context_product_scope = None
+    if body.context_product_key is not None:
+        context_product_scope = await load_execution_scope(
+            session,
+            organization_id=datasource.organization_id,
+            product_key=body.context_product_key,
+            roles=context.roles,
+        )
+        if context_product_scope is None:
+            raise HTTPException(status_code=404, detail="context product not found")
     gateway = QueryExecutionGateway(settings)
     try:
         result = await gateway.execute(
@@ -1538,6 +1682,7 @@ async def execute_query(
             requested_limit=body.max_rows,
             semantic_version=body.semantic_version,
             workspace_id=body.workspace_id,
+            context_product_scope=context_product_scope,
         )
     except AuthorizationRejected as exc:
         # Before `QueryRejected`, which it subclasses. 403 rather than 422 because the
@@ -1578,6 +1723,175 @@ async def get_query_lineage(
         column_lineage=execution.column_lineage,
         semantic_version=execution.semantic_version,
         policy_version=execution.policy_version,
+        normalized_sql=execution.normalized_sql,
+        row_count=execution.row_count,
+        elapsed_ms=execution.elapsed_ms,
+    )
+
+
+async def _admit_ask(settings: Settings, context: SecurityContext) -> None:
+    """R11-MP14: the caller's per-minute Ask budget, before anything is read.
+
+    Counted per organization and principal in a fixed window (`aida.request_budget`),
+    so one caller cannot drain the model quota the rest of the organization shares.
+    Off unless `ask_budget_enabled`; fails closed in staging and production when
+    the store is unreachable. A refusal is a 429 naming when to come back.
+    """
+    decision = await consume_window_budget(
+        settings,
+        namespace="ask-budget",
+        bucket="REQUEST_MINUTE",
+        key_hash=principal_hash(context),
+        limit=settings.ask_requests_per_minute,
+        window_seconds=60,
+        enabled=settings.ask_budget_enabled,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"the caller's Ask budget of {decision.limit} questions a minute is spent",
+            headers=budget_headers(decision),
+        )
+
+
+async def _agent_analysis_contract(
+    session: AsyncSession, context: SecurityContext, datasource: DataSource
+) -> AgentContract | None:
+    """Admission shared by the single-shot and streaming Ask routes: the
+    datasource must be enabled, and a contracted agent's contract is loaded.
+    Raises the HTTP refusal; the caller has already enforced the organization."""
+    try:
+        ensure_datasource_enabled(datasource)
+    except RunAdmissionRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # AR-06: an analysis requested by a contracted agent runs under its
+    # contract -- existence, kill switch, `tool_slugs`, token caps -- which the
+    # orchestrator enforces only for a contract it is given. A human has none
+    # and is unaffected; an `agent:` identity with none, or several, is refused.
+    try:
+        caller_contract = await load_contract_for_principal(
+            session,
+            organization_id=datasource.organization_id,
+            agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
+        )
+    except AgentContractValidationError as exc:
+        raise HTTPException(status_code=403, detail=exc.code) from exc
+    return caller_contract
+
+
+async def _orchestrate_agent_analysis(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    context: SecurityContext,
+    datasource: DataSource,
+    body: AgentAnalysisRequest,
+    caller_contract: AgentContract | None,
+    correlation_id: str,
+    stage_listener: Callable[[str], None] | None = None,
+) -> AgentAnalysisResponse:
+    """Run the orchestrator for one Ask and map every refusal to its HTTP
+    status -- the one mapping both Ask routes answer with."""
+    asker = replace(context, organization_id=datasource.organization_id)
+    earlier: tuple[EarlierTurn, ...] = ()
+    if body.conversation_id is not None:
+        # R11-MP26: checked before anything runs; another person's conversation
+        # answers exactly as one that does not exist.
+        try:
+            conversation = await conversation_for_follow_up(
+                session,
+                body.conversation_id,
+                context=asker,
+                datasource_id=datasource.id,
+                settings=settings,
+            )
+        except ConversationNotFound as exc:
+            raise HTTPException(status_code=404, detail="conversation not found") from exc
+        except ConversationOnAnotherSource as exc:
+            raise HTTPException(
+                status_code=409, detail="the conversation belongs to another datasource"
+            ) from exc
+        except ConversationFull as exc:
+            raise HTTPException(
+                status_code=409, detail="the conversation is full; start a new one"
+            ) from exc
+        earlier = await earlier_turns(session, conversation, settings)
+    orchestrator = GovernedAgentOrchestrator(settings)
+    try:
+        result = await orchestrator.run(
+            session,
+            datasource=datasource,
+            context=replace(context, organization_id=datasource.organization_id),
+            correlation_id=correlation_id,
+            question=body.question,
+            candidate_sql=body.candidate_sql,
+            preferred_tool_version_id=body.preferred_tool_version_id,
+            tool_parameters=body.tool_parameters,
+            requested_limit=body.max_rows,
+            agent_asset_version_id=(
+                caller_contract.ai_asset_version_id if caller_contract is not None else None
+            ),
+            context_product_key=body.context_product_key,
+            stage_listener=stage_listener,
+            earlier_turns=earlier,
+        )
+    except AgentClarificationRequired as exc:
+        # Structured, because the caller has to *act* on this one: it names the
+        # inputs to collect and the tool version they belong to, so a client can
+        # render a form and ask again instead of parsing the sentence. The
+        # message is unchanged for anything that only displays it.
+        # `code` is the exception's own: MISSING_TOOL_PARAMETERS for the case above, and
+        # AMBIGUOUS_KNOWLEDGE (R11-OKF02) when the product's knowledge names two subjects
+        # equally, with the `candidates` to choose between.
+        detail: dict[str, Any] = {
+            "code": exc.code,
+            "message": str(exc),
+            "required_parameters": list(exc.required_parameters),
+            "tool_version_id": exc.tool_version_id,
+        }
+        if exc.candidates:
+            detail["candidates"] = list(exc.candidates)
+        raise HTTPException(status_code=409, detail=detail) from exc
+    except AgentPolicyRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ModelRouteUnavailable as exc:
+        # 2026-09-03: a 429 from the provider surfaces as HTTP 429 so the
+        # client can render "provider throttled, try again" rather than the
+        # same "no model route" message shown for a genuinely-unconfigured
+        # route. Everything else stays 503.
+        if exc.provider_status_code == 429:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueryRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="agent analysis execution failed") from exc
+    # R11-MP26: the answered question becomes a turn -- stored redacted whatever
+    # `question_value_redaction_enabled` says, since that setting governs what
+    # leaves the platform, not what it keeps.
+    conversation, turn = await record_turn(
+        session,
+        conversation_id=body.conversation_id,
+        context=asker,
+        datasource_id=datasource.id,
+        agent_run_id=result.agent_run.id,
+        redacted_question=redact_question(body.question).text,
+    )
+    await session.commit()
+    return AgentAnalysisResponse(
+        agent_run_id=result.agent_run.id,
+        status=result.agent_run.status,
+        generation_source=result.agent_run.generation_source,
+        conversation_id=conversation.id,
+        conversation_turn=turn,
+        semantic_version=result.agent_run.semantic_version,
+        policy_version=result.agent_run.policy_version,
+        step_trace=result.agent_run.step_trace,
+        retrieval_evidence=result.agent_run.retrieval_evidence,
+        plan_evidence=result.agent_run.plan_evidence,
+        execution=query_execution_response(result.gateway_result),
+        explanation=result.explanation,
     )
 
 
@@ -1596,50 +1910,96 @@ async def run_agent_analysis(
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
-    try:
-        ensure_datasource_enabled(datasource)
-    except RunAdmissionRejected as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    orchestrator = GovernedAgentOrchestrator(settings)
-    try:
-        result = await orchestrator.run(
-            session,
-            datasource=datasource,
-            context=replace(context, organization_id=datasource.organization_id),
-            correlation_id=get_correlation_id(),
-            question=body.question,
-            candidate_sql=body.candidate_sql,
-            preferred_tool_version_id=body.preferred_tool_version_id,
-            tool_parameters=body.tool_parameters,
-            requested_limit=body.max_rows,
-        )
-    except AgentClarificationRequired as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except AgentPolicyRejected as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except ModelRouteUnavailable as exc:
-        # 2026-09-03: a 429 from the provider surfaces as HTTP 429 so the
-        # client can render "provider throttled, try again" rather than the
-        # same "no model route" message shown for a genuinely-unconfigured
-        # route. Everything else stays 503.
-        if exc.provider_status_code == 429:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except QueryRejected as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="agent analysis execution failed") from exc
-    return AgentAnalysisResponse(
-        agent_run_id=result.agent_run.id,
-        status=result.agent_run.status,
-        generation_source=result.agent_run.generation_source,
-        semantic_version=result.agent_run.semantic_version,
-        policy_version=result.agent_run.policy_version,
-        step_trace=result.agent_run.step_trace,
-        retrieval_evidence=result.agent_run.retrieval_evidence,
-        plan_evidence=result.agent_run.plan_evidence,
-        execution=query_execution_response(result.gateway_result),
-        explanation=result.explanation,
+    await _admit_ask(settings, context)
+    caller_contract = await _agent_analysis_contract(session, context, datasource)
+    return await _orchestrate_agent_analysis(
+        session,
+        settings=settings,
+        context=context,
+        datasource=datasource,
+        body=body,
+        caller_contract=caller_contract,
+        correlation_id=get_correlation_id(),
+    )
+
+
+@router.post(
+    "/datasources/{datasource_id}/agent-analyses/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": (
+                "Server-sent events: `stage` ({stage}) as the run advances, then exactly one "
+                "`result` (an AgentAnalysisResponse) or `error` ({status, detail}) carrying the "
+                "status and detail the single-shot route would have answered with."
+            ),
+            "content": {"text/event-stream": {}},
+        }
+    },
+)
+async def stream_agent_analysis(
+    datasource_id: UUID,
+    body: AgentAnalysisRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "Analyst", "AgentDeveloper")),
+    # `request` scope: the session must outlive this function, because the run
+    # it serves continues while the response streams.
+    session: AsyncSession = Depends(get_session, scope="request"),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """R11-MP06: the same governed Ask, with each stage streamed as it is reached.
+
+    Admission (404, organization, disabled datasource, agent contract) is
+    answered as an ordinary HTTP error before the stream opens. After that the
+    run is the one `run_agent_analysis` performs -- same orchestrator, same
+    refusal mapping -- and its outcome arrives as the stream's last event. A
+    client that disconnects stops receiving events, not the run: it completes
+    and is recorded like any other, so run history never holds a half-run.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    await _admit_ask(settings, context)
+    caller_contract = await _agent_analysis_contract(session, context, datasource)
+    events: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    correlation_id = get_correlation_id()
+
+    async def orchestrate() -> None:
+        try:
+            response = await _orchestrate_agent_analysis(
+                session,
+                settings=settings,
+                context=context,
+                datasource=datasource,
+                body=body,
+                caller_contract=caller_contract,
+                correlation_id=correlation_id,
+                stage_listener=lambda stage: events.put_nowait(("stage", {"stage": stage})),
+            )
+        except HTTPException as exc:
+            events.put_nowait(("error", {"status": exc.status_code, "detail": exc.detail}))
+        else:
+            events.put_nowait(("result", response.model_dump(mode="json")))
+        finally:
+            events.put_nowait(("end", None))
+
+    run = asyncio.create_task(orchestrate())
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            while True:
+                event, data = await events.get()
+                if event == "end":
+                    break
+                yield f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+        finally:
+            if not run.done():
+                await asyncio.shield(run)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

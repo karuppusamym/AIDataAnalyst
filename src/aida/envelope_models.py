@@ -47,12 +47,14 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -68,14 +70,21 @@ AVAILABLE = "AVAILABLE"
 #: `definition_sql_redacted` / `body_sql_redacted` is NULL and `unavailable_reason` says why.
 UNAVAILABLE = "UNAVAILABLE"
 
-AVAILABILITY_STATES = (AVAILABLE, UNAVAILABLE)
-
 #: Object types `MetadataObjectDescription` accepts. `TABLE` and `COLUMN` are
 #: deliberately absent: `metadata_table.source_description` (the 1.0 path) and,
 #: since IN-5e, `metadata_column.source_description` each own their comments
 #: directly, and two homes for one fact is how they diverge. Column comments
 #: lived here only because `models.py` was off-limits to the N1 workstream that
 #: added this table -- IN-5e closed that gap once `models.py` ownership allowed it.
+#:
+#: `ROUTINE` is deliberately absent too, and R11-FP08 kept it that way rather
+#: than widening this on its way past. A routine already owns its source comment
+#: directly (`MetadataRoutine.source_description`, above), exactly as a table and
+#: a column do, so this table has nothing to add for one; and what R11-FP08
+#: needed was not a *source* description but an Atlas-authored one, which is a
+#: different kind of fact with a different lifecycle and lives on
+#: `RoutineDocumentationVersion` at the foot of this module. Recorded here so the
+#: scope cut is a decision rather than an omission.
 DESCRIBABLE_OBJECT_TYPES = ("CATALOG", "SCHEMA")
 
 
@@ -129,6 +138,14 @@ class MetadataViewDefinition(Base, TimestampMixin):
     # cheaper and more complete than screening on every read.
     screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
     screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # AR-10: which classifier produced the verdict beside it. Nullable on
+    # purpose -- NULL means "screened before this column existed", which is
+    # exactly what a row written by the old code is, and
+    # `ingest_screening.is_verdict_current` reads NULL as stale. Defaulting it
+    # to the current version instead would stamp today's version onto a verdict
+    # today's classifier never saw, which is the defect this column exists to
+    # remove rather than relocate.
+    screening_version: Mapped[str | None] = mapped_column(String(100))
     is_materialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_updatable: Mapped[bool | None] = mapped_column(Boolean)
     check_option: Mapped[str | None] = mapped_column(String(30))
@@ -153,7 +170,9 @@ class MetadataRoutine(Base, TimestampMixin):
 
     __tablename__ = "metadata_routine"
     __table_args__ = (
-        UniqueConstraint("schema_id", "name", "signature"),
+        # R11-FP03: `package_name` joins the identity, so a standalone `SCORE(NUMBER)` and the
+        # packaged `RISK_PKG.SCORE(NUMBER)` are two routines rather than one overwriting the other.
+        UniqueConstraint("schema_id", "package_name", "name", "signature"),
         CheckConstraint(
             "availability IN ('AVAILABLE', 'UNAVAILABLE')",
             name="availability_state",
@@ -177,7 +196,14 @@ class MetadataRoutine(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     signature: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
+    #: R11-FP03: the package a member subprogram belongs to; empty for a standalone routine.
+    package_name: Mapped[str] = mapped_column(
+        String(255), default="", server_default="", nullable=False
+    )
     routine_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    #: The engine's finer kind beside the portable `routine_type`: SQL Server SCALAR,
+    #: INLINE_TABLE or MULTI_STATEMENT_TABLE; BigQuery SCALAR_FUNCTION. NULL where none exists.
+    native_subtype: Mapped[str | None] = mapped_column(String(30))
     language: Mapped[str | None] = mapped_column(String(50))
     # See the note on MetadataViewDefinition.definition_sql_redacted. A procedure body is
     # the richest literal-bearing text a source hands over, and the largest
@@ -187,6 +213,8 @@ class MetadataRoutine(Base, TimestampMixin):
     redaction_status: Mapped[str] = mapped_column(String(20), default="PARSED", nullable=False)
     screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
     screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # See the note on `MetadataViewDefinition.screening_version`.
+    screening_version: Mapped[str | None] = mapped_column(String(100))
     return_type: Mapped[str | None] = mapped_column(String(255))
     is_deterministic: Mapped[bool | None] = mapped_column(Boolean)
     security_mode: Mapped[str | None] = mapped_column(String(30))
@@ -198,6 +226,58 @@ class MetadataRoutine(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MetadataRoutineDefinitionVersion(Base):
+    """R11-FP03: one captured definition of a routine, immutable once written.
+
+    `MetadataRoutine` holds the *current* body and overwrites it on every rescan, so the
+    definition a lineage edge, a generated tool or an approved description was built from was
+    gone the moment the source changed. A version is written when a routine is first captured
+    and again whenever its raw-text fingerprint or availability moves -- the same detection that
+    records a change signal -- with `change_class` saying whether only literals changed. An
+    identical rescan writes nothing. Nothing updates a version; a later definition is a later
+    row. Value-free: the stored text is the redacted form, as on the routine itself.
+    """
+
+    __tablename__ = "metadata_routine_definition_version"
+    __table_args__ = (
+        UniqueConstraint("routine_id", "version_number"),
+        CheckConstraint(
+            "availability IN ('AVAILABLE', 'UNAVAILABLE')",
+            name="availability_state",
+        ),
+        CheckConstraint(
+            "change_class IS NULL OR change_class IN ('LITERAL_ONLY', 'STRUCTURAL')",
+            name="change_class",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body_sql_redacted: Mapped[str | None] = mapped_column(Text)
+    body_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    availability: Mapped[str] = mapped_column(String(20), nullable=False)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(500))
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    redaction_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: NULL for the first captured version; otherwise what kind of change produced this one.
+    change_class: Mapped[str | None] = mapped_column(String(20))
+    analysis_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("analysis_run.id", ondelete="SET NULL"), index=True
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class MetadataRoutineParameter(Base, TimestampMixin):
@@ -230,6 +310,174 @@ class MetadataRoutineParameter(Base, TimestampMixin):
     mode: Mapped[str] = mapped_column(String(20), default="IN", nullable=False)
     physical_type: Mapped[str] = mapped_column(String(255), nullable=False)
     default_expression: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MetadataTrigger(Base, TimestampMixin):
+    """R11-FP01: one trigger, the table it fires on, and the code it runs.
+
+    Keyed on `(schema_id, table_name, name)` rather than `(schema_id, name)`,
+    because the three engines with triggers disagree about where a trigger name
+    is unique: PostgreSQL scopes it to the *table* (two tables in one schema may
+    both own `audit_trg`), while Oracle and SQL Server scope it to the schema.
+    The tighter engine decides the key -- a key of `(schema_id, name)` would
+    make two PostgreSQL triggers collide and soft-delete one of them on every
+    rescan, which is exactly the overload defect `MetadataRoutine.signature`
+    exists to prevent.
+
+    **The body is redacted, fingerprinted and screened exactly as a routine
+    body is.** A trigger body is SQL and SQL carries source values in its
+    literals (INV-6), and it reaches model context by the same paths a
+    procedure body does, so it is the same indirect-injection surface and gets
+    the same four columns. `availability` + the CHECK tying it to
+    `body_sql_redacted` carry the same three-state distinction
+    `MetadataViewDefinition`'s docstring tabulates, and there is a fourth state
+    here the routine axis does not have: PostgreSQL has *no trigger body at
+    all*. The action is `EXECUTE FUNCTION f()`, `f`'s own body arrives on the
+    routine axis, and `action_routine` below names it. That is UNAVAILABLE with
+    a reason, not a trigger that does nothing.
+
+    **`table_name` is the lineage fact this table exists for.** A trigger that
+    writes another table is a data path with no view definition, no call site
+    and no dbt model behind it, so to every other lineage surface the
+    destination changes by itself. The firing table is the half of that path
+    this pass captures; deriving the body's own reads and writes is recorded as
+    a declared gap on the engine capability matrix rather than half-built here.
+
+    `table_schema_name` is a name and not a foreign key to `metadata_table`, on
+    purpose: Oracle lets a trigger's owner differ from its table's, discovery
+    can be schema-scoped so the firing table may be out of scope entirely, and
+    a nullable FK that is usually NULL for a reason nobody records is worse than
+    a name a reader can resolve.
+    """
+
+    __tablename__ = "metadata_trigger"
+    __table_args__ = (
+        UniqueConstraint("schema_id", "table_name", "name"),
+        CheckConstraint(
+            "availability IN ('AVAILABLE', 'UNAVAILABLE')",
+            name="availability_state",
+        ),
+        CheckConstraint(
+            "(availability = 'AVAILABLE') = (body_sql_redacted IS NOT NULL)",
+            name="availability_matches_body",
+        ),
+        Index("ix_metadata_trigger_org_status", "organization_id", "status"),
+        Index("ix_metadata_trigger_firing_table", "datasource_id", "table_name"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The table whose modification fires this trigger.
+    table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The firing table's schema where the engine allows it to differ from the
+    #: trigger's own; NULL means the trigger's own schema.
+    table_schema_name: Mapped[str | None] = mapped_column(String(255))
+    #: BEFORE / AFTER / INSTEAD_OF / COMPOUND. Empty where the engine does not say.
+    timing: Mapped[str] = mapped_column(String(20), default="", nullable=False)
+    #: The DML events this trigger fires on, from the closed vocabulary
+    #: `connectors.base.TRIGGER_EVENTS`. A list rather than four booleans
+    #: because a compound Oracle trigger fires on an ordered set and the order
+    #: is part of what a reader is reading.
+    events: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    #: ROW or STATEMENT, where the engine distinguishes them.
+    orientation: Mapped[str | None] = mapped_column(String(20))
+    is_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    #: The qualified function this trigger runs where the engine keeps the code
+    #: outside the trigger (PostgreSQL `pg_trigger.tgfoid`); NULL on an engine
+    #: whose trigger carries its own body.
+    action_routine: Mapped[str | None] = mapped_column(String(511))
+    # See the note on MetadataRoutine.body_sql_redacted: the same redaction, the
+    # same fingerprint over the original, the same write-time screening.
+    body_sql_redacted: Mapped[str | None] = mapped_column(Text)
+    body_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    redaction_status: Mapped[str] = mapped_column(String(20), default="PARSED", nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
+    screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # See the note on `MetadataViewDefinition.screening_version`.
+    screening_version: Mapped[str | None] = mapped_column(String(100))
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    availability: Mapped[str] = mapped_column(String(20), default=AVAILABLE, nullable=False)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(500))
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MetadataSequence(Base, TimestampMixin):
+    """R11-FP01: one sequence generator, as its own declaration.
+
+    **What this table deliberately has no column for: the sequence's current
+    position.** Every engine exposes it (`pg_sequences.last_value`,
+    `ALL_SEQUENCES.LAST_NUMBER`, `sys.sequences.current_value`) and it is
+    *source data* -- the value the next insert will write into a customer's
+    row, changing on every insert. Persisting it would put a live business value
+    in the control plane, which INV-6 forbids, and would make this row stale the
+    moment it was written. It is not queried, not carried on
+    `connectors.base.DiscoveredSequence` and has no column here.
+
+    **No `availability` / `body` pair, unlike every other 1.1 axis.** A sequence
+    has no defining text to be refused: its declaration *is* its metadata, the
+    way a base relation's columns are the fact rather than a `CREATE TABLE`
+    statement. A sequence whose declaration the source withheld does not appear
+    at all, which is the same thing that happens to a table the source withheld,
+    and the run's invisible-object count is where that is reported.
+
+    Every numeric parameter is `String`. Oracle permits a 28-digit `MAXVALUE`
+    and PostgreSQL a `bigint` one; no single integer column is wide enough for
+    both, and a declaration is compared and displayed rather than used in
+    arithmetic. The `_bound` names are chosen over `min_value`/`max_value`
+    because these are limits in a `CREATE SEQUENCE` statement and a column
+    spelled like a row value invites precisely the confusion INV-6's naming
+    ratchet exists to catch.
+    """
+
+    __tablename__ = "metadata_sequence"
+    __table_args__ = (
+        UniqueConstraint("schema_id", "name"),
+        Index("ix_metadata_sequence_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    data_type: Mapped[str | None] = mapped_column(String(255))
+    start_with: Mapped[str | None] = mapped_column(String(64))
+    increment_by: Mapped[str | None] = mapped_column(String(64))
+    minimum_bound: Mapped[str | None] = mapped_column(String(64))
+    maximum_bound: Mapped[str | None] = mapped_column(String(64))
+    cache_size: Mapped[str | None] = mapped_column(String(64))
+    cycles: Mapped[bool | None] = mapped_column(Boolean)
+    #: The table and column whose default expression reads this sequence, where
+    #: the engine records the dependency (PostgreSQL `serial` / `IDENTITY`).
+    #: This is what makes a sequence part of the footprint rather than a loose
+    #: object: it says which column's values this generator produces. Names
+    #: rather than foreign keys, for the reason on
+    #: `MetadataTrigger.table_schema_name`.
+    owned_by_table: Mapped[str | None] = mapped_column(String(255))
+    owned_by_column: Mapped[str | None] = mapped_column(String(255))
+    source_description: Mapped[str | None] = mapped_column(Text)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -334,3 +582,199 @@ class MetadataSourceGrant(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# R11-FP08: an Atlas-authored description for a routine.
+#
+# Tables and views already have the whole description lifecycle -- a draft, an
+# append-only versioned store, a review type, a withdrawal and a reinstatement.
+# A routine had none of it: `AssetDocumentation` is keyed by `table_id` and a
+# routine is not a table, so the only thing the platform could say about a
+# procedure was the source's own comment (`MetadataRoutine.source_description`,
+# re-derived and overwritten by every rescan).
+#
+# **What was decided, and what was not.** R11-S4 freezes new governed-artifact
+# *families*; the review authorises exactly the narrow extension here, which is
+# one more parallel pair plus one draft table in the established shape, sharing
+# the two tables that genuinely discriminate on a subject type
+# (`GovernanceReview` and `DescriptionWithdrawal`). It is deliberately *not* the
+# broad consolidation into one polymorphic description store that R11-S4 defers:
+# nothing below is polymorphic, every foreign key names one real parent, and a
+# deleted routine takes its description with it rather than leaving a row
+# pointing at nothing.
+#
+# **Why these three live here and not in `aida.models`.** The same reason the
+# 1.1 axes above do (see the module docstring): `models.py` is a single
+# 5,300-line module under concurrent edit, and this module already owns the
+# routine axis -- `MetadataRoutine`, its definition versions and its parameters
+# are all declared above, and every signal a routine description stands on is
+# read from them. Declaring these against the same `aida.db.Base` registers them
+# on the same `MetaData`, so Alembic autogenerate and
+# `Base.metadata.create_all` see them exactly as if they were declared there.
+# ---------------------------------------------------------------------------
+
+
+class RoutineDocumentation(Base, TimestampMixin):
+    """Identity/pointer row for one routine's Atlas-authored description of record.
+
+    The routine-level counterpart to `models.AssetDocumentation` (tables) and
+    `models.ColumnDocumentation` (columns), on the same parent-identity /
+    versioned-content split: content lives on the append-only
+    `RoutineDocumentationVersion` below, never here, because an `AgentRun`
+    grounded on a routine description has to stay replayable against exactly the
+    text it saw, which in-place mutation would destroy.
+
+    `MetadataRoutine.source_description` is a *different* thing and stays where
+    it is: that is the source system's own comment, overwritten by every
+    rediscovery pass. This is authored, reviewed content rediscovery must never
+    touch -- the distinction `ColumnDocumentation` already draws against
+    `MetadataColumn.source_description`.
+    """
+
+    __tablename__ = "routine_documentation"
+    __table_args__ = (UniqueConstraint("routine_id", name="uq_routine_documentation_routine_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: Denormalized from `MetadataRoutine.datasource_id` so the datasource-scoped
+    #: reads (the routine pane, a context product's coverage section) filter
+    #: without a second join through `metadata_routine`; `routine_id` is the key.
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+
+class RoutineDocumentationVersion(Base, TimestampMixin):
+    """Append-only content history for a `RoutineDocumentation`.
+
+    One row per approved description. The previously `APPROVED` row (if any) is
+    flipped to `SUPERSEDED` in the same transaction that inserts the new
+    `APPROVED` one -- see
+    `routine_description_service.publish_routine_documentation_version` -- and
+    never mutated for content. A withdrawal moves it to `WITHDRAWN` instead,
+    which a reader must be able to tell from a replacement
+    (`aida.description_withdrawal`).
+
+    **`source_definition_version_id` is the one thing this pair has that the
+    table and column pairs do not.** A routine has a real immutable
+    definition-version table (`MetadataRoutineDefinitionVersion`, above) that a
+    view lacks, so a published routine description can *name* the body it was
+    written against rather than only carrying a digest of it. Two consequences,
+    both load-bearing: drift is detected by comparing a named version id rather
+    than re-deriving and re-hashing text (stronger, because a digest collides
+    across a retire-and-recapture cycle that produces identical text, and
+    cheaper, because it is one integer comparison); and a reinstatement can
+    refuse to republish prose about a body that has since moved. Nullable
+    because a routine whose body was never captured has no version to name, and
+    a description of such a routine is exactly the case that says so.
+    """
+
+    __tablename__ = "routine_documentation_version"
+    __table_args__ = (
+        UniqueConstraint("documentation_id", "version"),
+        Index(
+            "ix_routine_documentation_version_org_status",
+            "organization_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    documentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("routine_documentation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="APPROVED", nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The captured definition this text describes, when there was one. SET NULL
+    #: on delete rather than CASCADE: losing the provenance edge must not delete
+    #: a governed description.
+    source_definition_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine_definition_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RoutineDescriptionDraft(Base, TimestampMixin):
+    """Deterministically drafted routine description; always routed through review.
+
+    The routine-level sibling of `models.AssetDescriptionDraft` (GL-9) and
+    `models.ColumnDescriptionDraft`, on the same contract: composed from
+    catalog evidence already in this database, evidence-scored, and published
+    only by an independent APPROVE on its `GovernanceReview`
+    (`semantic_api._decide_routine_description_draft`). No model call anywhere
+    on the path. Rejected drafts are retained as negative knowledge, so
+    identical text is not proposed again for the same routine.
+
+    **The body is never quoted.** A procedure body is the largest
+    indirect-injection surface envelope 1.1 introduced (see the note on
+    `MetadataRoutine.body_sql_redacted`), and a description is prose that every
+    reader of the routine will read. `drafted_text` therefore says what *state*
+    the body is in -- captured, truncated, quarantined, withheld, not captured
+    -- and never a fragment of it. `tests/test_routine_description_body_states.py`
+    asserts that, per state.
+
+    `base_description_version` is the routine's description version when the
+    draft was composed (None when it had none), copied from
+    `ColumnDescriptionDraft` rather than from `AssetDescriptionDraft`, which
+    lacks it: approval re-checks it, so a draft written against v2 cannot
+    silently replace a v3 published since.
+
+    `uq_routine_description_draft_open` allows one open draft per routine, for
+    the reason the column index carries: two would split one routine's review
+    into two decisions about the same text, and whichever was approved second
+    would be refused on the version check anyway.
+    """
+
+    __tablename__ = "routine_description_draft"
+    __table_args__ = (
+        Index("ix_routine_description_draft_org_status", "organization_id", "status"),
+        Index(
+            "uq_routine_description_draft_open",
+            "routine_id",
+            unique=True,
+            postgresql_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+            sqlite_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    drafted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    base_description_version: Mapped[int | None] = mapped_column(Integer)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("routine_documentation_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

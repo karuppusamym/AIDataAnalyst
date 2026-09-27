@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { act, render, screen } from "@testing-library/react";
 
-import { patchQuery, pushLocation, replaceLocation } from "./location";
+import { normalizeLocation, patchQuery, pushLocation, replaceLocation } from "./location";
 import { useAppLocation, useUrlState } from "./useUrlState";
 
 /* ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ describe("the location store", () => {
     render(<Probe />);
     act(() => patchQuery({ q: "orders" }));
     expect(probeText()).toBe("catalog|t_1|orders");
-    expect(location.hash).toBe("#/catalog");
+    expect(location.hash).toBe("#/analyst/catalog");
   });
 
   it("removes a field when the patch value is null or empty", () => {
@@ -106,6 +106,19 @@ describe("the location store", () => {
   });
 
   it("does not push a duplicate entry for the location already shown", () => {
+    history.replaceState(null, "", "/?asset=t_1#/analyst/catalog");
+    render(<Probe />);
+    const before = history.length;
+    act(() => pushLocation({ screen: "catalog", params: { asset: "t_1" } }));
+    expect(history.length).toBe(before);
+  });
+
+  /* R11-S10: the same location, spelled the old way. Someone sitting on a
+     saved `#/catalog` who clicks the nav item for the screen they are already
+     on has not navigated, and must not be given a history entry that the Back
+     button then has to eat -- the guard compares what a URL RESOLVES to, not
+     the characters it is written with. */
+  it("recognises the pre-grouping spelling as the location already shown", () => {
     history.replaceState(null, "", "/?asset=t_1#/catalog");
     render(<Probe />);
     const before = history.length;
@@ -119,5 +132,88 @@ describe("the location store", () => {
     act(() => replaceLocation({ screen: "audit" }));
     expect(probeText()).toBe("audit|-|-");
     expect(history.length).toBe(before);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S10 — normalizing a URL that resolved through an alias.
+
+   The route table's own tests prove every old route still RESOLVES. These
+   prove the other half: that arriving through one rewrites the address bar to
+   the current spelling, keeps the filters the old link carried, folds in the
+   ones a retired route implies, and does not cost the user a Back press.
+--------------------------------------------------------------------------- */
+
+describe("normalizing an aliased URL", () => {
+  it("rewrites the flat spelling to the grouped one without a history entry", () => {
+    history.replaceState(null, "", "/?asset=t_1#/catalog");
+    render(<Probe />);
+    const before = history.length;
+
+    act(() => {
+      normalizeLocation();
+    });
+
+    expect(location.hash).toBe("#/analyst/catalog");
+    // The selection the old link carried survives the rewrite.
+    expect(new URLSearchParams(location.search).get("asset")).toBe("t_1");
+    expect(history.length).toBe(before);
+    expect(probeText()).toBe("catalog|t_1|-");
+  });
+
+  it("opens a merged-away route on the screen that absorbed it, with its filter", () => {
+    history.replaceState(null, "", "/#/steward-agent");
+    render(<Probe />);
+
+    act(() => {
+      normalizeLocation();
+    });
+
+    expect(location.hash).toBe("#/steward/task-agents");
+    expect(new URLSearchParams(location.search).get("agent")).toBe("steward");
+  });
+
+  it("keeps a retired route's own filters beside the ones it implies", () => {
+    // The lineage agent built exactly this link for a procedure proposal.
+    history.replaceState(null, "", "/?type=ROUTINE#/parsed-lineage-review");
+    render(<Probe />);
+
+    act(() => {
+      normalizeLocation();
+    });
+
+    expect(location.hash).toBe("#/reviewer/governance");
+    const params = new URLSearchParams(location.search);
+    expect(params.get("queue")).toBe("parsed-lineage");
+    expect(params.get("type")).toBe("ROUTINE");
+  });
+
+  it("leaves an already-canonical URL alone", () => {
+    history.replaceState(null, "", "/?asset=t_1#/analyst/catalog");
+    render(<Probe />);
+
+    let rewrote = true;
+    act(() => {
+      rewrote = normalizeLocation();
+    });
+
+    expect(rewrote).toBe(false);
+    expect(location.hash).toBe("#/analyst/catalog");
+  });
+
+  it("leaves a URL naming no screen alone, so persona landing still happens", () => {
+    /* The shell lands a fresh session in the persona's own work area, and its
+       test for that is "the hash names no screen". Writing `#/inbox/home` over
+       an empty hash here would make that landing unreachable. */
+    history.replaceState(null, "", "/");
+    render(<Probe />);
+
+    let rewrote = true;
+    act(() => {
+      rewrote = normalizeLocation();
+    });
+
+    expect(rewrote).toBe(false);
+    expect(location.hash).toBe("");
   });
 });

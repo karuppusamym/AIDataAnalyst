@@ -1,7 +1,7 @@
 import hashlib
 import json
-from dataclasses import replace
-from datetime import UTC, datetime
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,6 +14,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.model_gateway import GLOBAL_KILL_SWITCH_SCOPE, route_adapter_available
+from aida.model_route_outcomes import load_route_outcomes
 from aida.models import GovernanceReview, KillSwitchState, ModelRouteConfiguration, Organization
 from aida.schemas import (
     GovernanceReviewRead,
@@ -22,6 +23,8 @@ from aida.schemas import (
     KillSwitchStateRead,
     ModelRouteConfigurationCreate,
     ModelRouteConfigurationRead,
+    ModelRouteOutcomeRead,
+    ModelRouteOutcomesRead,
     Page,
 )
 from aida.secrets import SecretResolutionError, SecretResolver
@@ -41,11 +44,16 @@ def _configuration_fingerprint(body: ModelRouteConfigurationCreate) -> str:
 
 
 def _route_read(route: ModelRouteConfiguration, settings: Settings) -> ModelRouteConfigurationRead:
-    selected = settings.model_route == route.route_key
+    # R11-MP03: a route a purpose names is selected as much as the default one.
+    selected = route.route_key in {
+        settings.model_route,
+        *settings.model_routes_by_purpose.values(),
+    }
     adapter_available = route_adapter_available(
         provider_type=route.provider_type,
         credential_reference=route.credential_reference,
         settings=settings,
+        endpoint_alias=route.endpoint_alias,
     )
     if route.status != "APPROVED":
         activation_status = route.status
@@ -198,6 +206,38 @@ async def list_model_routes(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+@router.get(
+    "/organizations/{organization_id}/model-route-outcomes",
+    response_model=ModelRouteOutcomesRead,
+)
+async def list_model_route_outcomes(
+    organization_id: UUID,
+    days: int = Query(default=7, ge=1, le=90),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "AgentDeveloper", "DataSteward", "Reviewer", "Auditor", "Viewer"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ModelRouteOutcomesRead:
+    """R11-MP11: each route's record over the last `days` of this organization's
+    Ask runs -- completions and refusals, fallbacks and circuit skips, repairs,
+    candidate agreement, stated cost and cache hits -- counted from what each
+    run recorded. Read-only; bounded, and says so when the bound cut it short."""
+    enforce_organization(context, organization_id)
+    since = datetime.now(UTC) - timedelta(days=days)
+    outcomes, considered, truncated = await load_route_outcomes(
+        session, organization_id, since=since
+    )
+    return ModelRouteOutcomesRead(
+        organization_id=organization_id,
+        since=since,
+        runs_considered=considered,
+        truncated=truncated,
+        routes=[ModelRouteOutcomeRead(**asdict(outcome)) for outcome in outcomes],
     )
 
 

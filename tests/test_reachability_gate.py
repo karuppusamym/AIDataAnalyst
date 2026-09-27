@@ -92,6 +92,20 @@ ALLOWLIST: dict[str, str] = {
     # after the audit was written, so it is correctly no longer on this list. Its sibling
     # injection_corpus.py is a separate module -- not imported by injection_defense.py,
     # only referenced in a docstring -- and remains genuinely unreachable.
+    # --- Offline prompt optimisation (R11-MP08) ---
+    # Run by an operator with `scripts/optimize_sql_instruction.py`, never by a
+    # live process on purpose: one optimisation makes dozens of model calls and
+    # must not run inside a request or on a scheduler tick. Its output reaches the
+    # live path only as a PROMPT asset version a person approves
+    # (`aida.prompt_registry`, which IS reachable from `aida.main`).
+    "aida.prompt_optimizer": (
+        "R11-MP08: the offline optimiser's search; reached from "
+        "scripts/optimize_sql_instruction.py only, by design."
+    ),
+    "aida.prompt_optimization_run": (
+        "R11-MP08: the offline optimiser's live scoring and recording; reached from "
+        "scripts/optimize_sql_instruction.py only, by design."
+    ),
     "aida.injection_corpus": (
         "AG-1/AG-2/TS-6: standalone corpus module, not imported by injection_defense.py "
         "or anything else outside its own test. Known gap."

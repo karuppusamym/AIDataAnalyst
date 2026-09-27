@@ -1,0 +1,15 @@
+{
+  "name": "Sample customer revenue",
+  "owner": "sample-revenue-steward",
+  "provenance": "Synthetic SQL Server and PostgreSQL footprint fixtures; proposed business meaning, not a published ontology",
+  "concepts": [
+    {"key": "customer", "name": "Customer", "description": "A synthetic customer identified by customer_id", "aliases": ["buyer"]},
+    {"key": "order", "name": "Order", "description": "A synthetic order associated with exactly one customer", "aliases": ["purchase"]},
+    {"key": "customer_revenue", "name": "Customer revenue", "description": "Sum of order amount minus discount at one row per customer and region; this fixture's definition is not a universal revenue definition", "aliases": ["net sales"]}
+  ],
+  "relations": [
+    {"key": "places", "source": "customer", "target": "order", "description": "Customer places orders; physical evidence is the orders.customer_id foreign key", "cardinality": "ONE_TO_MANY"},
+    {"key": "has_revenue", "source": "customer", "target": "customer_revenue", "description": "At most one aggregate row per customer in this fixture; customers without orders have no row because the view uses an inner join", "cardinality": "ONE_TO_ONE"}
+  ],
+  "mappings": []
+}

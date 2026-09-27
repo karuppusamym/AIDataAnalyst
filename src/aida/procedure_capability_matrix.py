@@ -83,13 +83,82 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     "IF/ELSIF ... THEN (PL/SQL)": "_IF_THEN_RE",
     "WHILE ... BEGIN (T-SQL)": "_WHILE_BEGIN_RE",
     "WHILE ... LOOP (PL/SQL)": "_WHILE_LOOP_RE",
-    "CASE ... WHEN ... THEN (PL/SQL statement form)": "_CASE_WHEN_THEN_RE",
-    "cursor FOR ... IN (SELECT ...) LOOP (PL/SQL)": "_CURSOR_FOR_LOOP_RE",
+    "CASE [selector] WHEN ... THEN (PL/SQL statement form, searched or simple)": (
+        "_CASE_WHEN_THEN_RE"
+    ),
+    "cursor FOR rec IN (SELECT ...) LOOP (PL/SQL; the rows read into the loop record, whose "
+    "fields carry them to the loop's writes)": "_CURSOR_FOR_LOOP_RE",
     "bare FOR ... LOOP (PL/SQL)": "_BARE_FOR_LOOP_RE",
     "EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL)": "_DYNAMIC_SQL_RE",
     "EXEC/CALL <procedure_name> (nested procedure call)": "_NESTED_CALL_RE",
     "DECLARE/SET/OPEN/FETCH/CLOSE/RAISERROR/... (no table lineage)": "_NO_LINEAGE_KEYWORDS_RE",
+    "EXCEPTION WHEN ... THEN handler (PL/SQL, PL/pgSQL)": "_EXCEPTION_WHEN_RE",
+    "EXECUTE <expression> (PL/pgSQL dynamic SQL)": "_PLPGSQL_EXECUTE_RE",
+    "RETURN QUERY <query> (PL/pgSQL result set)": "_PLPGSQL_RETURN_QUERY_RE",
+    "PERFORM <query> (PL/pgSQL; PERFORM fn(...) is a nested-call gap)": "_PLPGSQL_PERFORM_RE",
+    "variable := <query> / SELECT ... INTO variable (PL/pgSQL local state)": (
+        "_PLPGSQL_ASSIGNMENT_RE"
+    ),
+    "CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL)": "_PG_TEMP_ON_COMMIT_RE",
+    "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query; read into the loop record)": (
+        "_FOR_IN_QUERY_LOOP_RE"
+    ),
+    # 2026-09-19: a loop over a declared cursor fetches that cursor's query into its record.
+    "FOR rec IN c [(args)] LOOP over a declared cursor (PL/SQL, PL/pgSQL; the cursor's "
+    "query read into the loop record)": "_DECLARED_CURSOR_LOOP_RE",
+    "CREATE PROCEDURE/FUNCTION header, and DO $$ ... $$ (anonymous block)": "_HEADER_RE",
+    "RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body)": (
+        "_TSQL_INLINE_RETURN_RE"
+    ),
+    # R11-FP03: Oracle as ALL_SOURCE stores it, and packages split into members.
+    "PROCEDURE/FUNCTION header without CREATE, or with EDITIONABLE (Oracle ALL_SOURCE)": (
+        "_ORACLE_SOURCE_HEADER_RE"
+    ),
+    "PACKAGE / PACKAGE BODY (Oracle; each member's edges attributed to the member)": (
+        "_PACKAGE_TEXT_RE"
+    ),
+    "PROCEDURE p / FUNCTION f RETURN t declaration (Oracle spec or forward declaration)": (
+        "_SUBPROGRAM_DECLARATION_RE"
+    ),
+    "RETURN <expression> (PL/SQL; no subquery is allowed there)": "_PLSQL_RETURN_RE",
+    # R11-FP03 (2026-09-19): PL/SQL calls, and declaration sections.
+    "PL/SQL call statement p(x); / pkg.p; (nested call; a sibling package member is read "
+    "through)": "_PLSQL_CALL_STATEMENT_RE",
+    "CURSOR c IS <query> declaration (PL/SQL; read into routine-local state)": (
+        "_PLSQL_CURSOR_DECLARATION_RE"
+    ),
+    "TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL)": (
+        "_PLSQL_LINEAGE_FREE_DECLARATION_RE"
+    ),
+    # 2026-09-19: cursor reads that were dropped, PL/pgSQL declaration sections, labels.
+    "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state, or the "
+    "result set when c is an OUT ref cursor or the one a function returns; "
+    "OPEN c FOR <string> / FOR EXECUTE is dynamic SQL)": "_OPEN_FOR_RE",
+    "DECLARE c CURSOR ... FOR <query> / SET @c = CURSOR FOR <query> (T-SQL; read into "
+    "routine-local state)": "_TSQL_CURSOR_DECLARATION_RE",
+    "c [NO] [SCROLL] CURSOR [(args)] FOR <query> declaration (PL/pgSQL; read into "
+    "routine-local state)": "_PLPGSQL_CURSOR_DECLARATION_RE",
+    "v type := (<query>) declaration (PL/pgSQL; the default read into routine-local state; "
+    "%TYPE/%ROWTYPE anchors and ALIAS FOR are not reads)": "_PLPGSQL_ITEM_DECLARATION_RE",
+    "<<label>> statement label (PL/SQL, PL/pgSQL)": "_LABEL_RE",
 }
+
+# Regex-recognised constructs that end in an explicit UNPARSED marker rather than
+# extracted lineage.
+_EXPLICIT_UNPARSED_REGEXES: Final[frozenset[str]] = frozenset(
+    {"_DYNAMIC_SQL_RE", "_NESTED_CALL_RE", "_PLPGSQL_EXECUTE_RE", "_PLSQL_CALL_STATEMENT_RE"}
+)
+
+# Regex-recognised constructs that are genuinely lineage-free: recognised and
+# correctly skipped, not a gap.
+_NO_LINEAGE_REGEXES: Final[frozenset[str]] = frozenset(
+    {
+        "_NO_LINEAGE_KEYWORDS_RE",
+        "_SUBPROGRAM_DECLARATION_RE",
+        "_PLSQL_RETURN_RE",
+        "_PLSQL_LINEAGE_FREE_DECLARATION_RE",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,8 +307,8 @@ def build_capability_matrix() -> CapabilityMatrix:
 
     for construct, regex_name in _CONSTRUCT_REGEX_NAMES.items():
         status = (
-            "EXPLICIT_UNPARSED" if regex_name in ("_DYNAMIC_SQL_RE", "_NESTED_CALL_RE")
-            else "RECOGNISED_NO_LINEAGE" if regex_name == "_NO_LINEAGE_KEYWORDS_RE"
+            "EXPLICIT_UNPARSED" if regex_name in _EXPLICIT_UNPARSED_REGEXES
+            else "RECOGNISED_NO_LINEAGE" if regex_name in _NO_LINEAGE_REGEXES
             else "SUPPORTED"
         )
         if regex_name not in live_regex_names:

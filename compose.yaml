@@ -1,5 +1,128 @@
 name: aida-platform
 
+# ---------------------------------------------------------------------------
+# PROFILES (R11-X9). `docker compose up` starts the ten services the product
+# needs: postgres, temporal, migrate, api, ui-next, metadata-worker,
+# fleet-scheduler and the three sample-source containers. Everything else is
+# opt-in. cache, graph and archive are services the default settings never
+# reach. events is not quite that: a default worker starts a Kafka consumer at
+# boot (`auto_enqueue_on_ingest` defaults to true), the default stack has no
+# broker for it, and automatic description drafting on ingest quietly does not
+# happen until events is enabled (tracker R11-AUD03). temporal-ui and monitoring
+# are conveniences an estate chooses to run:
+#
+#   cache        redis                         AIDA_LINEAGE_CACHE_ENABLED,
+#                                              AIDA_MCP_BUDGET_ENABLED and
+#                                              AIDA_GRAPHQL_BUDGET_ENABLED all
+#                                              default to false (config.py), so
+#                                              nothing in the default stack
+#                                              opens a Redis connection.
+#   graph        neo4j, graph-projector,       graph_store_backend defaults to
+#                redpanda, outbox-publisher    `postgres`, which reads the same
+#                                              relational tables and is the
+#                                              certified adapter; the neo4j
+#                                              adapter is additionally gated by
+#                                              AIDA_LINEAGE_NEO4J_READ_ENABLED
+#                                              (INV-9/E5 has not run).
+#   events       redpanda, redpanda-console,   ~118 event types are produced to
+#                outbox-publisher              the outbox table; only a few are
+#                                              consumed: by the two projectors
+#                                              above and by the worker's table
+#                                              drafter, a Kafka consumer that is
+#                                              on by default and retries with a
+#                                              backoff, logging
+#                                              newly_created_table_drafter_
+#                                              unavailable, until a broker
+#                                              exists (R11-AUD03).
+#                                              PostgreSQL stays authoritative
+#                                              (INV-1), so nothing is lost while
+#                                              the transport is down -- the
+#                                              outbox simply accumulates.
+#   archive      minio                         audit_archive_storage_backend
+#                                              defaults to `none`.
+#   temporal-ui  temporal-ui                   Developer convenience.
+#   monitoring   prometheus                    R11-FP17. Scrapes `api:8000` and,
+#                                              when AIDA_WORKER_METRICS_PORT is
+#                                              set, the three background processes
+#                                              that publish series nothing could
+#                                              reach before (the scheduler, the
+#                                              graph projector and the Temporal
+#                                              worker). Off by default because a
+#                                              scrape target set and an alert
+#                                              routing decision belong to the
+#                                              estate, not to a default stack.
+#   full         all of the above              One flag for every service but
+#                                              `seed`: the ten default services
+#                                              plus the nine above make 19 of
+#                                              the 20 in this file (counted
+#                                              2026-09-20).
+#   seed         seed                          Pre-existing; demonstration data.
+#
+# Nothing here is removed: the Kafka consumers, the Redis-backed MCP limits and
+# Temporal itself all remain. This only changes what starts by default.
+#
+# Compose refuses a project where an ENABLED service `depends_on` a service
+# whose profile is not enabled ("depends on undefined service"), which is why
+# `api` no longer lists `redis` and why `redpanda`/`outbox-publisher` carry both
+# the `events` and `graph` profiles -- `graph-projector` is Kafka-driven and
+# needs a publisher feeding it, so `--profile graph` has to be self-contained.
+#
+#   docker compose up -d --build                        # default stack
+#   docker compose --profile cache up -d                # + Redis
+#   docker compose --profile graph up -d                # + Neo4j projection
+#   docker compose --profile events up -d               # + Kafka transport
+#   docker compose --profile archive up -d              # + MinIO
+#   docker compose --profile temporal-ui up -d          # + Temporal Web UI
+#   docker compose --profile monitoring up -d           # + Prometheus
+#   docker compose --profile full up -d --build         # everything
+#
+# A profile that is not named is not merely unstarted: Compose will not
+# recreate a RUNNING service whose profile is disabled. So a rebuild must
+# repeat the flags the stack was started with, or it leaves the profiled
+# services on the old image -- two images against one database. That is how
+# review F03 happened; the procedure is
+# `Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md` §2.
+#
+# The feature flags below follow the profiles: enabling `cache` or `graph` also
+# means setting the matching AIDA_* variable, which is why each one is now read
+# from the environment with an off default instead of being hard-coded to true.
+# ---------------------------------------------------------------------------
+
+# R11-D17: every backend image records the commit it was built from, as a label
+# scripts/check_deployment_parity.py prints beside its source-digest comparison
+# ("built from b76842d, 2 commits behind HEAD"). Set it when building, e.g.
+#   ATLAS_BUILD_COMMIT=$(git rev-parse HEAD) docker compose --profile full up -d --build
+# Unset, it is "unknown". The parity verdict does not depend on it.
+x-backend-build: &backend-build
+  context: .
+  args:
+    ATLAS_BUILD_COMMIT: ${ATLAS_BUILD_COMMIT:-unknown}
+
+# Every AIDA_* setting in `.env` reaches the app services, and the explicit
+# `environment` block below still wins for anything it names.
+#
+# Without this, a setting the documentation tells an operator to put in `.env`
+# silently did nothing in Docker: only the ~35 names listed below were
+# forwarded, so `AIDA_DELIVERY_WORKER_ENABLED`, the governance-notification
+# flag, the webhook URLs, the reviewer-agent controls and every task agent's
+# interval were read from a file the container could not see. The features
+# looked broken and the configuration looked correct, which is the worst
+# possible pairing.
+#
+# `required: false` so a fresh clone with no `.env` still starts.
+#
+# The precedence is what makes this safe -- Compose lets `environment`
+# override `env_file`, and every container-internal address below is named
+# there: `AIDA_DATABASE_URL`, `AIDA_REDIS_URL`, `AIDA_KAFKA_BOOTSTRAP_SERVERS`,
+# `AIDA_TEMPORAL_ADDRESS` and the object-store trio all point at service
+# hostnames, while a developer's `.env` points the same names at localhost for
+# host-side scripts. `tests/test_compose_environment.py` pins that every one of
+# them stays explicit, because removing one from the block below would silently
+# let a localhost value take over inside the container.
+x-app-env-file: &app-env-file
+  - path: .env
+    required: false
+
 x-app-environment: &app-environment
   AIDA_ENVIRONMENT: development
   AIDA_LOG_LEVEL: INFO
@@ -8,9 +131,18 @@ x-app-environment: &app-environment
   AIDA_TEMPORAL_NAMESPACE: default
   AIDA_TEMPORAL_TASK_QUEUE: aida-metadata
   AIDA_REDIS_URL: redis://redis:6379/0
-  AIDA_LINEAGE_CACHE_ENABLED: "true"
-  AIDA_LINEAGE_NEO4J_READ_ENABLED: "true"
-  AIDA_MCP_BUDGET_ENABLED: "true"
+  # Off by default, matching `Settings` in atlas/platform/config.py and
+  # `.env.example`, so the default stack never reaches for a service it does
+  # not start. Turn them on together with the profile that provides the
+  # backing service -- see the PROFILES block at the top of this file:
+  #   AIDA_LINEAGE_CACHE_ENABLED=true  docker compose --profile cache up -d
+  #   AIDA_MCP_BUDGET_ENABLED=true     docker compose --profile cache up -d
+  #   AIDA_GRAPHQL_BUDGET_ENABLED=true docker compose --profile cache up -d
+  #   AIDA_LINEAGE_NEO4J_READ_ENABLED=true docker compose --profile graph up -d
+  AIDA_LINEAGE_CACHE_ENABLED: ${AIDA_LINEAGE_CACHE_ENABLED:-false}
+  AIDA_LINEAGE_NEO4J_READ_ENABLED: ${AIDA_LINEAGE_NEO4J_READ_ENABLED:-false}
+  AIDA_MCP_BUDGET_ENABLED: ${AIDA_MCP_BUDGET_ENABLED:-false}
+  AIDA_GRAPHQL_BUDGET_ENABLED: ${AIDA_GRAPHQL_BUDGET_ENABLED:-false}
   AIDA_NEO4J_URI: bolt://neo4j:7687
   AIDA_NEO4J_USER: neo4j
   AIDA_NEO4J_PASSWORD: aida-local-only
@@ -30,6 +162,19 @@ x-app-environment: &app-environment
   AIDA_MODEL_PROVIDER_MAX_ATTEMPTS: ${AIDA_MODEL_PROVIDER_MAX_ATTEMPTS:-3}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  # Embeddings were reachable from a host process and from nothing in a
+  # container: the generation settings above were passed through and the
+  # `AIDA_EMBEDDING_*` ones were not, so `embedding_provider` read `unset`
+  # inside `api` however the host was configured, and the vector stage
+  # skipped itself with a reason nobody would connect to a missing compose
+  # entry. Defaults preserve the shipped posture exactly -- `unset` still
+  # means unset, and the stage still refuses rather than guessing.
+  AIDA_EMBEDDING_PROVIDER: ${AIDA_EMBEDDING_PROVIDER:-unset}
+  AIDA_EMBEDDING_CREDENTIAL_REFERENCE: ${AIDA_EMBEDDING_CREDENTIAL_REFERENCE:-}
+  AIDA_EMBEDDING_MODEL_ID: ${AIDA_EMBEDDING_MODEL_ID:-unset}
+  AIDA_EMBEDDING_MODEL_VERSION: ${AIDA_EMBEDDING_MODEL_VERSION:-unset}
+  AIDA_EMBEDDING_DIMENSIONS: ${AIDA_EMBEDDING_DIMENSIONS:-768}
+  AIDA_VECTOR_INDEX_REBUILD_ENABLED: ${AIDA_VECTOR_INDEX_REBUILD_ENABLED:-true}
 
 services:
   postgres:
@@ -50,7 +195,13 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Opt-in: `--profile cache`. Backs `aida/lineage_cache.py`, `aida/mcp_budget.py`
+  # and the GraphQL budgets in `aida/request_budget.py` only, all off by default.
+  # The rate limits themselves are unchanged and still enforced whenever
+  # AIDA_MCP_BUDGET_ENABLED or AIDA_GRAPHQL_BUDGET_ENABLED is true -- this profile
+  # decides whether the store they need is running, not whether the limits exist.
   redis:
+    profiles: ["cache", "full"]
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
@@ -64,7 +215,13 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Opt-in: `--profile graph`. The default graph backend is `postgres`
+  # (`Settings.graph_store_backend`), which is the adapter the conformance
+  # suite certifies; the neo4j adapter is additionally gated by
+  # AIDA_LINEAGE_NEO4J_READ_ENABLED because INV-9/E5 (the projection rebuild
+  # drill) has not run. Nothing in the default stack dials bolt://neo4j:7687.
   neo4j:
+    profiles: ["graph", "full"]
     image: neo4j:5.26-community
     environment:
       NEO4J_AUTH: neo4j/aida-local-only
@@ -104,7 +261,11 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # Opt-in: `--profile temporal-ui`. A developer convenience only -- Temporal
+  # itself (above) stays in the default stack because the platform's durable
+  # workflows depend on it.
   temporal-ui:
+    profiles: ["temporal-ui", "full"]
     image: temporalio/ui:2.40.1
     depends_on:
       temporal:
@@ -116,7 +277,14 @@ services:
       - "8080:8080"
     restart: unless-stopped
 
+  # Opt-in: `--profile events`, and also under `--profile graph` because
+  # `graph-projector` is a Kafka consumer and Compose will not resolve a
+  # dependency whose own profile is disabled. Events are written to the
+  # `outbox_event` table regardless; without this transport they accumulate
+  # there as PENDING, which is the designed behaviour (PostgreSQL is
+  # authoritative, INV-1) and is drained once the profile is enabled.
   redpanda:
+    profiles: ["events", "graph", "full"]
     image: redpandadata/redpanda:v25.1.3
     command:
       - redpanda
@@ -141,7 +309,10 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # Opt-in: `--profile events`. Inspection UI only; nothing consumes from it,
+  # so it is deliberately not pulled in by `--profile graph`.
   redpanda-console:
+    profiles: ["events", "full"]
     image: redpandadata/console:v2.8.5
     depends_on:
       redpanda:
@@ -152,8 +323,18 @@ services:
       - "8081:8080"
     restart: unless-stopped
 
+  # Opt-in: `--profile archive`. `audit_archive_storage_backend` defaults to
+  # `none` (`NullArchiveStorage`, which refuses rather than reporting success),
+  # so the default stack has no archive destination and this service has no
+  # client. Turn it on together with AIDA_AUDIT_ARCHIVE_STORAGE_BACKEND=s3.
+  #
+  # Version pinned, not `:latest` (the k8s base deployment already calls the
+  # floating tag out as an audit finding). This is the release that the
+  # 2026-09-09 Object Lock evidence in the capability register was produced
+  # against; bump it deliberately, not by pulling.
   minio:
-    image: quay.io/minio/minio:latest
+    profiles: ["archive", "full"]
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: aida
@@ -228,10 +409,11 @@ services:
     restart: "no"
 
   migrate:
-    build: .
+    build: *backend-build
     depends_on:
       postgres:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     # This repository intentionally has independent Alembic branches. `heads`
     # upgrades each of them; `head` fails as soon as more than one branch exists.
@@ -239,14 +421,20 @@ services:
     restart: "no"
 
   api:
-    build: .
+    build: *backend-build
+    # No `redis` edge (R11-X9). Redis is behind `--profile cache`, and Compose
+    # rejects the whole project -- "service api depends on undefined service
+    # redis" -- if an enabled service depends on a service whose profile is
+    # off. The edge was not load-bearing either way: both Redis consumers are
+    # lazy and fail soft (`LineageCache` catches RedisError and returns a miss;
+    # the MCP budget degrades), so the API does not need Redis to be up first
+    # even when `--profile cache` is enabled.
     depends_on:
       migrate:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     ports:
       - "8000:8000"
@@ -277,11 +465,12 @@ services:
   # catalog, knowledge graph and unified lineage render non-empty on a fresh
   # install. Never enabled by a plain `docker compose up`.
   seed:
-    build: .
+    build: *backend-build
     profiles: ["seed"]
     depends_on:
       api:
         condition: service_healthy
+    env_file: *app-env-file
     environment:
       <<: *app-environment
       AIDA_BASE_URL: http://api:8000
@@ -291,7 +480,7 @@ services:
     restart: "no"
 
   metadata-worker:
-    build: .
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -299,34 +488,64 @@ services:
         condition: service_healthy
       sample-source:
         condition: service_healthy
-    environment: *app-environment
+    env_file: *app-env-file
+    environment:
+      <<: *app-environment
+      # R11-AUD03. The newly-created-table drafter's consumer-up gauge and
+      # failed-attempts counter are published into this process's registry, and
+      # nothing serves it until this process listens -- the same reason as
+      # `fleet-scheduler` below. 0 (the `Settings` default) means "do not listen"
+      # and stays the default: the port is the operator's decision, made together
+      # with `--profile monitoring`. Set AIDA_WORKER_METRICS_PORT=9108, the value
+      # `infra/monitoring/prometheus/prometheus.yml` scrapes, to turn it on.
+      AIDA_WORKER_METRICS_PORT: ${AIDA_WORKER_METRICS_PORT:-0}
     command: ["python", "-m", "aida.workflows.worker"]
     restart: unless-stopped
 
   fleet-scheduler:
-    build: .
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
-    environment: *app-environment
+    env_file: *app-env-file
+    environment:
+      <<: *app-environment
+      # R11-FP17. `prometheus_client`'s registry is per process and only
+      # `aida.main` serves `/metrics`, so the footprint gauges this process
+      # publishes live where no scrape can reach until it listens. 0 (the
+      # `Settings` default) means "do not listen": opening a port is a change
+      # to the deployment's network surface, so it stays the operator's
+      # decision, made together with `--profile monitoring`. Set
+      # AIDA_WORKER_METRICS_PORT=9108 -- the value
+      # `infra/monitoring/prometheus/prometheus.yml` scrapes -- to turn it on.
+      AIDA_WORKER_METRICS_PORT: ${AIDA_WORKER_METRICS_PORT:-0}
     command: ["python", "-m", "aida.workflows.scheduler"]
     restart: unless-stopped
 
+  # Opt-in: `--profile events`, and under `--profile graph` because it is what
+  # feeds `graph-projector`. The publisher is unchanged and still relays every
+  # outbox row; only its start condition moved.
   outbox-publisher:
-    build: .
+    profiles: ["events", "graph", "full"]
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
       redpanda:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     command: ["python", "-m", "aida.projectors.outbox_publisher"]
     restart: unless-stopped
 
+  # Opt-in: `--profile graph`. Both consumers it implements are retained; the
+  # profile only decides whether they are running. The default stack serves
+  # graph reads from the `postgres` backend instead.
   graph-projector:
-    build: .
+    profiles: ["graph", "full"]
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -334,8 +553,46 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-    environment: *app-environment
+    env_file: *app-env-file
+    environment:
+      <<: *app-environment
+      # Same as `fleet-scheduler` above: the `aida_graph_projection_*` gauges
+      # are published here, and are unreachable until this process listens.
+      AIDA_WORKER_METRICS_PORT: ${AIDA_WORKER_METRICS_PORT:-0}
     command: ["python", "-m", "aida.projectors.graph_projector"]
+    restart: unless-stopped
+
+  # Opt-in: `--profile monitoring`. R11-FP17's scrape configuration and alert
+  # rules live in `infra/monitoring/` and are owned there; this service only
+  # decides whether a Prometheus is running to read them. Off by default for
+  # the reason every other profile is: the default stack should not start a
+  # service that has nothing to do, and a scrape target set plus an alert
+  # routing decision belong to the estate.
+  #
+  # Nothing `depends_on` this, so it has no healthcheck -- the same reason
+  # `temporal-ui` and `redpanda-console` have none. Its own readiness is
+  # visible at http://localhost:9090/targets, which is also where a target
+  # showing DOWN tells you AIDA_WORKER_METRICS_PORT is still 0.
+  #
+  # Version pinned, not `:latest` (the k8s base deployment already calls the
+  # floating tag out as an audit finding). Bump it deliberately.
+  prometheus:
+    profiles: ["monitoring", "full"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Local development retention. An estate sets its own, and a real
+      # deployment sends these to long-term storage rather than keeping them
+      # in one container's volume.
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
     restart: unless-stopped
 
 volumes:
@@ -344,5 +601,6 @@ volumes:
   neo4j-data:
   redpanda-data:
   minio-data:
+  prometheus-data:
   sample-source-data:
   sample-mssql-source-data:

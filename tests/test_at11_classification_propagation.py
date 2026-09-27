@@ -34,10 +34,12 @@ from aida.classification_propagation import (
     NON_PROPAGATING_EDGE_KINDS,
     PROPAGATING_EDGE_KINDS,
     PropagationEdge,
+    collect_propagation_inputs,
     get_current_derived_classification,
     graph_fingerprint,
     is_more_restrictive,
     propagate,
+    propagate_for_datasource,
     propagation_kind_for_edge_source,
     sensitivity_rank,
     store_derived_classifications,
@@ -53,6 +55,7 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     Organization,
+    ViewLineageEdge,
 )
 from aida.semantic_api import _apply_governance_review_decision
 from tests.support.doubles import security_context
@@ -429,3 +432,223 @@ async def test_read_side_returns_current_derived_with_evidence(session) -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# R11-B17: the producer. Until this, nothing built propagation edges from real
+# lineage, so an estate had AT-11's review and apply half and never a derived
+# row. These prove the collector's three rules against real edge tables.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_second_table(
+    session: AsyncSession, org: Organization, first: MetadataTable, name: str
+) -> MetadataTable:
+    table = MetadataTable(
+        id=uuid4(),
+        organization_id=org.id,
+        datasource_id=first.datasource_id,
+        schema_id=first.schema_id,
+        name=name,
+        object_type="BASE_TABLE",
+        fingerprint="fp",
+    )
+    session.add(table)
+    await session.flush()
+    return table
+
+
+def _view_edge(
+    org: Organization,
+    source: MetadataTable,
+    source_column: str,
+    target: MetadataTable,
+    target_column: str,
+    *,
+    review_status: str = "ACTIVE",
+) -> ViewLineageEdge:
+    return ViewLineageEdge(
+        id=uuid4(),
+        organization_id=org.id,
+        datasource_id=source.datasource_id,
+        source_table=source.name,
+        source_column=source_column,
+        target_table=target.name,
+        target_column=target_column,
+        source_table_id=source.id,
+        target_table_id=target.id,
+        transformation_type="DIRECT",
+        confidence="FULL",
+        dialect="postgres",
+        sql_hash="h" * 64,
+        review_status=review_status,
+    )
+
+
+async def test_r11b17_a_reviewed_edge_derives_a_classification_without_asserting_it(
+    session: AsyncSession,
+) -> None:
+    org, source_table = await _seed_table(session)
+    target_table = await _seed_second_table(session, org, source_table, "accounts_v")
+    upstream = await _seed_column(
+        session, org, source_table, name="ssn", ordinal=1, classification="PII"
+    )
+    downstream = await _seed_column(
+        session, org, target_table, name="ssn", ordinal=1, classification="UNCLASSIFIED"
+    )
+    session.add(_view_edge(org, source_table, "ssn", target_table, "ssn"))
+    await session.flush()
+
+    written = await propagate_for_datasource(
+        session,
+        organization_id=org.id,
+        datasource_id=source_table.datasource_id,
+        created_by="scheduler",
+    )
+    await session.flush()
+
+    assert [row.column_id for row in written] == [downstream.id]
+    assert written[0].classification == "PII"
+    assert written[0].origin_column_id == upstream.id
+    # The whole point of AT-11: the enforced value is untouched.
+    refreshed = await session.get(MetadataColumn, downstream.id)
+    assert refreshed is not None
+    assert refreshed.classification == "UNCLASSIFIED"
+
+
+async def test_r11b17_an_unreviewed_edge_never_raises_an_enforcement_input(
+    session: AsyncSession,
+) -> None:
+    """A PROPOSED edge is a parser's guess nobody confirmed. Deriving from it
+    would raise an ABAC input off unreviewed evidence -- the same mistake the
+    engine already refuses for INFLUENCES edges."""
+    org, source_table = await _seed_table(session)
+    target_table = await _seed_second_table(session, org, source_table, "accounts_v")
+    await _seed_column(
+        session, org, source_table, name="ssn", ordinal=1, classification="PII"
+    )
+    await _seed_column(
+        session, org, target_table, name="ssn", ordinal=1, classification="UNCLASSIFIED"
+    )
+    session.add(
+        _view_edge(org, source_table, "ssn", target_table, "ssn", review_status="PROPOSED")
+    )
+    await session.flush()
+
+    written = await propagate_for_datasource(
+        session,
+        organization_id=org.id,
+        datasource_id=source_table.datasource_id,
+        created_by="scheduler",
+    )
+
+    assert written == []
+
+
+async def test_r11b17_a_column_name_shared_across_tables_is_not_a_false_edge(
+    session: AsyncSession,
+) -> None:
+    """Column names are unique within a table, not across one. Resolving an
+    edge end by name alone would merge two unrelated columns and propagate a
+    classification along an edge that does not exist."""
+    org, source_table = await _seed_table(session)
+    target_table = await _seed_second_table(session, org, source_table, "accounts_v")
+    unrelated = await _seed_second_table(session, org, source_table, "customers")
+    await _seed_column(
+        session, org, source_table, name="ssn", ordinal=1, classification="PII"
+    )
+    await _seed_column(
+        session, org, target_table, name="ssn", ordinal=1, classification="UNCLASSIFIED"
+    )
+    # Same column name, different table, no edge to it.
+    bystander = await _seed_column(
+        session, org, unrelated, name="ssn", ordinal=1, classification="UNCLASSIFIED"
+    )
+    session.add(_view_edge(org, source_table, "ssn", target_table, "ssn"))
+    await session.flush()
+
+    written = await propagate_for_datasource(
+        session,
+        organization_id=org.id,
+        datasource_id=source_table.datasource_id,
+        created_by="scheduler",
+    )
+
+    assert bystander.id not in {row.column_id for row in written}
+
+
+async def test_r11b17_the_collector_bound_truncates_and_says_so(
+    session: AsyncSession,
+) -> None:
+    org, source_table = await _seed_table(session)
+    target_table = await _seed_second_table(session, org, source_table, "accounts_v")
+    for index in range(3):
+        await _seed_column(
+            session, org, source_table, name=f"c{index}", ordinal=index, classification="PII"
+        )
+        await _seed_column(
+            session, org, target_table, name=f"c{index}", ordinal=index
+        )
+        session.add(_view_edge(org, source_table, f"c{index}", target_table, f"c{index}"))
+    await session.flush()
+
+    inputs = await collect_propagation_inputs(
+        session,
+        organization_id=org.id,
+        datasource_id=source_table.datasource_id,
+        max_edges=2,
+    )
+
+    assert len(inputs.edges) == 2
+    assert inputs.truncated is True
+
+
+async def test_r11b17_a_label_outside_the_lattice_never_raises_anything(
+    session: AsyncSession,
+) -> None:
+    """A classification the lattice does not know ranks as UNCLASSIFIED, so it
+    cannot raise a downstream column. Worth pinning at the producer level: the
+    collector reads whatever labels an estate's feeds happen to write, and an
+    unrecognised one erring toward under-propagation is the safe direction."""
+    org, source_table = await _seed_table(session)
+    target_table = await _seed_second_table(session, org, source_table, "accounts_v")
+    await _seed_column(
+        session, org, source_table, name="ssn", ordinal=1, classification="RESTRICTED"
+    )
+    await _seed_column(
+        session, org, target_table, name="ssn", ordinal=1, classification="UNCLASSIFIED"
+    )
+    session.add(_view_edge(org, source_table, "ssn", target_table, "ssn"))
+    await session.flush()
+
+    written = await propagate_for_datasource(
+        session,
+        organization_id=org.id,
+        datasource_id=source_table.datasource_id,
+        created_by="scheduler",
+    )
+
+    assert written == []
+
+
+async def test_r11b17_the_scheduler_pass_is_off_until_an_operator_sets_an_interval() -> None:
+    """Default 0 means never, the same convention the task agents use. Asserted
+    by proving it opens no session at all: a pass that returned 0 after querying
+    every datasource would still be a per-iteration cost on every deployment
+    that never asked for it."""
+    from aida.config import Settings
+    from aida.workflows import scheduler
+
+    def fail_session() -> object:
+        raise AssertionError("the propagation pass must not open a session when off")
+
+    original = scheduler.session_factory
+    scheduler.session_factory = fail_session  # type: ignore[assignment]
+    try:
+        settings = Settings(_env_file=None)
+        assert settings.classification_propagation_interval_minutes == 0
+        swept = await scheduler.run_classification_propagation_pass(settings)
+    finally:
+        scheduler.session_factory = original  # type: ignore[assignment]
+
+    assert swept == 0

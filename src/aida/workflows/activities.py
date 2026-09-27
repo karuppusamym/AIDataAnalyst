@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -21,14 +22,28 @@ from aida.analysis_tasks import (
     TASK_TYPE_PROFILE_DATASOURCE,
     TASK_TYPE_PROFILE_TABLE,
 )
+from aida.capability_states import CapabilityState
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signals import (
+    CHANGE_COLUMNS_ADDED,
+    CHANGE_COLUMNS_REMOVED,
+    CHANGE_COLUMNS_RETURNED,
+    CHANGE_COLUMNS_RETYPED,
+    SIGNAL_DEPRECATED,
+    SIGNAL_REACTIVATED,
+    SIGNAL_STRUCTURE_CHANGED,
+    ChangeSignal,
+    record_change_signals,
+)
 from aida.classification_feed import (
     CLASSIFICATION_SOURCE_EXTERNAL,
     CLASSIFICATION_SOURCE_RULE,
     RuleClassificationResult,
     classify_column_name_with_evidence,
 )
-from aida.config import get_settings
+from aida.config import Settings, get_settings
 from aida.connectors.base import (
+    Connector,
     ConnectorValueProfilingUnsupported,
     DiscoveredCatalog,
     DiscoveredColumn,
@@ -38,8 +53,51 @@ from aida.connectors.base import (
     DiscoveredSchema,
     DiscoveredTable,
 )
+from aida.connectors.discovery import (
+    FACET_CONSTRAINTS,
+    FACET_GRANTS,
+    FACET_INDEXES,
+    FACET_OBJECT_COMMENTS,
+    FACET_PARTITIONS,
+    FACET_ROUTINE_BODIES,
+    FACET_VIEW_DEFINITIONS,
+    FacetReadScope,
+    classify_read_failure,
+    facet_read_scope,
+)
 from aida.connectors.registry import connector_registry
+from aida.connectors.write_probe import (
+    NOT_PROBED,
+    WritePrivilegeProbe,
+    probe_write_privileges,
+)
 from aida.db import session_factory
+from aida.discovery_receipt import (
+    FACET_OBJECT_VISIBILITY,
+    FACET_SEQUENCES,
+    FACET_TRIGGERS,
+    STREAM_COMPLETE,
+    STREAM_IN_PROGRESS,
+    STREAM_INTERRUPTED,
+    DiscoveryReceipt,
+)
+from aida.discovery_selection import (
+    DiscoverySelection,
+    apply_selection,
+    grant_in_scope,
+    routine_in_scope,
+    selection_for,
+    table_kind,
+)
+from aida.envelope_models import (
+    MetadataObjectDescription,
+    MetadataRoutine,
+    MetadataRoutineParameter,
+    MetadataSequence,
+    MetadataSourceGrant,
+    MetadataTrigger,
+    MetadataViewDefinition,
+)
 from aida.events import record_audit, record_outbox
 from aida.identity_resolution import IdentityMatch, score_table_rename
 from aida.ingestion import (
@@ -70,6 +128,10 @@ from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 from aida.task_tracking import finish_task, heartbeat_task, start_task
 from aida.workflows.continuation import clamp_page_size
+from atlas.modules.profiling.facets import (
+    derived_column_facets,
+    persistable_observation_scope,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -79,17 +141,36 @@ logger = structlog.get_logger(__name__)
 _METADATA_WORKER_PRINCIPAL = "metadata-worker"
 
 
+#: R11-FP16: a column retyped can change what a query answers; one returned or added cannot.
+_SHAPE_CHANGE_RANK: dict[str, int] = {
+    CHANGE_COLUMNS_ADDED: 1,
+    CHANGE_COLUMNS_RETURNED: 2,
+    CHANGE_COLUMNS_RETYPED: 3,
+}
+
+
 @dataclass(slots=True)
 class ChangeTracker:
     created: int = 0
     changed: int = 0
     deprecated: int = 0
+    # R11-FP15: which tables changed, not just how many objects. A table created in this call
+    # is not a change to anything that could depend on it, so its columns signal nothing.
+    new_table_ids: set[UUID] = field(default_factory=set)
+    #: R11-FP16: each reshaped table's most consequential shape change (`change_signals`).
+    structure_changes: dict[UUID, str] = field(default_factory=dict)
+    signals: list[ChangeSignal] = field(default_factory=list)
 
     def observe(self, existing: object | None, old_fingerprint: str | None, new: str) -> None:
         if existing is None:
             self.created += 1
         elif old_fingerprint != new or getattr(existing, "status", "ACTIVE") != "ACTIVE":
             self.changed += 1
+
+    def reshape(self, table_id: UUID, change_class: str) -> None:
+        current = self.structure_changes.get(table_id)
+        if current is None or _SHAPE_CHANGE_RANK[change_class] > _SHAPE_CHANGE_RANK[current]:
+            self.structure_changes[table_id] = change_class
 
 
 @dataclass(slots=True)
@@ -280,9 +361,12 @@ async def _get_or_create_table(
         )
         session.add(table)
         await session.flush()
+        tracker.new_table_ids.add(table.id)
         if created_table_ids is not None:
             created_table_ids.add(table.id)
     else:
+        if table.status != "ACTIVE":
+            tracker.signals.append(ChangeSignal("TABLE", table.id, SIGNAL_REACTIVATED))
         table.status = "ACTIVE"
         table.deprecated_at = None
         table.object_type = discovered.object_type
@@ -306,6 +390,18 @@ async def _get_or_create_column(
     )
     column_fingerprint = fingerprint(asdict(discovered))
     tracker.observe(column, column.fingerprint if column else None, column_fingerprint)
+    # R11-FP15: a column added to, returned to or retyped in an existing table changes the
+    # table's shape. A description edit does not, so only type and nullability are compared.
+    if table.id not in tracker.new_table_ids:
+        if column is None:
+            tracker.reshape(table.id, CHANGE_COLUMNS_ADDED)
+        elif (
+            column.physical_type != discovered.physical_type
+            or column.nullable != discovered.nullable
+        ):
+            tracker.reshape(table.id, CHANGE_COLUMNS_RETYPED)
+        elif column.status != "ACTIVE":
+            tracker.reshape(table.id, CHANGE_COLUMNS_RETURNED)
     rule_result = classify_column_name_with_evidence(discovered.name)
     if column is None:
         column = MetadataColumn(
@@ -487,6 +583,7 @@ async def _deprecate_missing(
     seen_constraint_ids: set[UUID],
     seen_index_ids: set[UUID],
     seen_partition_ids: set[UUID],
+    analysis_run_id: UUID | None = None,
 ) -> DeprecationResult:
     now = datetime.now(UTC)
     catalog_ids = set(
@@ -558,6 +655,37 @@ async def _deprecate_missing(
         if missing.table_ids
         else set()
     )
+    # R11-FP15: the same "about to flip" read for columns -- a table that stays but loses a
+    # column changed shape. Recorded in this transaction, before the updates below.
+    reshaped_table_ids: set[UUID] = (
+        set(
+            await session.scalars(
+                select(MetadataColumn.table_id).where(
+                    MetadataColumn.id.in_(missing.column_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+            )
+        )
+        - deprecated_table_ids
+        if missing.column_ids
+        else set()
+    )
+    record_change_signals(
+        session,
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        analysis_run_id=analysis_run_id,
+        signals=[
+            *(
+                ChangeSignal("TABLE", table_id, SIGNAL_DEPRECATED)
+                for table_id in sorted(deprecated_table_ids, key=str)
+            ),
+            *(
+                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED, CHANGE_COLUMNS_REMOVED)
+                for table_id in sorted(reshaped_table_ids, key=str)
+            ),
+        ],
+    )
     statements = [
         update(model)
         .where(model.id.in_(object_ids), model.status == "ACTIVE")
@@ -584,6 +712,8 @@ async def deprecate_missing_snapshot(
     session: AsyncSession,
     datasource: DataSource,
     scope: SnapshotScope,
+    *,
+    analysis_run_id: UUID | None = None,
 ) -> DeprecationResult:
     return await _deprecate_missing(
         session,
@@ -595,7 +725,236 @@ async def deprecate_missing_snapshot(
         seen_constraint_ids=scope.constraint_ids,
         seen_index_ids=scope.index_ids,
         seen_partition_ids=scope.partition_ids,
+        analysis_run_id=analysis_run_id,
     )
+
+
+def union_snapshot_scopes(left: SnapshotScope, right: SnapshotScope) -> SnapshotScope:
+    return SnapshotScope(
+        catalog_ids=left.catalog_ids | right.catalog_ids,
+        schema_ids=left.schema_ids | right.schema_ids,
+        table_ids=left.table_ids | right.table_ids,
+        column_ids=left.column_ids | right.column_ids,
+        constraint_ids=left.constraint_ids | right.constraint_ids,
+        created_table_ids=set(left.created_table_ids),
+        index_ids=left.index_ids | right.index_ids,
+        partition_ids=left.partition_ids | right.partition_ids,
+    )
+
+
+def union_envelope_scopes(left: EnvelopeScope, right: EnvelopeScope) -> EnvelopeScope:
+    return EnvelopeScope(
+        view_definition_ids=left.view_definition_ids | right.view_definition_ids,
+        routine_ids=left.routine_ids | right.routine_ids,
+        routine_parameter_ids=left.routine_parameter_ids | right.routine_parameter_ids,
+        object_description_ids=left.object_description_ids | right.object_description_ids,
+        grant_ids=left.grant_ids | right.grant_ids,
+        # R11-FP01: unioned like every other axis. Omitting them here is the quiet way
+        # the "counted as seen" protections below would have stopped working -- the
+        # retained ids would be computed correctly and then dropped on the way into the
+        # reconciliation pass.
+        trigger_ids=left.trigger_ids | right.trigger_ids,
+        sequence_ids=left.sequence_ids | right.sequence_ids,
+    )
+
+
+_ID_CHUNK = 1000
+
+
+def _id_chunks(ids: set[UUID]) -> list[list[UUID]]:
+    ordered = sorted(ids, key=str)
+    return [ordered[start : start + _ID_CHUNK] for start in range(0, len(ordered), _ID_CHUNK)]
+
+
+async def out_of_scope_existing(
+    session: AsyncSession, datasource: DataSource, selection: DiscoverySelection
+) -> tuple[SnapshotScope, EnvelopeScope]:
+    """R11-FP01: existing objects a discovery selection does not cover.
+
+    A FULL run counts them as seen, because they were never looked for: retiring them would
+    turn "narrow the scan" into "delete what earlier scans found". Children follow their
+    parent -- the columns of an excluded table, the parameters of an excluded routine.
+    """
+    snapshot, envelope = SnapshotScope(), EnvelopeScope()
+    schema_rows = (
+        await session.execute(
+            select(MetadataSchema.id, MetadataSchema.name, MetadataSchema.catalog_id)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(MetadataCatalog.datasource_id == datasource.id)
+        )
+    ).all()
+    schema_names = {schema_id: name for schema_id, name, _ in schema_rows}
+    for schema_id, name, catalog_id in schema_rows:
+        if not selection.schema_in_scope(name):
+            snapshot.schema_ids.add(schema_id)
+            snapshot.catalog_ids.add(catalog_id)
+
+    table_rows = await session.execute(
+        select(
+            MetadataTable.id, MetadataTable.name, MetadataTable.object_type, MetadataTable.schema_id
+        ).where(MetadataTable.datasource_id == datasource.id)
+    )
+    for table_id, name, object_type, schema_id in table_rows.all():
+        schema = schema_names.get(schema_id)
+        if schema is not None and not selection.object_in_scope(
+            schema, name, table_kind(object_type)
+        ):
+            snapshot.table_ids.add(table_id)
+    for chunk in _id_chunks(snapshot.table_ids):
+        for target, model in (
+            (snapshot.column_ids, MetadataColumn),
+            (snapshot.constraint_ids, MetadataConstraint),
+            (snapshot.index_ids, MetadataIndex),
+            (snapshot.partition_ids, MetadataPartition),
+            (envelope.view_definition_ids, MetadataViewDefinition),
+        ):
+            target.update(await session.scalars(select(model.id).where(model.table_id.in_(chunk))))
+
+    routine_rows = await session.execute(
+        select(
+            MetadataRoutine.id,
+            MetadataRoutine.name,
+            MetadataRoutine.routine_type,
+            MetadataRoutine.schema_id,
+            MetadataRoutine.package_name,
+        ).where(MetadataRoutine.datasource_id == datasource.id)
+    )
+    for routine_id, name, routine_type, schema_id, package_name in routine_rows.all():
+        schema = schema_names.get(schema_id)
+        # R11-FP03: a package member is out of scope exactly when its package is -- the
+        # same rule `apply_selection` scopes it by on the way in, so the two halves agree.
+        if schema is not None and not routine_in_scope(
+            selection, schema, name, routine_type, package_name or None
+        ):
+            envelope.routine_ids.add(routine_id)
+    for chunk in _id_chunks(envelope.routine_ids):
+        envelope.routine_parameter_ids.update(
+            await session.scalars(
+                select(MetadataRoutineParameter.id).where(
+                    MetadataRoutineParameter.routine_id.in_(chunk)
+                )
+            )
+        )
+    # R11-FP01: a trigger and a sequence are each scoped by their *own* qualified name
+    # and kind, exactly as `discovery_selection.apply_selection` scopes them on the way
+    # in -- a trigger by `schema.trigger_name` against kind TRIGGER, never by its firing
+    # table's name. Scoping a trigger by its firing table would silently re-admit an
+    # object the operator excluded (and, here, would retire one they did not), and the
+    # two halves have to agree or an object is dropped from the scan by one rule and
+    # tombstoned by the other. `object_in_scope` also covers the kind list, so a
+    # selection that simply does not name TRIGGER retires no trigger either.
+    trigger_rows = await session.execute(
+        select(MetadataTrigger.id, MetadataTrigger.name, MetadataTrigger.schema_id).where(
+            MetadataTrigger.organization_id == datasource.organization_id,
+            MetadataTrigger.datasource_id == datasource.id,
+        )
+    )
+    for trigger_id, name, schema_id in trigger_rows.all():
+        schema = schema_names.get(schema_id)
+        if schema is not None and not selection.object_in_scope(schema, name, "TRIGGER"):
+            envelope.trigger_ids.add(trigger_id)
+    sequence_rows = await session.execute(
+        select(MetadataSequence.id, MetadataSequence.name, MetadataSequence.schema_id).where(
+            MetadataSequence.organization_id == datasource.organization_id,
+            MetadataSequence.datasource_id == datasource.id,
+        )
+    )
+    for sequence_id, name, schema_id in sequence_rows.all():
+        schema = schema_names.get(schema_id)
+        if schema is not None and not selection.object_in_scope(schema, name, "SEQUENCE"):
+            envelope.sequence_ids.add(sequence_id)
+    for chunk in _id_chunks(snapshot.schema_ids):
+        envelope.object_description_ids.update(
+            await session.scalars(
+                select(MetadataObjectDescription.id).where(
+                    MetadataObjectDescription.schema_id.in_(chunk)
+                )
+            )
+        )
+    grant_rows = await session.execute(
+        select(
+            MetadataSourceGrant.id,
+            MetadataSourceGrant.schema_id,
+            MetadataSourceGrant.object_type,
+            MetadataSourceGrant.object_name,
+            MetadataSourceGrant.schema_name,
+        ).where(MetadataSourceGrant.datasource_id == datasource.id)
+    )
+    for grant_id, schema_id, object_type, object_name, schema_name in grant_rows.all():
+        schema = schema_name or schema_names.get(schema_id)
+        if schema is not None and not grant_in_scope(selection, schema, object_type, object_name):
+            envelope.grant_ids.add(grant_id)
+    return snapshot, envelope
+
+
+#: Facet -> the stored axis its read populates, for the reconciliation rule below.
+#: `inventory` is absent on purpose: a refused roster fails the run
+#: (`connectors.discovery.RETIREMENT_BEARING_FACETS`), because there is no honest way to
+#: complete a run that saw no objects.
+_FACET_AXES: dict[str, tuple[tuple[str, Any], ...]] = {
+    FACET_CONSTRAINTS: (("constraint_ids", MetadataConstraint),),
+    FACET_INDEXES: (("index_ids", MetadataIndex),),
+    FACET_PARTITIONS: (("partition_ids", MetadataPartition),),
+    FACET_VIEW_DEFINITIONS: (("view_definition_ids", MetadataViewDefinition),),
+    FACET_ROUTINE_BODIES: (
+        ("routine_ids", MetadataRoutine),
+        ("routine_parameter_ids", MetadataRoutineParameter),
+    ),
+    FACET_OBJECT_COMMENTS: (("object_description_ids", MetadataObjectDescription),),
+    FACET_GRANTS: (("grant_ids", MetadataSourceGrant),),
+    # R11-FP01: the two native-object axes get the same protection as the rest, because
+    # they are refusable in exactly the same way -- `pg_trigger` and `sys.triggers` are
+    # ordinary relations a login can be denied. The negative control that proved this
+    # defect real for grants (`tests/test_facet_refusal.py`) proves it for any axis whose
+    # rows a FULL run reconciles, and these two now are such an axis.
+    #
+    # Registered ahead of the connector that will attribute a read to them: no adapter
+    # wraps its trigger query in `read_facet` yet, and `DISCOVERY_FACETS` -- in
+    # `connectors.discovery`, another session's this cycle -- has no entry for either
+    # name, so `FacetReadScope.record` would reject one today. That makes these two rows
+    # unreachable rather than wrong, and they are here so the protection lands with the
+    # one-line vocabulary entry instead of trailing a release behind it. Until then a
+    # refused trigger read propagates and fails the run, which reconciles nothing.
+    FACET_TRIGGERS: (("trigger_ids", MetadataTrigger),),
+    FACET_SEQUENCES: (("sequence_ids", MetadataSequence),),
+}
+_SNAPSHOT_AXES = frozenset({"constraint_ids", "index_ids", "partition_ids"})
+
+
+async def refused_facet_existing(
+    session: AsyncSession, datasource: DataSource, facets: Iterable[str]
+) -> tuple[SnapshotScope, EnvelopeScope]:
+    """R11-FP02: existing objects of a facet whose read this run was refused.
+
+    The same rule, for the same reason, as `out_of_scope_existing` above: a FULL run
+    retires every object it did not see, and an object it was not allowed to *look at* is
+    not missing. `discovery_selection`'s hazard note draws that line for a narrowed
+    selection -- "narrowing a selection stops maintaining an object; it never retires one"
+    -- and a refusal lands on exactly the same side of it. Without this, the first run
+    after a grant is dropped would read the source's silence as deletion and tombstone
+    every grant, view definition or routine an earlier, better-privileged run captured:
+    the refusal would have cost far more than the facet it refused.
+
+    So a refused facet costs exactly its own freshness. Nothing is retired, nothing is
+    re-read, and the receipt says PERMISSION_DENIED for that facet so a reader is never
+    left to infer the source has none of them.
+
+    INV-5: every read below restates both `organization_id` and `datasource_id`.
+    """
+    snapshot, envelope = SnapshotScope(), EnvelopeScope()
+    for facet in sorted(set(facets)):
+        for axis, model in _FACET_AXES.get(facet, ()):
+            ids = set(
+                await session.scalars(
+                    select(model.id).where(
+                        model.organization_id == datasource.organization_id,
+                        model.datasource_id == datasource.id,
+                    )
+                )
+            )
+            target = snapshot if axis in _SNAPSHOT_AXES else envelope
+            getattr(target, axis).update(ids)
+    return snapshot, envelope
 
 
 async def detect_rename_candidates(
@@ -850,8 +1209,25 @@ async def persist_discovery_snapshot(
                     snapshot_scope.constraint_ids.add(constraint.id)
                     counts["constraints"] += 1
 
+    record_change_signals(
+        session,
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        analysis_run_id=run.id,
+        signals=[
+            *tracker.signals,
+            *(
+                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED, change_class)
+                for table_id, change_class in sorted(
+                    tracker.structure_changes.items(), key=lambda item: str(item[0])
+                )
+            ),
+        ],
+    )
     if deprecate_missing:
-        deprecation_result = await deprecate_missing_snapshot(session, datasource, snapshot_scope)
+        deprecation_result = await deprecate_missing_snapshot(
+            session, datasource, snapshot_scope, analysis_run_id=run.id
+        )
         tracker.deprecated = deprecation_result.total
         # CT-4: same-run tombstone-plus-create pairing. Both sides are only known
         # for certain once deprecation for *this* run has actually happened --
@@ -972,6 +1348,73 @@ async def _emit_newly_created_table_events(
     )
 
 
+class SourceAccountCanWrite(RuntimeError):
+    """R11-MP22: the source account can write and the policy is REFUSE."""
+
+
+async def check_source_write_access(
+    connector: Connector,
+    *,
+    datasource: DataSource,
+    run: AnalysisRun,
+    settings: Settings,
+) -> WritePrivilegeProbe:
+    """Probe whether the account discovery connects as can write, and act on it.
+
+    Every write the platform could make is refused by the query gateway's parse;
+    a read-only account is the second layer, and on every engine but PostgreSQL
+    (which also runs reads in a read-only transaction) it is the only one. So an
+    account that can write is recorded -- an audit row an operator can find, and
+    a warning -- and, where `source_write_access_policy` is REFUSE, discovery
+    stops. A probe that itself fails is logged and never stops discovery.
+    """
+    try:
+        probe = await probe_write_privileges(connector)
+    except Exception as exc:  # noqa: BLE001 -- a failed probe is not a finding
+        logger.warning(
+            "source_write_probe_failed",
+            datasource_id=str(datasource.id),
+            error_type=type(exc).__name__,
+        )
+        return NOT_PROBED
+    if not probe.can_write:
+        return probe
+    logger.warning(
+        "source_account_can_write",
+        datasource_id=str(datasource.id),
+        connector_type=datasource.connector_type,
+        found=probe.detail,
+        policy=settings.source_write_access_policy,
+    )
+    async with session_factory() as session:
+        record_audit(
+            session,
+            SecurityContext(
+                principal_id="metadata-worker",
+                principal_type="WORKER",
+                organization_id=datasource.organization_id,
+                roles=frozenset({"MetadataWorker"}),
+            ),
+            action="datasource.source_account_can_write",
+            resource_type="datasource",
+            resource_id=str(datasource.id),
+            outcome="SUCCESS",
+            correlation_id=str(run.id),
+            details={
+                "connector_type": datasource.connector_type,
+                "found": probe.detail,
+                "policy": settings.source_write_access_policy,
+            },
+        )
+        await session.commit()
+    if settings.source_write_access_policy == "REFUSE":
+        raise SourceAccountCanWrite(
+            f"the source account can write ({probe.detail}); "
+            "source_write_access_policy is REFUSE"
+        )
+    return probe
+
+
 async def _mark_run_cancelled(run_uuid: UUID) -> None:
     async with session_factory() as session:
         run = await session.get(AnalysisRun, run_uuid)
@@ -1006,6 +1449,70 @@ async def _mark_run_cancelled(run_uuid: UUID) -> None:
         await session.commit()
 
 
+async def _count_invisible(
+    connector: Connector, receipt_outcome: dict[str, tuple[CapabilityState, str]]
+) -> dict[str, int] | None:
+    """R11-FP02: ask the source how much of itself this login may not see, or give up quietly.
+
+    A connector that cannot ask answers `None`, and so does one whose attempt fails: the run
+    goes on reading what it is allowed to, and the receipt says UNKNOWN rather than claiming
+    nothing is hidden. The failure is logged, because "we could not ask" is worth knowing.
+
+    Review 2026-09-16 §5: a failure is no longer one undifferentiated `None`. If the source
+    *refused* the read, that is recorded as `PERMISSION_DENIED` on the `object_visibility`
+    facet -- a different fact from "this adapter has no unfiltered catalog to ask", and one
+    a source administrator can act on by granting access. `receipt_outcome` collects it here
+    because the receipt is built from this call's own result.
+
+    The refusal is judged by SQLSTATE (`capability_states.is_permission_refusal`), never by
+    reading the driver's message: a message can quote a value (INV-6), no two drivers spell
+    one the same way, and a guess about the source's intent is worse than an honest
+    "we did not get it". Anything else is `UNAVAILABLE`, which is the under-claiming
+    direction INV-9 requires.
+
+    The judgement itself is `connectors.discovery.classify_read_failure`, shared with
+    `read_facet`, so the visibility question and every facet read are classified by one
+    piece of code -- two copies of this rule would be two places for a driver message to
+    start leaking into an audit trail.
+    """
+    try:
+        return await connector.count_invisible_objects()
+    except Exception as exc:  # noqa: BLE001 -- asking is best-effort; a run must not fail over it
+        logger.warning("discovery_invisible_count_failed", exc_info=True)
+        receipt_outcome[FACET_OBJECT_VISIBILITY] = classify_read_failure(exc)
+        return None
+
+
+def _drain_facet_reads(
+    scope: FacetReadScope, receipt: DiscoveryReceipt, refused: set[str]
+) -> None:
+    """Move what the connector recorded about its own facet reads onto the receipt.
+
+    Called inside every committed batch, so the receipt a batch writes names the facets
+    that batch could not read, and once more when the stream ends. `refused` collects the
+    facets the source refused, which the FULL reconciliation needs: their existing objects
+    are counted as seen rather than retired (`refused_facet_existing`).
+
+    Nothing here inspects an exception or a message -- the connector already classified
+    its own failure through `connectors.discovery.classify_read_failure`, and what arrives
+    is a state and a reason code from the two closed vocabularies (INV-6).
+    """
+    for facet, (state, reason) in scope.drain().items():
+        receipt.record_facet_outcome(facet, state=state, reason=reason)
+        if state is CapabilityState.PERMISSION_DENIED:
+            refused.add(facet)
+
+
+async def _interrupt_receipt(run_uuid: UUID, receipt: DiscoveryReceipt) -> None:
+    """R11-FP02: a cancelled run keeps the batches its receipt already counted, marked as
+    not finished -- never left looking like a stream still running."""
+    async with session_factory() as session:
+        run = await session.get(AnalysisRun, run_uuid)
+        if run is not None:
+            run.discovery_receipt = receipt.as_json(STREAM_INTERRUPTED)
+            await session.commit()
+
+
 @activity.defn(name="discover_datasource")
 async def discover_datasource(run_id: str) -> dict[str, Any]:
     run_uuid = UUID(run_id)
@@ -1036,8 +1543,17 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
         run.status = "RUNNING"
+        run_mode = run.mode
         await session.commit()
 
+    # R11-FP02: created once the connector has answered, so its capability flags are known;
+    # declared here so a failure after that point can still mark it INTERRUPTED.
+    receipt: DiscoveryReceipt | None = None
+    # R11-FP02: declared out here for the same reason. A refusal that ends the run is
+    # recorded by the connector's own read on its way out, and the failure path below --
+    # which runs after the scope's block has exited -- writes it onto the INTERRUPTED
+    # receipt, so even a run a refusal killed says which read it was refused.
+    facet_reads = FacetReadScope()
     activity.heartbeat({"stage": "connecting"})
     await heartbeat_task(
         analysis_run_id=run_uuid,
@@ -1049,6 +1565,10 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         dsn = SecretResolver().resolve(datasource.credential_reference)
         connector = connector_registry.create(datasource.connector_type, dsn)
         await connector.test_connection()
+        # R11-MP22: a source account that can write is recorded, or refused.
+        await check_source_write_access(
+            connector, datasource=datasource, run=run, settings=get_settings()
+        )
         activity.heartbeat({"stage": "discovering"})
         await heartbeat_task(
             analysis_run_id=run_uuid,
@@ -1085,62 +1605,142 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         settings = get_settings()
         snapshot_scope = SnapshotScope()
         envelope_scope = EnvelopeScope()
+        # R11-FP01: the selection as it stood when the run started; an edit made while
+        # the run is in flight applies to the next run, not halfway through this one.
+        selection = selection_for(datasource)
+        excluded_by_kind: dict[str, int] = {}
+        # R11-FP01: where the connector can take it, the schema scope goes into the source's own
+        # metadata queries, so an excluded schema is never read. The selection is still applied
+        # to every batch below.
+        pushed_down = connector.scope_discovery(
+            include_schemas=list(selection.include_schemas),
+            exclude_schemas=list(selection.exclude_schemas),
+            # R11-FP01 remainder: the object scope too, which Oracle, Snowflake, BigQuery
+            # and Databricks push into the reads whose rows belong to one object.
+            object_kinds=list(selection.object_kinds),
+            include_objects=list(selection.include_objects),
+            exclude_objects=list(selection.exclude_objects),
+        )
+        # Review 2026-09-16 §5: a facet read that did not complete is recorded on the
+        # receipt rather than failing the run, and a refusal is told apart from a failure.
+        visibility_outcome: dict[str, tuple[CapabilityState, str]] = {}
+        receipt = DiscoveryReceipt(
+            mode=run_mode,
+            selection_fingerprint=selection.fingerprint(),
+            capabilities=asdict(connector.capabilities),
+            selection_pushed_down=pushed_down,
+            # R11-FP02: what this run's login may not see, asked once, before the stream. A
+            # source that cannot answer leaves it None, which the receipt reports as UNKNOWN
+            # rather than as nothing hidden; a failure to ask is the same answer, and never
+            # fails a run that can still read what it is allowed to.
+            invisible=await _count_invisible(connector, visibility_outcome),
+        )
+        for facet, (facet_state, facet_reason) in visibility_outcome.items():
+            receipt.record_facet_outcome(facet, state=facet_state, reason=facet_reason)
+        # R11-FP01: which of the two native-object axes this connector actually reads, and
+        # therefore which of them this FULL run may retire from. Derived from the
+        # connector's own capability flags rather than from whether the stream happened to
+        # contain any, because "read the axis and found none" is the only state that
+        # licenses retirement and an empty tuple cannot tell that apart from "never
+        # looked" (INV-9). Snowflake reads sequences and has no trigger object at all, so
+        # it reconciles one axis and leaves the other alone; Databricks and BigQuery
+        # reconcile neither. `ingestion.NATIVE_OBJECT_AXES` has the full argument.
+        native_axes_read = frozenset(
+            facet
+            for facet in (FACET_TRIGGERS, FACET_SEQUENCES)
+            if getattr(connector.capabilities, facet, False)
+        )
         created_objects_total = 0
         changed_objects_total = 0
         batch_index = 0
-        async for catalogs in connector.discover_streaming(
-            batch_size=settings.discovery_stream_batch_size
-        ):
-            if activity.is_cancelled():
-                raise asyncio.CancelledError
-            batch_index += 1
-            async with session_factory() as session:
-                run = await session.get(AnalysisRun, run_uuid)
-                datasource = await session.get(DataSource, run.datasource_id) if run else None
-                if run is None or datasource is None:
-                    raise ValueError("analysis run or datasource disappeared during discovery")
-                counts = await persist_discovery_snapshot(
-                    session,
-                    run,
-                    datasource,
-                    catalogs,
-                    deprecate_missing=False,
-                    scope=snapshot_scope,
+        # R11-FP02: the facets this run's login was refused, collected from the connector's
+        # own reads (`connectors.discovery.read_facet`) rather than guessed at from a
+        # failure. Their existing objects are counted as seen by the reconciliation below,
+        # for the reason `refused_facet_existing` gives: a read that was refused is a read
+        # that did not happen, and a FULL run may not retire what it never looked at.
+        refused_facets: set[str] = set()
+        with facet_read_scope(facet_reads):
+            async for catalogs in connector.discover_streaming(
+                batch_size=settings.discovery_stream_batch_size
+            ):
+                if activity.is_cancelled():
+                    raise asyncio.CancelledError
+                batch_index += 1
+                outcome = apply_selection(catalogs, selection)
+                catalogs = outcome.catalogs
+                for kind, count in outcome.excluded.items():
+                    excluded_by_kind[kind] = excluded_by_kind.get(kind, 0) + count
+                receipt.observe_batch(catalogs, outcome.excluded)
+                async with session_factory() as session:
+                    run = await session.get(AnalysisRun, run_uuid)
+                    datasource = (
+                        await session.get(DataSource, run.datasource_id) if run else None
+                    )
+                    if run is None or datasource is None:
+                        raise ValueError(
+                            "analysis run or datasource disappeared during discovery"
+                        )
+                    counts = await persist_discovery_snapshot(
+                        session,
+                        run,
+                        datasource,
+                        catalogs,
+                        deprecate_missing=False,
+                        scope=snapshot_scope,
+                    )
+                    # Envelope 1.1 (gap/02 N1). The pull path collects views, routines,
+                    # comments and grants in `connector.discover_streaming()`; without
+                    # this call it would drop them at persistence while both push paths
+                    # keep them. No version gate is needed: a pull snapshot comes from a
+                    # connector whose capability flags already say which axes it
+                    # collected, so a connector that collects an axis is authoritative
+                    # for it. `deprecate_missing=False` here for the same INV-11 reason
+                    # as the 1.0 pass above -- reconciled once in `finalize`, below.
+                    #
+                    # R11-FP01: the same call now also writes the triggers and sequences
+                    # the connector read. It needs no `native_axes_read` here for the
+                    # reason the docstring gives -- that flag governs retirement only,
+                    # and nothing retires on this pass.
+                    extension_counts = await persist_envelope_extensions(
+                        session,
+                        datasource,
+                        catalogs,
+                        scope=envelope_scope,
+                        deprecate_missing=False,
+                        analysis_run_id=run.id,
+                    )
+                    created_objects_total += (
+                        counts["created_objects"] + extension_counts["created_objects"]
+                    )
+                    changed_objects_total += (
+                        counts["changed_objects"] + extension_counts["changed_objects"]
+                    )
+                    # R11-FP02: drained inside this batch's own commit, so the facets the
+                    # source refused while producing this batch are named by the receipt
+                    # this batch writes -- a run killed after batch three still says which
+                    # reads it was refused, rather than losing them with the process.
+                    _drain_facet_reads(facet_reads, receipt, refused_facets)
+                    # Written with the batch it describes, so the receipt never claims a batch
+                    # the catalog does not hold.
+                    run.discovery_receipt = receipt.as_json(STREAM_IN_PROGRESS)
+                    await session.commit()
+                batch_progress = {
+                    "stage": "discovering",
+                    "batch": batch_index,
+                    **snapshot_scope.object_counts(),
+                }
+                activity.heartbeat(batch_progress)
+                await heartbeat_task(
+                    analysis_run_id=run_uuid,
+                    task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+                    table_id=None,
+                    detail=batch_progress,
                 )
-                # Envelope 1.1 (gap/02 N1). The pull path collects views, routines,
-                # comments and grants in `connector.discover_streaming()`; without
-                # this call it would drop them at persistence while both push paths
-                # keep them. No version gate is needed: a pull snapshot comes from a
-                # connector whose capability flags already say which axes it
-                # collected, so a connector that collects an axis is authoritative
-                # for it. `deprecate_missing=False` here for the same INV-11 reason
-                # as the 1.0 pass above -- reconciled once in `finalize`, below.
-                extension_counts = await persist_envelope_extensions(
-                    session,
-                    datasource,
-                    catalogs,
-                    scope=envelope_scope,
-                    deprecate_missing=False,
-                )
-                created_objects_total += (
-                    counts["created_objects"] + extension_counts["created_objects"]
-                )
-                changed_objects_total += (
-                    counts["changed_objects"] + extension_counts["changed_objects"]
-                )
-                await session.commit()
-            batch_progress = {
-                "stage": "discovering",
-                "batch": batch_index,
-                **snapshot_scope.object_counts(),
-            }
-            activity.heartbeat(batch_progress)
-            await heartbeat_task(
-                analysis_run_id=run_uuid,
-                task_type=TASK_TYPE_DISCOVER_DATASOURCE,
-                table_id=None,
-                detail=batch_progress,
-            )
+            # A connector may refuse a facet on its last batch, or read a
+            # run-wide facet (a routine inventory, a schema comment) once before
+            # its first: either way the scope is emptied one final time here,
+            # before the receipt is written COMPLETE.
+            _drain_facet_reads(facet_reads, receipt, refused_facets)
 
         # finalize: the one and only deprecate-missing pass for this run, now
         # that `snapshot_scope`/`envelope_scope` hold every identity observed
@@ -1152,13 +1752,56 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             if run is None or datasource is None:
                 raise ValueError("analysis run or datasource disappeared during discovery")
             deprecated_objects_total = 0
+            retained_out_of_scope = 0
             if run.mode == "FULL":
+                # R11-FP01: an existing object the selection does not cover was never
+                # looked for, so it is reconciled as seen -- never retired as missing.
+                reconcile_snapshot, reconcile_envelope = snapshot_scope, envelope_scope
+                if selection.restricted:
+                    kept_snapshot, kept_envelope = await out_of_scope_existing(
+                        session, datasource, selection
+                    )
+                    # R11-FP01: the two native kinds are counted here beside the tables
+                    # and routines, because they are objects an operator can exclude and
+                    # this number is what tells them a narrowed scan stopped maintaining
+                    # rather than deleted. Left out, a scan narrowed to exclude an audit
+                    # schema full of triggers would report `retained_out_of_scope: 0`
+                    # while retaining dozens.
+                    retained_out_of_scope = (
+                        len(kept_snapshot.table_ids)
+                        + len(kept_envelope.routine_ids)
+                        + len(kept_envelope.trigger_ids)
+                        + len(kept_envelope.sequence_ids)
+                    )
+                    reconcile_snapshot = union_snapshot_scopes(snapshot_scope, kept_snapshot)
+                    reconcile_envelope = union_envelope_scopes(envelope_scope, kept_envelope)
+                if refused_facets:
+                    # R11-FP02, and the same rule one line up: an object whose facet the
+                    # source refused was not looked at, so it is not missing. Without this
+                    # a dropped grant would make the next FULL run tombstone every grant
+                    # the last one captured -- the refusal costing the estate rather than
+                    # the facet. The receipt already says PERMISSION_DENIED for the facet,
+                    # so nothing here is silent.
+                    kept_snapshot, kept_envelope = await refused_facet_existing(
+                        session, datasource, refused_facets
+                    )
+                    reconcile_snapshot = union_snapshot_scopes(reconcile_snapshot, kept_snapshot)
+                    reconcile_envelope = union_envelope_scopes(reconcile_envelope, kept_envelope)
                 deprecation_result = await deprecate_missing_snapshot(
-                    session, datasource, snapshot_scope
+                    session, datasource, reconcile_snapshot, analysis_run_id=run.id
                 )
                 deprecated_objects_total += deprecation_result.total
                 deprecated_objects_total += await deprecate_missing_envelope_extensions(
-                    session, datasource, envelope_scope
+                    session,
+                    datasource,
+                    reconcile_envelope,
+                    analysis_run_id=run.id,
+                    # R11-FP01: only the axes this connector reads may retire from. A
+                    # source re-pointed at an adapter that does not collect triggers
+                    # would otherwise tombstone every trigger the previous adapter
+                    # found, which is the same "silence read as deletion" mistake the
+                    # two `*_existing` passes above exist to prevent.
+                    native_axes_read=native_axes_read,
                 )
                 # CT-4: same-run tombstone-plus-create pairing, exactly as the
                 # unchunked path used before this change -- `snapshot_scope` here
@@ -1173,6 +1816,20 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                     created_table_ids=snapshot_scope.created_table_ids,
                     deprecated_table_ids=deprecation_result.deprecated_table_ids,
                 )
+                receipt.record_reconciliation(
+                    deprecated=deprecated_objects_total,
+                    retained_out_of_scope=retained_out_of_scope,
+                )
+            # R11-FP15: what kinds of change this run recorded, by count.
+            change_rows = await session.execute(
+                select(MetadataChangeSignal.signal_type, func.count())
+                .where(MetadataChangeSignal.analysis_run_id == run.id)
+                .group_by(MetadataChangeSignal.signal_type)
+            )
+            receipt.record_changes(
+                {signal_type: int(count) for signal_type, count in change_rows.all()}
+            )
+            run.discovery_receipt = receipt.as_json(STREAM_COMPLETE)
             object_counts = {**snapshot_scope.object_counts(), **envelope_scope.object_counts()}
             run.discovered_catalogs = object_counts["catalogs"]
             run.discovered_schemas = object_counts["schemas"]
@@ -1184,6 +1841,8 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             run.created_objects = created_objects_total
             run.changed_objects = changed_objects_total
             run.deprecated_objects = deprecated_objects_total
+            run.discovery_selection_fingerprint = selection.fingerprint()
+            run.excluded_objects = sum(excluded_by_kind.values())
             run.status = "PROFILING"
             datasource.status = "ACTIVE"
             final_counts = {
@@ -1206,7 +1865,12 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 resource_id=str(run.id),
                 outcome="SUCCESS",
                 correlation_id=str(run.id),
-                details=final_counts,
+                details={
+                    **final_counts,
+                    "selection_fingerprint": run.discovery_selection_fingerprint,
+                    "excluded_by_kind": excluded_by_kind,
+                    "retained_out_of_scope": retained_out_of_scope,
+                },
             )
             record_outbox(
                 session,
@@ -1228,9 +1892,17 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             table_id=None,
             outcome="SUCCESS",
         )
-        return {"run_id": run_id, "status": "COMPLETED", **final_counts}
+        return {
+            "run_id": run_id,
+            "status": "COMPLETED",
+            **final_counts,
+            "excluded_objects": sum(excluded_by_kind.values()),
+        }
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
+        if receipt is not None:
+            _drain_facet_reads(facet_reads, receipt, set())
+            await _interrupt_receipt(run_uuid, receipt)
         await finish_task(
             analysis_run_id=run_uuid,
             task_type=TASK_TYPE_DISCOVER_DATASOURCE,
@@ -1246,6 +1918,14 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             run = await session.get(AnalysisRun, run_uuid)
             if run is not None:
                 run.status = "FAILED"
+                if receipt is not None:
+                    # R11-FP02: a run a refusal ended says so. `read_facet` records the
+                    # outcome before it lets the exception through, so the facet is named
+                    # here even though the run could not go on -- a refused *inventory*
+                    # read is the case that matters, since completing a run that saw no
+                    # objects would retire the estate (`refused_facet_existing`).
+                    _drain_facet_reads(facet_reads, receipt, set())
+                    run.discovery_receipt = receipt.as_json(STREAM_INTERRUPTED)
                 run.error_class = type(exc).__name__
                 # INV-6 / ADR-0014: never persist str(exc) here -- it can carry
                 # source-connector-returned row data, SQL fragments, or
@@ -1377,6 +2057,7 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
                     schema_fingerprint=table.fingerprint,
                     row_count_estimate=snapshot.row_count_estimate,
                     sampled_row_count=snapshot.sampled_row_count,
+                    observation_scope=persistable_observation_scope(snapshot.observation_scope),
                 )
                 session.add(profile)
                 await session.flush()
@@ -1392,6 +2073,7 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
                             approximate_distinct_count=(column_snapshot.approximate_distinct_count),
                             min_length=column_snapshot.min_length,
                             max_length=column_snapshot.max_length,
+                            **derived_column_facets(column_snapshot),
                         )
                     )
                 await session.commit()
@@ -1801,6 +2483,7 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                 schema_fingerprint=table.fingerprint,
                 row_count_estimate=snapshot.row_count_estimate,
                 sampled_row_count=snapshot.sampled_row_count,
+                observation_scope=persistable_observation_scope(snapshot.observation_scope),
             )
             session.add(profile)
             await session.flush()
@@ -1816,6 +2499,7 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                     approximate_distinct_count=column_snapshot.approximate_distinct_count,
                     min_length=column_snapshot.min_length,
                     max_length=column_snapshot.max_length,
+                    **derived_column_facets(column_snapshot),
                 )
                 session.add(column_profile)
                 value_snapshot = value_snapshots_by_name.get(column_snapshot.name)

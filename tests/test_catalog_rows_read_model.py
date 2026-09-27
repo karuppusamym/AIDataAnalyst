@@ -61,7 +61,12 @@ from tests.support.doubles import security_context
 pytestmark = pytest.mark.asyncio
 
 _SETTINGS = Settings()
-_NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+# Anchored to the wall clock, not to a fixed date. `list_catalog_rows` composes
+# against `datetime.now(UTC)`, so a pinned date ages out: a "passing" observation
+# seeded a day before 2026-08-31 read as STALE once real time passed the 14-day
+# window, and a certification seeded to expire 30 days after it would have read
+# as expired from 2026-09-30. Every date below is relative to this instant.
+_NOW = datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
@@ -418,6 +423,149 @@ async def test_description_falls_back_through_the_documented_precedence(session)
     assert by_name["t_bare"].description_is_proposed is False
 
 
+async def test_a_withdrawn_readme_stops_the_fallthrough_at_the_annotation(session) -> None:
+    """A retired description must not be replaced by a lower-precedence one.
+
+    The governed decision behind a ``WITHDRAWN`` version
+    (`aida.description_withdrawal`) is that this platform should say nothing
+    further about the asset. The annotation rung is platform-authored prose
+    the withdrawal's reviewer never read, and there is no withdrawal path for
+    an annotation, so promoting it here would make the retirement invisible
+    and unrecoverable. The source comment is not ours to retract and still
+    shows -- ``t_withdrawn_over_source`` below.
+    """
+    datasource = await _seed_datasource(session)
+
+    withdrawn_over_annotation = await _seed_table(session, datasource, name="t_withdrawn")
+    documentation = AssetDocumentation(
+        id=uuid4(),
+        organization_id=withdrawn_over_annotation.organization_id,
+        table_id=withdrawn_over_annotation.id,
+    )
+    session.add(documentation)
+    await session.flush()
+    session.add(
+        AssetDocumentationVersion(
+            id=uuid4(),
+            organization_id=withdrawn_over_annotation.organization_id,
+            documentation_id=documentation.id,
+            version=1,
+            status="WITHDRAWN",
+            readme="The retired readme.",
+            created_by="drafter",
+        )
+    )
+    annotation = MetadataBusinessAnnotation(
+        id=uuid4(),
+        organization_id=withdrawn_over_annotation.organization_id,
+        datasource_id=datasource.id,
+        table_id=withdrawn_over_annotation.id,
+        domain_id=uuid4(),
+        entity_id=uuid4(),
+        source_proposal_id=uuid4(),
+    )
+    session.add(annotation)
+    session.add(
+        MetadataBusinessAnnotationVersion(
+            id=uuid4(),
+            organization_id=withdrawn_over_annotation.organization_id,
+            annotation_id=annotation.id,
+            version=1,
+            status="APPROVED",
+            business_name="Accounts",
+            business_description="Approved business-annotation description.",
+            table_role="FACT",
+            grain_statement="One row per account.",
+            confidence=0.9,
+            approved_by="reviewer",
+            approved_at=_NOW,
+        )
+    )
+
+    withdrawn_over_source = await _seed_table(
+        session,
+        datasource,
+        name="t_withdrawn_over_source",
+        source_description="Connector-scanned comment.",
+    )
+    source_documentation = AssetDocumentation(
+        id=uuid4(),
+        organization_id=withdrawn_over_source.organization_id,
+        table_id=withdrawn_over_source.id,
+    )
+    session.add(source_documentation)
+    await session.flush()
+    session.add(
+        AssetDocumentationVersion(
+            id=uuid4(),
+            organization_id=withdrawn_over_source.organization_id,
+            documentation_id=source_documentation.id,
+            version=1,
+            status="WITHDRAWN",
+            readme="The retired readme.",
+            created_by="drafter",
+        )
+    )
+
+    # Retired, then described again: the new APPROVED version is the top rung
+    # and wins, or the WITHDRAWN row left behind by design would mute the
+    # asset for good.
+    redescribed = await _seed_table(session, datasource, name="t_redescribed")
+    redescribed_documentation = AssetDocumentation(
+        id=uuid4(), organization_id=redescribed.organization_id, table_id=redescribed.id
+    )
+    session.add(redescribed_documentation)
+    await session.flush()
+    session.add_all(
+        [
+            AssetDocumentationVersion(
+                id=uuid4(),
+                organization_id=redescribed.organization_id,
+                documentation_id=redescribed_documentation.id,
+                version=1,
+                status="WITHDRAWN",
+                readme="The retired readme.",
+                created_by="drafter",
+            ),
+            AssetDocumentationVersion(
+                id=uuid4(),
+                organization_id=redescribed.organization_id,
+                documentation_id=redescribed_documentation.id,
+                version=2,
+                status="APPROVED",
+                readme="Republished documentation.",
+                created_by="drafter",
+            ),
+        ]
+    )
+
+    await session.commit()
+
+    page = await list_catalog_rows(
+        datasource.organization_id,
+        q=None,
+        object_type=None,
+        table_status="ACTIVE",
+        certification=None,
+        limit=100,
+        offset=0,
+        cursor=None,
+        context=_context(datasource),
+        session=session,
+        settings=_SETTINGS,
+    )
+    by_name = {item.name: item for item in page.items}
+
+    assert by_name["t_withdrawn"].description is None
+    assert by_name["t_withdrawn"].description_is_proposed is False
+
+    assert by_name["t_withdrawn_over_source"].description == "Connector-scanned comment."
+    assert by_name["t_withdrawn_over_source"].description_is_proposed is False
+
+    assert by_name["t_redescribed"].description == "Republished documentation."
+    assert by_name["t_redescribed"].description_is_proposed is False
+
+
 async def test_quality_states_cover_incident_stale_passing_and_unknown(session) -> None:
     datasource = await _seed_datasource(session)
 
@@ -755,7 +903,12 @@ async def test_rows_from_a_datasource_the_gate_denies_are_filtered_out(
     )
 
     assert [item.name for item in page.items] == ["t_allowed"]
-    # One gate() call per distinct datasource on the page, not one per row.
+    # The count must not see the denied datasource either. This test checked the
+    # page and never `total`, which is how the count leak survived: `total` came
+    # back 2 -- telling the caller a table exists in a source it cannot read.
+    assert page.total == 1
+    # One gate() call per distinct datasource, not one per row -- and the count
+    # and the page share those decisions rather than paying for them twice.
     assert sorted(set(calls)) == sorted({datasource_a.id, datasource_b.id})
     assert len(calls) == 2
     assert real_gate is not fake_gate  # sanity: the patch actually replaced something real

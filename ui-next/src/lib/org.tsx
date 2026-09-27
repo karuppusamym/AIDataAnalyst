@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { fetchOrganizations } from "./api";
+import { fetchMe, fetchOrganizations } from "./api";
 import type { OrganizationRead } from "./types";
 
 /* ---------------------------------------------------------------------------
@@ -74,26 +74,49 @@ export function OrgProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchOrganizations(controller.signal)
-      .then((orgs) => {
-        setOrganizations(orgs);
+    const { signal } = controller;
+    (async () => {
+      let orgs: OrganizationRead[] = [];
+      let listError: string | null = null;
+      try {
+        orgs = await fetchOrganizations(signal);
+      } catch (e) {
+        if (signal.aborted) return;
+        listError = e instanceof Error ? e.message : String(e);
+      }
+      if (signal.aborted) return;
+      setOrganizations(orgs);
+      const remembered = getCurrentOrgId();
+      if (orgs.some((o) => o.id === remembered)) {
         setError(null);
-        // If the stored id is not among the real organizations, adopt the first
-        // one so a fresh browser lands on a selectable estate rather than a
-        // dead id that renders every screen empty.
-        const resolved = orgs.some((o) => o.id === getCurrentOrgId())
-          ? getCurrentOrgId()
-          : (orgs[0]?.id ?? getCurrentOrgId());
-        setOrgId(resolved);
-      })
-      .catch((e: unknown) => {
-        if (!controller.signal.aborted) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
+        setOrgId(remembered);
+        return;
+      }
+      // The remembered id cannot be selected: a fresh browser, or a caller who is not allowed to
+      // list organizations (only Auditor, Operations, OrganizationAdmin and PlatformAdmin are).
+      // The caller's own organization comes from the verified identity, so a Steward or an
+      // Analyst signing in with an organization claim lands in it instead of on an id that exists
+      // nowhere. It wins only when it is in the list, or when the list is empty: under the
+      // development identity `/v1/me` echoes the header this client sent, so for an
+      // administrator it must not outrank the first real organization.
+      const own = await fetchMe(signal)
+        .then((me) => me.organization_id)
+        .catch(() => null);
+      if (signal.aborted) return;
+      if (orgs.length > 0) {
+        setError(null);
+        setOrgId(own && orgs.some((o) => o.id === own) ? own : (orgs[0]?.id ?? remembered));
+      } else if (own) {
+        // The list was refused because the caller is not an administrator; that is expected.
+        setError(null);
+        setOrgId(own);
+      } else {
+        setError(listError);
+        setOrgId(remembered);
+      }
+    })().finally(() => {
+      if (!signal.aborted) setLoading(false);
+    });
     return () => controller.abort();
   }, [setOrgId]);
 

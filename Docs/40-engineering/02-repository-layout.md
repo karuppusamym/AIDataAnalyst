@@ -30,13 +30,17 @@ Three specific defects: no enforceable boundaries (any module can import any mod
 
 ## 2. Target layout
 
-> **Implementation status (2026-08-30). Target.** Built today, of the tree below:
+> **Implementation status (2026-08-30; the `src/atlas/` half re-measured 2026-09-11 under
+> R11-P9). Target.** Built today, of the tree below:
 > `src/atlas/platform/` (`config.py`, `db.py`, `context.py`, `logging.py` — the `telemetry/`,
 > `errors/`, `pagination/`, `idempotency/`, `outbox/`, `workflow/` and `http/` packages do not
-> exist), and `src/atlas/modules/identity_tenancy/` as a 69-line scaffold. `src/atlas/entrypoints/`
-> does not exist — entrypoints are `aida.main`, `aida.workflows.worker`,
-> `aida.workflows.scheduler`, `aida.projectors.outbox_publisher` and
-> `aida.projectors.graph_projector`. `tests/` is flat: 44 files, 339 test functions, no
+> exist), and six of the module trees below under `src/atlas/modules/` — `catalog`,
+> `connectivity`, `identity_tenancy`, `ingestion`, `observability_audit` and `profiling`,
+> 9,649 lines in all, ranging from still-bare scaffolds to `catalog`'s 576-line `service.py`.
+> The package `src/atlas/entrypoints/` does not exist. The entrypoints are
+> `aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+> `aida.projectors.outbox_publisher` and `aida.projectors.graph_projector`.
+> `tests/` is flat: 44 files, 339 test functions, no
 > `invariants/`, `integration/`, `contract/`, `performance/` or `fixtures/` subdirectories.
 
 ```text
@@ -135,11 +139,11 @@ One image, four entrypoints (ADR-0011).
 
 ## 5. Test placement
 
-> **Implementation status (2026-08-30). Target.** `pyproject.toml` sets
-> `testpaths = ["tests"]` and `tests/` is flat — none of the four directories below exists,
-> and `pytest src/atlas/modules/<name>` is not a supported invocation. The one module-local
-> test file, `src/atlas/modules/identity_tenancy/tests/test_module_scaffold.py`, is outside
-> the collected path.
+> **Implementation status (re-measured 2026-09-13). Target.** `pyproject.toml` sets
+> `testpaths = ["tests", "src/atlas"]`, so `pytest src/atlas/modules/<name>` is a supported
+> invocation, but `tests/` is still flat — none of the four directories below exists. The
+> module-local tests are `src/atlas/modules/catalog/tests/test_module_scaffold.py` and
+> `connectivity`'s; the other four modules' went with their empty scaffolds (R11-X4).
 
 | Test kind | Location | Runs |
 |---|---|---|

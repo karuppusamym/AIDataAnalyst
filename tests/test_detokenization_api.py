@@ -89,7 +89,7 @@ async def test_an_authorized_caller_recovers_the_original_value(
 
     result = await detokenize_value(
         DetokenizeRequest(token=token, purpose="fraud dispute case #4471"),
-        context=_context(roles=frozenset({"ComplianceOfficer"})),
+        context=_context(roles=frozenset({"DataSteward"})),
         settings=settings,
         session=session,
     )
@@ -136,7 +136,7 @@ async def test_an_unauthorized_caller_is_denied_and_the_denial_is_audited(
     [
         frozenset({"PlatformAdmin"}),
         frozenset({"OrganizationAdmin"}),
-        frozenset({"ComplianceOfficer"}),
+        frozenset({"DataSteward"}),
         frozenset({"DataSteward"}),
     ],
 )
@@ -166,7 +166,7 @@ async def test_an_unavailable_provider_fails_closed_and_is_audited(
                 token="4111-1111-1111-1111",  # noqa: S106
                 purpose="fraud dispute case #4472",
             ),
-            context=_context(roles=frozenset({"ComplianceOfficer"})),
+            context=_context(roles=frozenset({"DataSteward"})),
             settings=settings,
             session=session,
         )

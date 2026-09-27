@@ -1,3 +1,5 @@
+import pytest
+
 from aida.sql_guard import SqlGuard
 
 
@@ -72,8 +74,245 @@ def test_cte_alias_is_not_reported_as_physical_table() -> None:
     assert result.referenced_tables == ("retail.customer",)
 
 
+# --- F01 (G6): CTE visibility is scoped, not statement-wide -----------------
+#
+# `cte_aliases` was one flat set over every `exp.CTE` in the statement, so a CTE
+# declared inside a subquery's own `WITH` shadowed an identically-named physical
+# table referenced unqualified *anywhere else*, and that table vanished from
+# `referenced_tables`. Every control downstream reads only that list -- the
+# catalog allowlist, the ABAC axes, the context-product boundary, the
+# orchestrator's post-execution re-check -- so one dropped name escaped all of
+# them at once. Nothing covered this shape.
+
+
+def test_a_cte_inside_a_subquery_does_not_hide_a_physical_table_elsewhere() -> None:
+    result = guard().validate(
+        "SELECT c.customer_id FROM customer AS c "
+        "JOIN (WITH customer AS (SELECT 1 AS k) SELECT k FROM customer) AS s "
+        "ON s.k = c.customer_id",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    # The physical `customer` the outer query reads is reported; the inner CTE
+    # reference of the same name is not a table and is not.
+    assert result.referenced_tables == ("customer",)
+
+
+def test_a_qualified_name_matching_a_cte_is_still_a_physical_table() -> None:
+    """`public.active` reads the schema's table; only a bare name can be shadowed."""
+    result = guard().validate(
+        "WITH active AS (SELECT customer_id FROM retail.customer) "
+        "SELECT customer_id FROM public.active",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("public.active", "retail.customer")
+
+
+def test_a_cte_shadows_a_bare_name_within_the_query_it_is_attached_to() -> None:
+    """The narrowing must not overshoot: a CTE still shadows its own query's body,
+    including a subquery nested inside that body."""
+    result = guard().validate(
+        "WITH active AS (SELECT customer_id FROM retail.customer) "
+        "SELECT s.customer_id FROM (SELECT customer_id FROM active) AS s",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("retail.customer",)
+
+
+def test_a_later_sibling_cte_does_not_shadow_an_earlier_bodys_reference() -> None:
+    """SQL's own rule, and the conservative direction: a non-recursive CTE body cannot
+    see a sibling declared after it, so `b` there is a physical table -- which the
+    catalog allowlist then gets the chance to refuse."""
+    result = guard().validate(
+        "WITH a AS (SELECT customer_id FROM b), "
+        "b AS (SELECT customer_id FROM retail.customer) "
+        "SELECT customer_id FROM a",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("b", "retail.customer")
+
+
+def test_a_recursive_ctes_self_reference_is_not_a_physical_table() -> None:
+    result = guard().validate(
+        "WITH RECURSIVE walk AS ("
+        "SELECT customer_id FROM retail.customer "
+        "UNION ALL SELECT customer_id FROM walk"
+        ") SELECT customer_id FROM walk",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("retail.customer",)
+
+
 def test_forbidden_database_function_is_rejected() -> None:
     result = guard().validate("SELECT pg_sleep(5)", dialect="postgres")
 
     assert not result.valid
     assert "FORBIDDEN_FUNCTION:pg_sleep" in result.violations
+
+
+# R11-FP14: a SELECT can call a function that writes, sleeps or reaches outside the engine, so a
+# function the guard does not recognise as a built-in is refused unless an operator authorized it.
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql", "violation"),
+    [
+        (
+            "postgres",
+            "SELECT fn_send_mail(customer_id) FROM retail.customer",
+            "UNAUTHORIZED_FUNCTION:fn_send_mail",
+        ),
+        (
+            "postgres",
+            "SELECT finance.fn_rate(amount) FROM finance.loan",
+            "UNAUTHORIZED_FUNCTION:finance.fn_rate",
+        ),
+        ("tsql", "SELECT dbo.fn_rate(amount) FROM dbo.loan", "UNAUTHORIZED_FUNCTION:dbo.fn_rate"),
+        (
+            "oracle",
+            "SELECT risk_pkg.score(customer_id) FROM retail.customer",
+            "UNAUTHORIZED_FUNCTION:risk_pkg.score",
+        ),
+    ],
+)
+def test_an_unknown_or_user_defined_function_is_refused(
+    dialect: str, sql: str, violation: str
+) -> None:
+    result = guard().validate(sql, dialect=dialect)
+
+    assert not result.valid
+    assert violation in result.violations
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql"),
+    [
+        (
+            "postgres",
+            "SELECT COALESCE(SUM(amount), 0), DATE_TRUNC('month', booked_at), btrim(note) "
+            "FROM finance.loan GROUP BY DATE_TRUNC('month', booked_at), btrim(note)",
+        ),
+        ("postgres", "SELECT pg_catalog.btrim(note) FROM finance.loan"),
+        (
+            "tsql",
+            "SELECT ISNULL(SUM(amount), 0), DATEPART(year, booked_at), PATINDEX('%x%', note) "
+            "FROM dbo.loan GROUP BY DATEPART(year, booked_at), PATINDEX('%x%', note)",
+        ),
+        ("snowflake", "SELECT IFF(amount > 0, 1, 0), DATEADD(day, 1, booked_at) FROM finance.loan"),
+        ("bigquery", "SELECT SAFE.SUBSTR(note, 1, 2), SAFE_DIVIDE(amount, term) FROM finance.loan"),
+    ],
+)
+def test_built_in_functions_are_still_accepted(dialect: str, sql: str) -> None:
+    result = guard().validate(sql, dialect=dialect)
+
+    assert result.valid, result.violations
+
+
+def test_an_operator_authorized_function_is_accepted_by_its_exact_name() -> None:
+    authorized = SqlGuard(
+        default_row_limit=5000,
+        hard_row_limit=100_000,
+        allowed_functions=[" Finance.FN_RATE ", "fn_send_mail", ""],
+    )
+
+    assert authorized.validate(
+        "SELECT finance.fn_rate(amount) FROM finance.loan", dialect="postgres"
+    ).valid
+    assert authorized.validate(
+        "SELECT fn_send_mail(customer_id) FROM retail.customer", dialect="postgres"
+    ).valid
+    other_schema = authorized.validate(
+        "SELECT risk.fn_rate(amount) FROM finance.loan", dialect="postgres"
+    )
+    assert "UNAUTHORIZED_FUNCTION:risk.fn_rate" in other_schema.violations
+
+
+def test_authorization_never_lifts_the_adversarial_denylist() -> None:
+    result = SqlGuard(
+        default_row_limit=5000, hard_row_limit=100_000, allowed_functions=["pg_sleep"]
+    ).validate("SELECT pg_sleep(5)", dialect="postgres")
+
+    assert "FORBIDDEN_FUNCTION:pg_sleep" in result.violations
+
+
+@pytest.mark.parametrize(
+    ("name", "sql"),
+    [
+        ("nvl", "SELECT nvl(c.amount, 0) AS v FROM retail.customer AS c"),
+        ("median", "SELECT median(c.amount) AS v FROM retail.customer AS c"),
+        ("greatest", "SELECT greatest(c.amount, 0) AS v FROM retail.customer AS c"),
+    ],
+)
+def test_a_call_naming_a_routine_this_source_declares_is_refused(name: str, sql: str) -> None:
+    """sqlglot models these names for every dialect, so the parser alone calls them built-ins.
+
+    Discovery read the source's routines, and a name it declares is a user-defined function here
+    whatever the parser made of the call -- its effects are as unknown as any other's.
+    """
+    assert guard().validate(sql, dialect="postgres").valid
+    refused = guard().validate(sql, dialect="postgres", user_defined_functions={name})
+
+    assert not refused.valid
+    assert f"UNAUTHORIZED_FUNCTION:{name}" in refused.violations
+
+
+def test_operator_authorization_still_lifts_a_declared_routine() -> None:
+    authorized = SqlGuard(
+        default_row_limit=5000, hard_row_limit=100_000, allowed_functions=["nvl"]
+    )
+
+    result = authorized.validate(
+        "SELECT nvl(c.amount, 0) AS v FROM retail.customer AS c",
+        dialect="postgres",
+        user_defined_functions={"nvl"},
+    )
+
+    assert result.valid
+
+
+def test_a_column_named_like_a_declared_routine_is_still_a_column() -> None:
+    result = guard().validate(
+        "SELECT c.median FROM retail.customer AS c",
+        dialect="postgres",
+        user_defined_functions={"median"},
+    )
+
+    assert result.valid
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql"),
+    [
+        ("oracle", "SELECT order_seq.NEXTVAL AS v FROM retail.customer"),
+        ("snowflake", "SELECT order_seq.NEXTVAL AS v FROM retail.customer"),
+        ("tsql", "SELECT NEXT VALUE FOR dbo.order_seq AS v"),
+    ],
+)
+def test_advancing_a_sequence_is_refused(dialect: str, sql: str) -> None:
+    """A sequence advance writes, and only Postgres enforces a read-only transaction server-side.
+
+    Postgres spells it `nextval('s')`, which the unrecognised-call rule already refuses; these
+    three spell it as a qualified column or a `NEXT VALUE FOR` clause, which are not calls.
+    """
+    result = guard().validate(sql, dialect=dialect)
+
+    assert not result.valid
+    assert "SEQUENCE_ADVANCE_FORBIDDEN" in result.violations
+
+
+def test_a_column_named_nextval_is_still_a_column() -> None:
+    result = guard().validate(
+        "SELECT c.nextval FROM retail.customer AS c", dialect="oracle"
+    )
+
+    assert result.valid
+    assert "SEQUENCE_ADVANCE_FORBIDDEN" not in result.violations

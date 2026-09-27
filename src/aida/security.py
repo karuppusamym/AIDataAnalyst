@@ -12,13 +12,18 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.delegation import DelegationGrant, delegated_roles_available, is_delegation_active
 from aida.models import Delegation
-from aida.oidc import OidcVerificationError, OidcVerifier, context_from_claims
+from aida.oidc import (
+    OidcTokenExpired,
+    OidcVerificationError,
+    OidcVerifier,
+    context_from_claims,
+)
 from aida.security_types import SecurityContext as SecurityContext
 from aida.siem_delivery import siem_config_from_settings
 from aida.siem_routing import SecurityEvent, route_to_siem_durably
 from aida.token_revocation import TokenRevokedError, enforce_not_revoked
 
-_oidc_verifiers: dict[tuple[str, str, str, str], OidcVerifier] = {}
+_oidc_verifiers: dict[tuple[str, str, str, str, int, int], OidcVerifier] = {}
 
 
 async def _route_auth_failure(settings: Settings, reason: str) -> None:
@@ -48,18 +53,54 @@ async def _route_auth_failure(settings: Settings, reason: str) -> None:
     )
 
 
-def _oidc_verifier(settings: Settings) -> OidcVerifier:
+def shared_oidc_verifier(settings: Settings) -> OidcVerifier:
+    """The one verifier this process uses for `settings`' identity provider (R11-AUD10).
+
+    Everything that verifies a bearer token asks here -- `get_security_context` for the caller's
+    own token, `token_revocation_api.revoke_token` for the token it is asked to revoke -- because
+    the verifier is where the key set is cached and where the windows that protect the provider
+    live: the unknown-`kid` cooldown (R11-AUD09) and the backoff after a failed refresh
+    (R11-AUD10). A verifier built per call has an empty cache and no memory of the last failure,
+    so it fetches every time and is limited by nothing; the revocation route did exactly that. One
+    shared verifier also means a failure one route meets is known to the other.
+
+    Created lazily, on first use, and kept for the life of the process. "The same identity
+    provider" is every setting the verifier reads -- issuer, audience, key-set URL, pinned key
+    set, clock skew and cache lifetime; `tests/test_oidc.py` fails when the verifier class reads
+    one that the key below does not name. Two `Settings` that differ in any of them get different
+    verifiers, so a verifier can never apply one configuration's tolerance to another's tokens --
+    in a running process there is one `Settings` (`get_settings` is cached) and so one verifier,
+    while tests that build their own `Settings` stay apart. The clock skew and the cache lifetime
+    were not part of this identity before; they are now because `verify` reads both.
+
+    A verifier holds an `asyncio.Lock`, which is tied to the event loop that first contends for
+    it. Real deployments have one loop per process. A test that runs its own loops and reaches
+    this must call `reset_shared_oidc_verifiers` first, which also drops the key set another test
+    left cached.
+    """
     key = (
         settings.oidc_issuer or "",
         settings.oidc_audience or "",
         settings.oidc_jwks_url or "",
         settings.oidc_jwks_json or "",
+        settings.oidc_clock_skew_seconds,
+        settings.oidc_jwks_cache_seconds,
     )
     verifier = _oidc_verifiers.get(key)
     if verifier is None:
         verifier = OidcVerifier(settings)
         _oidc_verifiers[key] = verifier
     return verifier
+
+
+def reset_shared_oidc_verifiers() -> None:
+    """Forget every shared verifier, so the next use builds a fresh one with an empty cache.
+
+    For tests, which share a process and would otherwise share a verifier -- and the key set,
+    the backoff and the failure it remembers -- between two tests that configure the same
+    identity provider.
+    """
+    _oidc_verifiers.clear()
 
 
 async def get_security_context(
@@ -84,7 +125,7 @@ async def get_security_context(
             await _route_auth_failure(settings, "empty bearer token")
             raise HTTPException(status_code=401, detail="a bearer token is required")
         try:
-            claims = await _oidc_verifier(settings).verify(token)
+            claims = await shared_oidc_verifier(settings).verify(token)
             # ID-4: a revoked token -- including one presented again after logout or
             # an admin's response to a compromised credential -- must be rejected on
             # this, its very next use. A failed lookup denies too (INV-4 fail closed).
@@ -92,9 +133,16 @@ async def get_security_context(
             return context_from_claims(claims, settings)
         except (OidcVerificationError, TokenRevokedError) as exc:
             await _route_auth_failure(settings, str(exc))
+            # Expiry is the only reason named to the caller (see
+            # `OidcTokenExpired`). Revocation stays identical to every other
+            # failure, as `TokenRevokedError` requires (INV-4).
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="bearer token verification failed",
+                detail=(
+                    "bearer token has expired"
+                    if isinstance(exc, OidcTokenExpired)
+                    else "bearer token verification failed"
+                ),
             ) from exc
     if settings.identity_provider == "development":
         if not principal_id:

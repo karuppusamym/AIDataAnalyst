@@ -19,7 +19,6 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
-    ContractSlaRecord,
     ContractViolationRecord,
     DataContractVersion,
 )
@@ -353,14 +352,29 @@ async def persist_violations(
     return records
 
 
-async def record_sla_status(
+@dataclass(frozen=True, slots=True)
+class SlaMeasurement:
+    """One contract's SLA over a period, computed on read and not stored.
+
+    R11-X2: this used to insert a `contract_sla_record` row on every read of the
+    status endpoint -- a GET that wrote -- and nothing ever read those rows back.
+    The answer is a function of the violation ledger, which is the record, so it
+    is recomputed rather than copied.
+    """
+
+    uptime_percent: float
+    violations_count: int
+    breach_minutes: int
+
+
+async def compute_sla_status(
     session: AsyncSession,
     organization_id: UUID,
     contract_id: UUID,
     period_start: datetime,
     period_end: datetime,
-) -> ContractSlaRecord:
-    """Compute and persist SLA status for a contract over a period."""
+) -> SlaMeasurement:
+    """Compute SLA status for a contract over a period from its violation records."""
     stmt = select(func.count()).select_from(ContractViolationRecord).where(
         and_(
             ContractViolationRecord.contract_id == contract_id,
@@ -377,14 +391,8 @@ async def record_sla_status(
     breach_minutes = violation_count * 5  # Assume 5 min per violation
     uptime = max(0.0, 100.0 * (1 - breach_minutes / total_minutes))
 
-    record = ContractSlaRecord(
-        organization_id=organization_id,
-        contract_id=contract_id,
-        period_start=period_start,
-        period_end=period_end,
+    return SlaMeasurement(
         uptime_percent=round(uptime, 2),
         violations_count=violation_count,
         breach_minutes=breach_minutes,
     )
-    session.add(record)
-    return record

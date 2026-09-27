@@ -120,6 +120,8 @@ function defaultRetryable(status: number): boolean {
 interface StructuredErrorBody {
   error?: { code?: unknown; message?: unknown; correlation_id?: unknown };
   detail?: unknown;
+  errors?: unknown;
+  extensions?: { correlationId?: unknown };
 }
 
 function messageFromDetail(value: unknown): {
@@ -175,6 +177,24 @@ export async function decodeError(res: Response): Promise<ApiError> {
   try {
     const body = (await res.json()) as StructuredErrorBody;
     if (body && typeof body === "object") {
+      // GraphQL admission failures use a non-2xx response with an errors array.
+      // Keep its refusal reason instead of reducing it to "400 Bad Request".
+      if (Array.isArray(body.errors)) {
+        const messages: string[] = [];
+        for (const item of body.errors) {
+          if (!item || typeof item !== "object") continue;
+          const entry = item as { message?: unknown; extensions?: Record<string, unknown> };
+          const extension = entry.extensions;
+          if (!code && typeof extension?.code === "string") code = extension.code;
+          const summary = typeof entry.message === "string" ? entry.message : "";
+          const detail = typeof extension?.detail === "string" ? extension.detail : "";
+          if (summary || detail) messages.push([summary, detail].filter(Boolean).join(": "));
+        }
+        if (messages.length) message = messages.join("; ");
+        if (typeof body.extensions?.correlationId === "string") {
+          correlationId = body.extensions.correlationId;
+        }
+      }
       const structured = body.error;
       if (structured && typeof structured === "object") {
         if (typeof structured.message === "string" && structured.message) {
@@ -208,6 +228,8 @@ export interface RequestOptions {
   readonly headers?: Record<string, string>;
   /** JSON request body. Omit for GET/DELETE. */
   readonly body?: unknown;
+  /** Unencoded bytes, e.g. a workbook File. Mutually exclusive with body. */
+  readonly rawBody?: BodyInit;
 }
 
 /** Supplies per-request headers (identity, organization). Set by `api.ts`. */
@@ -263,6 +285,9 @@ export async function request<T>(
   options: RequestOptions = {},
 ): Promise<T> {
   const hasBody = options.body !== undefined;
+  if (hasBody && options.rawBody !== undefined) {
+    throw new TypeError("A request cannot contain both JSON and raw bodies.");
+  }
   const headers: Record<string, string> = {
     Accept: "application/json",
     ...(hasBody ? { "Content-Type": "application/json" } : {}),
@@ -277,7 +302,9 @@ export async function request<T>(
       signal: options.signal,
       headers,
       credentials: "same-origin",
-      ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
+      ...(options.rawBody !== undefined
+        ? { body: options.rawBody }
+        : hasBody ? { body: JSON.stringify(options.body) } : {}),
     });
   } catch (cause) {
     // An aborted request is the caller's own doing, not a transport failure,
@@ -300,6 +327,92 @@ export async function request<T>(
   notify({ ok: true, status: res.status, at: Date.now() });
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+/**
+ * A POST answered with server-sent events (R11-MP06).
+ *
+ * `EventSource` cannot POST or send this app's identity headers, so the stream
+ * is read from `fetch` directly. A refusal before the stream opens (401, 403,
+ * 404, a disabled source) decodes exactly as it does for `request`; after that,
+ * each `event:`/`data:` block is handed to `onEvent` with its JSON parsed.
+ * Resolves when the server closes the stream.
+ */
+export async function requestEventStream(
+  path: string,
+  body: unknown,
+  onEvent: (event: string, data: unknown) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+    "Content-Type": "application/json",
+    ...headerProvider(),
+  };
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      signal,
+      headers,
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    const error = new ApiError(0, "the server could not be reached", {
+      code: "NETWORK_UNREACHABLE",
+      retryable: true,
+    });
+    notify({ ok: false, status: 0, at: Date.now(), error });
+    throw error;
+  }
+  if (!res.ok) {
+    const error = await decodeError(res);
+    notify({ ok: false, status: res.status, at: Date.now(), error });
+    throw error;
+  }
+  notify({ ok: true, status: res.status, at: Date.now() });
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut = buffer.indexOf("\n\n");
+    while (cut >= 0) {
+      dispatchEvent(buffer.slice(0, cut), onEvent);
+      buffer = buffer.slice(cut + 2);
+      cut = buffer.indexOf("\n\n");
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) dispatchEvent(buffer, onEvent);
+}
+
+function dispatchEvent(block: string, onEvent: (event: string, data: unknown) => void): void {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (data.length) onEvent(event, JSON.parse(data.join("\n")));
+}
+
+/**
+ * The `ApiError` a streamed `error` event stands for: the status and `detail`
+ * the single-shot route would have answered with, decoded by the same code.
+ */
+export function streamedApiError(status: number, detail: unknown): Promise<ApiError> {
+  return decodeError(
+    new Response(JSON.stringify({ detail }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
 }
 
 /**
@@ -341,4 +454,32 @@ export async function requestBlob(
   }
   notify({ ok: true, status: res.status, at: Date.now() });
   return { blob: await res.blob(), response: res };
+}
+
+/** A sentence for a page that did not load, for rendering beside the list.
+ *
+ * Every paged screen had the same bare `catch {}`: the list stopped growing
+ * and said nothing, so "you have reached the end" and "you were refused"
+ * looked identical. That is worst exactly where it matters most -- on an audit
+ * ledger a silent stop turns a truncated record into an apparently complete
+ * one -- and R11-B11's browser journey hit it on every least-privilege
+ * identity, where a refusal is the ordinary case rather than the exceptional
+ * one.
+ *
+ * A 403 is named as a refusal rather than a failure, because the reader's next
+ * action differs: ask for access, not retry. The server's own `detail` is
+ * preferred over anything invented here whenever it sent one.
+ */
+export function describeLoadMoreFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      return error.detail
+        ? `More results were refused: ${error.detail}`
+        : "More results were refused — you may not have access to the rest of this list.";
+    }
+    return error.detail
+      ? `More results could not be loaded: ${error.detail}`
+      : `More results could not be loaded (HTTP ${error.status}).`;
+  }
+  return "More results could not be loaded. What is shown above is incomplete.";
 }

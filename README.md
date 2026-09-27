@@ -1,5 +1,7 @@
 # Bank Data Intelligence Platform
 
+> **Delivery planning, 2026-09-11:** [review reconciliation](Docs/60-delivery/23-review-reconciliation-2026-09-11.md) explains the dispositions from all prior reviews. [Tracker section P](Docs/60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) is the current work queue; older plans and completion counts are dated evidence.
+
 Production-oriented foundation for a governed, agentic data analyst platform designed for a large banking organization.
 
 The platform uses deterministic controls for discovery, profiling, authorization, pre-retrieval prompt-risk screening, SQL validation, execution, and audit. Model providers are optional, replaceable reasoning components and are never trusted execution boundaries.
@@ -14,6 +16,51 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    ```powershell
    docker compose up --build -d
    ```
+
+   That starts **ten services** — `postgres`, `temporal`, `migrate`, `api`,
+   `ui-next`, `metadata-worker`, `fleet-scheduler` and the three sample source
+   containers. Redis, Neo4j, Redpanda, MinIO and their companion processes are
+   **not** started. With default settings Redis, Neo4j and MinIO are not
+   reached: the graph backend defaults to `postgres`, the lineage cache and MCP
+   budget default to off, and the audit archive destination defaults to `none`.
+   **Redpanda is the exception.** `metadata-worker` starts a Kafka consumer
+   side-car (`run_newly_created_table_drafter_consumer`, supervised by
+   `supervise_newly_created_table_drafter` and started from
+   `src/aida/workflows/worker.py`) whenever `AIDA_AUTO_ENQUEUE_ON_INGEST` is
+   true, and it defaults to true. The default stack has no Redpanda, so the
+   consumer cannot connect and the auto-drafting of descriptions for newly
+   created tables does not happen; with no `outbox-publisher` either, the events
+   it would consume stay `PENDING` in `outbox_event`. That is no longer silent:
+   the supervisor logs `newly_created_table_drafter_unavailable` with the
+   attempt, the next retry delay and the bootstrap servers (an error on the first
+   failure and every tenth attempt, a warning between) and retries with a backoff
+   that doubles from 2 seconds to a cap of 60, while the Temporal worker carries
+   on. Run with the `events` profile and it starts working, with no restart of
+   `metadata-worker`, once Redpanda is reachable
+   (`newly_created_table_drafter_started`); or set
+   `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the feature off explicitly, which
+   also stops the retries and the log lines. Each optional service is one
+   `--profile` flag away.
+
+   | Profile | Brings back | Off in the default stack |
+   |---|---|---|
+   | `cache` | `redis` | Redis-backed lineage cache and MCP rate-limit counters. The MCP limits themselves are unchanged and still enforced; without this profile there is no store to enforce them in, so set `AIDA_LINEAGE_CACHE_ENABLED=true` / `AIDA_MCP_BUDGET_ENABLED=true` alongside it. |
+   | `graph` | `neo4j`, `graph-projector`, plus `redpanda` and `outbox-publisher` to feed them | **Neo4j graph reads.** Graph and lineage screens still work — they are served by the certified `postgres` graph adapter, which reads the same relational tables. Add `AIDA_LINEAGE_NEO4J_READ_ENABLED=true` to actually read from Neo4j. |
+   | `events` | `redpanda`, `redpanda-console`, `outbox-publisher` | **Kafka projection and the topic browser.** Events are still written to the `outbox_event` table by every producer; they simply stay `PENDING` until a publisher runs. PostgreSQL is authoritative (INV-1), so nothing is lost and the backlog drains when the profile is enabled. Also off: the auto-drafting of descriptions for newly created tables (see above). |
+   | `archive` | `minio` | **The audit archive destination.** `audit_archive_storage_backend` defaults to `none`, which refuses rather than reporting success. Set `AIDA_AUDIT_ARCHIVE_STORAGE_BACKEND=s3` alongside it. |
+   | `temporal-ui` | `temporal-ui` | The Temporal Web UI. Temporal itself is in the default stack — only the web console is optional. |
+   | `monitoring` | `prometheus` | **Metrics scraping.** Prometheus on `http://localhost:9090` scrapes `api:8000`. It scrapes the worker processes only when `AIDA_WORKER_METRICS_PORT` is set (default `0`: they do not listen); `infra/monitoring/prometheus/prometheus.yml` expects `9108`. |
+   | `full` | all of the above | — |
+   | `seed` | `seed` | Demonstration data (step 5 below). |
+
+   ```powershell
+   docker compose --profile graph up -d --build     # one optional group
+   docker compose --profile full up -d --build      # every service except `seed`: 19 of the 20 in compose.yaml
+   ```
+
+   Profiles combine (`--profile cache --profile events`). Nothing has been
+   removed: the Kafka consumers, the Redis-backed limits and Temporal are all
+   still here — this only changes what a plain `docker compose up` starts.
 
    For local UI/API editing with automatic pickup, use the development overlay:
 
@@ -61,10 +108,14 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
      portal, which is what the **Agent gateway** screen copies. nginx proxies it to the API
      (`ui-next/nginx.conf`), so the URL the screen shows is the URL that works. It requires the
      same bearer token as the REST API.
-   - Temporal UI: <http://localhost:8080>
-   - Neo4j browser: <http://localhost:7474>
-   - MinIO console: <http://localhost:9001>
-   - Redpanda console: <http://localhost:8081>
+   The five consoles below belong to optional services, so each needs its
+   profile from step 2 before the URL resolves:
+
+   - Temporal UI: <http://localhost:8080> — `--profile temporal-ui`
+   - Neo4j browser: <http://localhost:7474> — `--profile graph`
+   - MinIO console: <http://localhost:9001> — `--profile archive`
+   - Redpanda console: <http://localhost:8081> — `--profile events`
+   - Prometheus: <http://localhost:9090> — `--profile monitoring`
 
 4. Verify the API:
 
@@ -142,7 +193,7 @@ Full documentation lives in [`Docs/`](Docs/README.md) — start there for naviga
 | Area | Contents |
 |---|---|
 | [Product](Docs/00-product/01-vision-and-goals.md) | Vision, personas, market landscape, competitive matrix, differentiation, surfaces, packaging |
-| [Architecture](Docs/10-architecture/01-principles-and-invariants.md) | Nine invariants, logical architecture, module decomposition, data and event models, deployment, capacity, runtime sequences, 16 ADRs |
+| [Architecture](Docs/10-architecture/01-principles-and-invariants.md) | Nine invariants, logical architecture, module decomposition, data and event models, deployment, capacity, runtime sequences, and the ADR register (29 records as of 2026-09-20: 22 accepted, 6 proposed, 1 superseded) |
 | [Modules](Docs/20-modules/00-module-index.md) | One spec per bounded context (21 modules) |
 | [Contracts](Docs/30-contracts/01-contract-strategy.md) | API conventions, module interfaces, event catalog, ingestion envelope, lineage, tools and agents |
 | [Engineering](Docs/40-engineering/01-development-spec.md) | Development spec, repo layout, coding standards, testing, CI/CD, refactor plan, local runbook |

@@ -208,6 +208,42 @@ async def _latest_approved_documentation(
     return {table_id: version for version, table_id in rows}
 
 
+async def _withdrawn_documentation_table_ids(
+    session: AsyncSession, table_ids: list[UUID]
+) -> set[UUID]:
+    """Tables whose documentation has ever been retired through review.
+
+    A withdrawal is a governed decision that this platform should say nothing
+    about the asset (`aida.description_withdrawal`), so the composer needs to
+    tell "nobody has documented this yet" from "we documented it and took it
+    back" -- the two look identical if you only ask for the current `APPROVED`
+    version. Membership here does not mean the table is undocumented now: a
+    later publish or a reinstatement adds a new `APPROVED` version beside the
+    retired one, and `_description` checks that first.
+
+    ``"WITHDRAWN"`` is spelled out rather than imported from
+    `aida.description_withdrawal.WITHDRAWN`: that module imports this one's
+    `_latest_approved_documentation` (through the `aida.catalog_read_model`
+    shim), so the import would close a cycle. Same reason `"APPROVED"` is a
+    literal above.
+    """
+    if not table_ids:
+        return set()
+    rows = await session.scalars(
+        select(AssetDocumentation.table_id)
+        .join(
+            AssetDocumentationVersion,
+            AssetDocumentationVersion.documentation_id == AssetDocumentation.id,
+        )
+        .where(
+            AssetDocumentation.table_id.in_(table_ids),
+            AssetDocumentationVersion.status == "WITHDRAWN",
+        )
+        .distinct()
+    )
+    return set(rows.all())
+
+
 async def _latest_pending_drafts(
     session: AsyncSession, table_ids: list[UUID]
 ) -> dict[UUID, AssetDescriptionDraft]:

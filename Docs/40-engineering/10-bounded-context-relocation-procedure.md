@@ -144,10 +144,11 @@ from atlas.modules.<context>.models import (
 
 Same operation on `src/aida/schemas.py`. Two constraints specific to this file:
 
-- The re-export block **must sit below `ApiModel`'s definition**. The moved
-  module imports `ApiModel` back from `aida.schemas`, so this is a genuine
-  circular import that resolves only in that order. All five existing blocks
-  carry `# noqa: E402, I001` for exactly this reason; yours needs it too.
+- Import `ApiModel` from `atlas.platform.schemas`. The shared base is independent
+  of the compatibility facade, so moved modules must not import it from
+  `aida.schemas`. The latter preserves the old name as an identity alias.
+  Verify each moved schema module imports first in a fresh Python process;
+  importing the facade first can hide a circular dependency.
 - The module gets `from __future__ import annotations` (house style, and the
   generator template emits it), which `aida.schemas` does not have. Ruff will
   then flag the quoted self-referential return annotations on `model_validator`

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ from pydantic import ValidationError
 
 from aida.config import Settings
 from atlas.platform import config as config_module
+from atlas.platform.config import _SCRIPT_ONLY_ENV_NAMES
 
 
 def test_production_rejects_development_identity() -> None:
@@ -29,6 +31,27 @@ def test_production_rejects_development_sql_override() -> None:
             allow_development_sql_override=True,
             _env_file=None,
         )
+
+
+def test_production_refuses_unattended_reviewer_approvals() -> None:
+    """R11-C3: measured unsafe with no fix, so off is a decision that holds
+    where it matters rather than a default someone can flip."""
+    with pytest.raises(ValidationError, match="unattended reviewer-agent approvals"):
+        Settings(
+            environment="production",
+            identity_provider="oidc",
+            oidc_issuer="https://identity.bank.example",
+            oidc_audience="atlas",
+            oidc_jwks_json='{"keys":[]}',
+            credential_provider="vault",
+            allow_development_sql_override=False,
+            reviewer_agent_enabled=True,
+            _env_file=None,
+        )
+
+
+def test_development_can_still_run_the_reviewer_agent_to_measure_it() -> None:
+    assert Settings(reviewer_agent_enabled=True, _env_file=None).reviewer_agent_enabled
 
 
 def test_production_requires_strong_audit_hmac_key() -> None:
@@ -149,3 +172,112 @@ def test_settings_construct_from_env_example_template(monkeypatch: pytest.Monkey
 
     assert settings.environment == "development"
     assert settings.identity_provider == "development"
+
+
+def test_env_example_boots_as_an_actual_dotenv_file(tmp_path: Path) -> None:
+    """The documented bootstrap is `cp .env.example .env`, so the shipped
+    template has to work when it is *read as a dotenv file* -- not only when its
+    keys are already exported.
+
+    This is the gap that let the defect ship. The test above loads `.env.example`
+    into the environment and passes `_env_file=None`, which exercises the env
+    source; the env source silently drops a key that matches no field. The
+    dotenv source does not drop it, it hands it to the model, and `extra="forbid"`
+    refused it -- so `.env.example`'s own `AIDA_SAMPLE_SOURCE_DSN` line (a
+    `credential_reference="env://..."` target, deliberately not a Settings field)
+    made `Settings(_env_file=".env")` raise `extra_forbidden` for every host-side
+    script, while the identical name exported into the environment worked.
+    """
+    env_example = Path(__file__).resolve().parent.parent / ".env.example"
+    target = tmp_path / ".env"
+    target.write_text(env_example.read_text(encoding="utf-8"), encoding="utf-8")
+
+    settings = Settings(_env_file=str(target))
+
+    assert settings.environment == "development"
+    assert settings.identity_provider == "development"
+
+
+def test_a_misspelled_setting_in_a_dotenv_file_is_still_refused(tmp_path: Path) -> None:
+    """Tolerating a credential reference must not tolerate a typo.
+
+    The fix drops only an `AIDA_*` key that is *not* a close match of a real
+    field, on the same fuzzy rule `reject_unrecognized_aida_env_vars` uses for
+    the process environment. A near-miss of a real setting is the case
+    `extra="forbid"` exists for, and it stays refused.
+    """
+    target = tmp_path / ".env"
+    target.write_text(
+        "AIDA_ENVIRONMENT=development\nAIDA_ENVIRONMNET=development\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=str(target))
+
+
+# --- R11-VAL03: a name the scripts read is not a misspelling of a setting -------------------
+
+
+def test_a_script_only_name_in_the_environment_is_not_taken_for_a_typo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`AIDA_BASE_URL` is what the seed scripts read and what compose sets on the `seed` service.
+    It is 0.867 similar to `AIDA_DATABASE_URL`, over the detector's 0.84 cutoff, so it used to stop
+    every app container at startup once it was in the environment."""
+    monkeypatch.setenv("AIDA_BASE_URL", "http://localhost:8000")
+
+    Settings(_env_file=None)  # must not raise
+
+
+def test_a_script_only_name_in_a_dotenv_file_is_not_taken_for_a_typo(tmp_path: Path) -> None:
+    target = tmp_path / ".env"
+    target.write_text(
+        "AIDA_ENVIRONMENT=development\nAIDA_BASE_URL=http://localhost:8000\n", encoding="utf-8"
+    )
+
+    assert Settings(_env_file=str(target)).environment == "development"
+
+
+def test_the_script_only_names_are_no_settings_and_some_script_reads_them() -> None:
+    root = Path(__file__).resolve().parent.parent
+    scripted = "".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for pattern in ("scripts/*.py", "scripts/*.ps1", "compose*.yaml")
+        for path in root.glob(pattern)
+    )
+    for name in _SCRIPT_ONLY_ENV_NAMES:
+        assert name not in Settings._known_env_names(), f"{name} is a setting: drop it"
+        assert name in scripted, f"no script or compose file reads {name}: drop it"
+
+
+def test_every_aida_name_the_scripts_and_manifests_use_is_accepted_in_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scan that found `AIDA_BASE_URL`: every `AIDA_*` name in the repository's scripts,
+    compose files, `.env.example`, end-to-end scripts and manifests is either a setting, or no
+    near-miss of one, or on `_SCRIPT_ONLY_ENV_NAMES`. A new script variable that resembles a
+    setting fails here instead of at a container's startup."""
+    root = Path(__file__).resolve().parent.parent
+    files = [
+        *root.glob("scripts/*"),
+        *root.glob("compose*.yaml"),
+        root / ".env.example",
+        *root.glob("e2e/scripts/*"),
+        *root.glob("infra/k8s/**/*.yaml"),
+    ]
+    names: set[str] = set()
+    for path in files:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            names |= set(re.findall(r"\bAIDA_[A-Z0-9_]+\b", text))
+    assert len(names) > 50, "the scan found almost nothing; its roots have moved"
+    refused = []
+    for name in sorted(names - Settings._known_env_names()):
+        monkeypatch.setenv(name, "x")
+        try:
+            Settings(_env_file=None)
+        except ValidationError:
+            refused.append(name)
+        finally:
+            monkeypatch.delenv(name)
+    assert not refused, f"these names would stop an app container at startup: {refused}"

@@ -6,7 +6,7 @@ import type {
   WorkspaceRead,
 } from "../lib/types";
 import {
-  fetchOrgDatasources,
+  listOrgDatasources,
   fetchOrgLinesOfBusiness,
   fetchOrgProjects,
   fetchOrgWorkspaces,
@@ -50,11 +50,11 @@ import "./AdministrationScreen.css";
    the rail counts from, so a created object appears in the summary without a
    round trip and the next `reload` reconciles it with the server.
 
-   Reads: `fetchOrgProjects` and `fetchOrgDatasources` (already used by
+   Reads: `fetchOrgProjects` and `listOrgDatasources` (already used by
    `SemanticsScreen`/`SourcesScreen`) cover this screen's project and
    datasource lists; `fetchOrgLinesOfBusiness` (new, `api.py:463`) is the one
    read nothing existing exposed. All are scoped to `useOrgId()`, the same
-   shared organization selection every migrated screen reads (see `OrgPicker`
+   shared organization selection every migrated screen reads (see `ScopePicker`
    in the shell nav) -- unlike the legacy portal, this screen has no
    organization `<select>` of its own for the line-of-business/project/
    datasource forms; they act on the organization currently selected in the
@@ -78,7 +78,7 @@ import "./AdministrationScreen.css";
        Sources screen's `fetchDatasourceHealth`'s job to reflect, not this
        wizard's).
      - Newly created organizations are not retroactively added to the shell's
-       `OrgPicker` list: `OrgProvider` (`lib/org.tsx`) fetches `fetchOrganizations`
+       `ScopePicker` list: `OrgProvider` (`lib/org.tsx`) fetches `fetchOrganizations`
        once, on mount, with no exposed refetch -- an existing, honest limitation
        of that shared context this screen does not attempt to work around by
        duplicating org-list state. A freshly created organization becomes
@@ -111,7 +111,7 @@ export function AdministrationScreen() {
       const [lobPage, projectPage, dsPage, workspacePage] = await Promise.all([
         fetchOrgLinesOfBusiness(ORG, signal),
         fetchOrgProjects(ORG, signal),
-        fetchOrgDatasources(ORG, signal),
+        listOrgDatasources(ORG, signal),
         fetchOrgWorkspaces(ORG, signal),
       ]);
       const bindingPages = await Promise.all(

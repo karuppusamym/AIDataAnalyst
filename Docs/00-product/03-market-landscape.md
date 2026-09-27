@@ -3,6 +3,7 @@
 > Status: Authoritative. Owner: Product.
 > Research baseline: 2026-08-28, against vendor product pages, vendor engineering blogs, and analyst-review summaries. Sources listed in `90-reference/03-sources.md`.
 > Boundary: this compares Atlas to **vendor-stated public positioning**, not to private roadmaps or specific customer deployments.
+> Claims: assessed 2026-08-28 against vendor-stated public positioning; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`. A "nobody in this segment" line below is that assessment, not current fact.
 
 ## 1. How the market is actually segmented
 

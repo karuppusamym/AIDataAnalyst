@@ -4,7 +4,7 @@ No database: `rank_documentation_worklist` is a deterministic function of
 plain `TableQuerySignal` dataclasses, mirroring `test_connector_health.py`'s
 own "pure logic tested without a database" convention (CN-7/TL-6's "every
 factor inspectable" shape). The DB-facing aggregation
-(`stewardship_api._documentation_worklist_signals` and the
+(`documentation_worklist_signals.gather_documentation_worklist_signals` and the
 `documentation-worklist` endpoint) has its own integration test in
 `tests/test_glossary_stewardship.py`.
 """

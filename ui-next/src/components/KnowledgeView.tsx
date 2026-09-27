@@ -1,0 +1,584 @@
+import { useCallback, useMemo, useState } from "react";
+import type { FormEvent } from "react";
+import type {
+  OkfBundleRead,
+  OkfContextRead,
+  OkfContextRequest,
+  OkfDocumentRead,
+  OkfPublicationRead,
+} from "../lib/types";
+import {
+  describeKnowledgeError,
+  downloadOkfBundle,
+  downloadSourceOkfBundle,
+  fetchOkfBundle,
+  fetchOkfDocument,
+  fetchOkfPublications,
+  fetchSourceOkfBundle,
+  fetchSourceOkfDocument,
+  fetchSourceOkfPublications,
+  selectOkfContext,
+  selectSourceOkfContext,
+} from "../lib/api/knowledge";
+import { Button, Empty, Pill } from "./primitives";
+import { LoadingPanel, useAsyncResource } from "./screenState";
+import { KnowledgeDocument } from "./KnowledgeDocument";
+import "./Knowledge.css";
+
+/* ---------------------------------------------------------------------------
+   Knowledge -- one context product version's stored OKF bundle, inside the
+   Context Products screen (R11-OKF02).
+
+   Not an "OKF administration" screen, and not a route: the design says the
+   knowledge view lives "inside existing Catalog object details and Context
+   Products", so this is a panel the product row opens, beside Rollout and the
+   compiler. Four things, the four the design names:
+
+     readable document   the bundle's documents, grouped, opened in place --
+                         and every bundle link inside a document opens its
+                         target here too, which is the wiki reading
+     coverage            the manifest's counts and the publication's own:
+                         how many documents were rendered this time and how
+                         many were carried unchanged
+     version changes     the reader's lineage of publications, newest first,
+                         with what each changed
+     download            the archive of exactly the publication on screen
+
+   PINNING. Every document read and the download name the publication the
+   manifest described. A rebuild that lands while someone is reading therefore
+   cannot splice a newer document into the older bundle they are looking at;
+   "Refresh" is how they move to the newer one, and it says so.
+
+   TWO SCOPES (R11-OKF02). The same view reads a context product version's
+   bundle or one datasource's source bundle -- the datasource's discovered,
+   authorized objects, opened from the Sources screen. Which one is the only
+   difference: `readsFor` picks the five reads, and every rule above (pinning,
+   in-place links, receipts, no client-side assembly) holds for both.
+--------------------------------------------------------------------------- */
+
+/** Which stored bundle the view reads. */
+export type KnowledgeScope =
+  | { kind: "product"; versionId: string }
+  | { kind: "source"; datasourceId: string };
+
+/** The part of a context answer the preview shows; both scopes return it. */
+type ContextSelection = Pick<
+  OkfContextRead,
+  "status" | "ambiguous" | "documents" | "used_chars" | "max_chars" | "omitted_count"
+>;
+
+type KnowledgeReads = {
+  key: string;
+  bundle: (signal?: AbortSignal) => Promise<OkfBundleRead>;
+  document: (path: string, publicationId: string | null, signal?: AbortSignal) => Promise<OkfDocumentRead>;
+  publications: (signal?: AbortSignal) => Promise<{ items: OkfPublicationRead[] }>;
+  select: (body: OkfContextRequest) => Promise<ContextSelection>;
+  download: (publicationId: string) => Promise<void>;
+};
+
+/** The five reads for one scope, each against that scope's own routes. */
+function readsFor(scope: KnowledgeScope): KnowledgeReads {
+  if (scope.kind === "product") {
+    const id = scope.versionId;
+    return {
+      key: `product:${id}`,
+      bundle: (signal) => fetchOkfBundle(id, signal),
+      document: (path, publicationId, signal) => fetchOkfDocument(id, path, publicationId, signal),
+      publications: (signal) => fetchOkfPublications(id, signal),
+      select: (body) => selectOkfContext(id, body),
+      download: (publicationId) => downloadOkfBundle(id, publicationId),
+    };
+  }
+  const id = scope.datasourceId;
+  return {
+    key: `source:${id}`,
+    bundle: (signal) => fetchSourceOkfBundle(id, signal),
+    document: (path, publicationId, signal) => fetchSourceOkfDocument(id, path, publicationId, signal),
+    publications: (signal) => fetchSourceOkfPublications(id, signal),
+    select: (body) => selectSourceOkfContext(id, body),
+    download: (publicationId) => downloadSourceOkfBundle(id, publicationId),
+  };
+}
+
+type Group = { label: string; test: (path: string) => boolean };
+
+const GROUPS: readonly Group[] = [
+  { label: "Bundle", test: (p) => p === "index.md" || p === "log.md" },
+  { label: "Tables", test: (p) => p.includes("/tables/") },
+  { label: "Views", test: (p) => p.includes("/views/") },
+  { label: "Routines", test: (p) => p.includes("/routines/") || p.includes("/packages/") },
+  { label: "Concepts", test: (p) => p.startsWith("concepts/") },
+  { label: "Tools", test: (p) => p.startsWith("tools/") },
+  { label: "Indexes and logs", test: () => true },
+];
+
+function grouped(paths: readonly string[]): { label: string; paths: string[] }[] {
+  const taken = new Set<string>();
+  return GROUPS.map((group) => {
+    const members = paths.filter((p) => !taken.has(p) && group.test(p));
+    members.forEach((p) => taken.add(p));
+    return { label: group.label, paths: members };
+  }).filter((group) => group.paths.length > 0);
+}
+
+/** A short, human label for an opaque bundle path. The path stays the identity.
+ *
+ *  `names` maps an identity key to the name the manifest's value-free
+ *  `source_objects` records for it, so a table reads as `bank.sales.orders`
+ *  rather than as its digest. Anything the manifest does not name keeps a short
+ *  form of its key, which is still unambiguous. */
+export function pathLabel(path: string, names: ReadonlyMap<string, string> = new Map()): string {
+  const segments = path.split("/");
+  const leaf = segments[segments.length - 1] ?? path;
+  const keyOf = (segment: string) => segment.match(/-([0-9a-f]{32})(?:\.md)?$/)?.[1] ?? null;
+  if (leaf === "index.md" || leaf === "log.md") {
+    const parent = segments[segments.length - 2];
+    const kind = leaf === "index.md" ? "index" : "history";
+    if (!parent) return leaf === "index.md" ? "bundle index" : "refresh history";
+    const key = keyOf(parent);
+    return `${parent.replace(/-[0-9a-f]{32}$/, "")} ${kind}${key ? ` ${key.slice(0, 8)}` : ""}`;
+  }
+  const key = keyOf(leaf);
+  if (key && names.has(key)) return names.get(key) ?? leaf;
+  return leaf.replace(/\.md$/, "").replace(/-([0-9a-f]{8})[0-9a-f]{24}$/, " $1");
+}
+
+function manifestNames(manifest: Record<string, unknown> | undefined): Map<string, string> {
+  const rows = (manifest?.source_objects ?? []) as Array<Record<string, unknown>>;
+  const names = new Map<string, string>();
+  for (const row of rows) {
+    if (typeof row.key === "string" && typeof row.qualified_name === "string") {
+      names.set(row.key, row.qualified_name);
+    }
+  }
+  return names;
+}
+
+async function readable<T>(load: () => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (reason) {
+    if ((reason as Error)?.name === "AbortError") throw reason;
+    throw new Error(describeKnowledgeError(reason));
+  }
+}
+
+function TriggerPill({ trigger }: { trigger: string }) {
+  const tone = trigger === "INITIAL" ? "info" : trigger === "SOURCE_CHANGE" ? "warn" : "mute";
+  return <Pill tone={tone}>{trigger.toLowerCase().replace(/_/g, " ")}</Pill>;
+}
+
+function PublicationEntry({
+  publication,
+  onOpen,
+  names,
+}: {
+  publication: OkfPublicationRead;
+  onOpen: ((path: string) => void) | null;
+  names: ReadonlyMap<string, string>;
+}) {
+  const { changes } = publication;
+  const listed = [
+    ...changes.changed.map((path) => ({ path, verb: "changed" })),
+    ...changes.added.map((path) => ({ path, verb: "added" })),
+    ...changes.removed.map((path) => ({ path, verb: "removed" })),
+  ];
+  return (
+    <li className={`kview__pub${publication.is_current ? " kview__pub--current" : ""}`}>
+      <div className="kview__pubhead">
+        <strong>Publication {publication.sequence}</strong>
+        <TriggerPill trigger={publication.trigger} />
+        {publication.is_current ? <Pill tone="ok">current</Pill> : null}
+        <span>{new Date(publication.captured_at).toLocaleString()}</span>
+      </div>
+      <div>
+        {publication.trigger === "INITIAL"
+          ? `${publication.document_count} documents first published.`
+          : `${changes.changed.length} changed, ${changes.added.length} added, ${changes.removed.length} removed; ` +
+            `${publication.rendered_count} rendered, ${publication.carried_count} carried unchanged.`}
+      </div>
+      {listed.length > 0 && publication.trigger !== "INITIAL" ? (
+        <ul className="kview__paths">
+          {listed.slice(0, 12).map(({ path, verb }) => (
+            <li key={`${verb}:${path}`}>
+              {onOpen && verb !== "removed" ? (
+                <button type="button" onClick={() => onOpen(path)} title={path}>
+                  {verb}: {pathLabel(path, names)}
+                </button>
+              ) : (
+                <span title={path}>
+                  {verb}: {pathLabel(path, names)}
+                </span>
+              )}
+            </li>
+          ))}
+          {listed.length > 12 ? <li className="kview__note">and {listed.length - 12} more</li> : null}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+/** What an agent is handed for a question: the same selection the MCP knowledge
+ *  tool and Ask generation receive, from the publication on screen. A steward
+ *  uses it to see whether the bundle answers a question before an agent does --
+ *  and when it does not, which is `NO_MATCH`, not an error. */
+export function AgentContextPreview({
+  scopeKey,
+  select,
+  publicationId,
+  names,
+  onOpen,
+}: {
+  /** Distinguishes one view's form from another's on the same page. */
+  scopeKey: string;
+  select: (body: OkfContextRequest) => Promise<ContextSelection>;
+  publicationId: string | null;
+  names: ReadonlyMap<string, string>;
+  onOpen: (path: string) => void;
+}) {
+  const [question, setQuestion] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<ContextSelection | null>(null);
+
+  const submit = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      const asked = question.trim();
+      if (!asked) return;
+      setLoading(true);
+      setError(null);
+      try {
+        setResult(await select({ question: asked, publication_id: publicationId }));
+      } catch (reason) {
+        setResult(null);
+        setError(describeKnowledgeError(reason));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [question, select, publicationId],
+  );
+
+  const citations = new Map((result?.documents ?? []).map((item) => [item.path, item.citation]));
+  const inputId = `kview-ask-${scopeKey.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  return (
+    <section aria-label="What an agent reads">
+      <p className="kview__sub">What an agent reads</p>
+      <form className="kview__ask" onSubmit={(event) => void submit(event)}>
+        <label htmlFor={inputId}>Question</label>
+        <input
+          id={inputId}
+          value={question}
+          maxLength={2000}
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="e.g. which column holds the customer's email address?"
+        />
+        <Button type="submit" disabled={loading || !question.trim()}>
+          {loading ? "Selecting…" : "Preview"}
+        </Button>
+      </form>
+      {error ? (
+        <p className="kview__error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {result ? (
+        result.status === "NO_MATCH" ? (
+          <p className="kview__note" role="status">
+            Nothing in this bundle matches the question, so an agent is handed nothing and told so.
+          </p>
+        ) : (
+          <div role="status">
+            {result.ambiguous.length > 0 ? (
+              <p className="kview__note">
+                Ambiguous: {result.ambiguous.map((path) => citations.get(path) ?? path).join(" and ")} match
+                equally; an agent is told to ask which is meant.
+              </p>
+            ) : null}
+            <ol className="kview__context">
+              {result.documents.map((item) => (
+                <li key={item.path}>
+                  <div className="kview__pubhead">
+                    <strong>[{item.citation}]</strong>
+                    <button type="button" onClick={() => onOpen(item.path)} title={item.path}>
+                      {item.title || pathLabel(item.path, names)}
+                    </button>
+                    <Pill tone={item.hop === 0 ? "info" : "mute"}>
+                      {item.hop === 0
+                        ? "matched"
+                        : `linked from ${citations.get(item.linked_from ?? "") ?? "a match"}`}
+                    </Pill>
+                    <span>sha256 {item.sha256.slice(0, 12)}</span>
+                  </div>
+                  <div className="kview__note">
+                    {item.sections
+                      .map((section) =>
+                        section.rows_shown != null
+                          ? `${section.heading || "lead"} (${section.rows_shown} of ${section.rows_total} rows)`
+                          : section.heading || "lead",
+                      )
+                      .join(" · ")}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <p className="kview__note">
+              {result.used_chars.toLocaleString()} of {result.max_chars.toLocaleString()} characters
+              {result.omitted_count > 0 ? `; ${result.omitted_count} section(s) left out` : ""}. Holds no
+              source values: a figure comes from an approved tool.
+            </p>
+          </div>
+        )
+      ) : null}
+    </section>
+  );
+}
+
+type KnowledgeViewProps = { title: string; onClose: () => void } & (
+  | { versionId: string; datasourceId?: undefined }
+  | { datasourceId: string; versionId?: undefined }
+);
+
+export function KnowledgeView(props: KnowledgeViewProps) {
+  const { title, onClose } = props;
+  const scope: KnowledgeScope =
+    props.versionId !== undefined
+      ? { kind: "product", versionId: props.versionId }
+      : { kind: "source", datasourceId: props.datasourceId };
+  const isSource = scope.kind === "source";
+  const scopeKey = readsFor(scope).key;
+  // Keyed on the scope's identity, so a parent re-render cannot re-issue every read.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const reads = useMemo(() => readsFor(scope), [scopeKey]);
+  const bundle = useAsyncResource<OkfBundleRead>(
+    (signal) => readable(() => reads.bundle(signal)),
+    [reads.key],
+  );
+  const history = useAsyncResource<{ items: OkfPublicationRead[] }>(
+    (signal) => readable(() => reads.publications(signal)),
+    [reads.key],
+  );
+  const publicationId = bundle.data?.publication.publication_id ?? null;
+  const [path, setPath] = useState<string>("index.md");
+  const doc = useAsyncResource<OkfDocumentRead>(
+    (signal) => readable(() => reads.document(path, publicationId, signal)),
+    [reads.key, path, publicationId],
+    { enabled: publicationId !== null },
+  );
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const paths = useMemo(() => (bundle.data?.files ?? []).map((file) => file.path), [bundle.data]);
+  const known = useMemo(() => new Set(paths), [paths]);
+  const names = useMemo(() => manifestNames(bundle.data?.manifest), [bundle.data]);
+  const open = useCallback(
+    (target: string) => {
+      if (known.has(target)) setPath(target);
+    },
+    [known],
+  );
+  const reload = useCallback(() => {
+    bundle.reload();
+    history.reload();
+  }, [bundle, history]);
+
+  const download = useCallback(async () => {
+    if (!publicationId) return;
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      await reads.download(publicationId);
+    } catch (reason) {
+      setDownloadError(describeKnowledgeError(reason));
+    } finally {
+      setDownloading(false);
+    }
+  }, [reads, publicationId]);
+
+  const counts = (bundle.data?.manifest?.counts ?? {}) as Record<string, number>;
+  const publication = bundle.data?.publication;
+
+  return (
+    <article className="kview" aria-label={`Knowledge for ${title}`}>
+      <header className="kview__head">
+        <div>
+          <p className="kview__eyebrow">KNOWLEDGE</p>
+          <h2 className="kview__h2">{title}</h2>
+          {isSource ? (
+            <p className="kview__lede">
+              This data source as Atlas discovered it -- its objects, their structure and the
+              approved descriptions Atlas holds -- stored as one knowledge bundle, the same
+              publication the REST routes serve. Only what you are authorized to read is here,
+              and nothing outside it is counted. Business concepts and tools are selected in a
+              context product, whose bundle carries them.
+            </p>
+          ) : (
+            <p className="kview__lede">
+              The stored, approved knowledge bundle this version publishes to agents -- the same
+              publication REST and MCP serve. Only what you are authorized to read is here, and
+              nothing outside it is counted.
+            </p>
+          )}
+        </div>
+        <div className="kview__actions">
+          <Button onClick={reload} title="Read the current publication; a rebuild may have landed">
+            Refresh
+          </Button>
+          <Button
+            variant="primary"
+            onClick={() => void download()}
+            disabled={!publication || !bundle.data?.valid || downloading}
+            title={
+              bundle.data && !bundle.data.valid
+                ? "This bundle does not satisfy the publish policy, so it cannot be downloaded"
+                : "Download exactly the publication on screen"
+            }
+          >
+            {downloading ? "Preparing…" : "Download bundle"}
+          </Button>
+          <Button onClick={onClose}>Close</Button>
+        </div>
+      </header>
+
+      {downloadError ? (
+        <p className="kview__error" role="alert">
+          {downloadError}
+        </p>
+      ) : null}
+
+      {bundle.loading ? (
+        <LoadingPanel label="Reading the stored knowledge bundle…" />
+      ) : bundle.error ? (
+        <p className="kview__error" role="alert">
+          {bundle.error}
+        </p>
+      ) : bundle.data && publication ? (
+        <>
+          <div className="kview__stats" aria-label="Coverage">
+            <span>
+              Publication <b>{publication.sequence}</b>
+            </span>
+            <span>
+              <b>{counts.tables ?? 0}</b> tables, <b>{counts.views ?? 0}</b> views,{" "}
+              <b>{counts.routines ?? 0}</b> routines
+            </span>
+            {isSource ? (
+              <span>
+                <b>{counts.schemas ?? 0}</b> schemas
+              </span>
+            ) : (
+              <>
+                <span>
+                  <b>{counts.concepts ?? 0}</b> concepts, <b>{counts.tools ?? 0}</b> tools
+                </span>
+                <span>
+                  <b>{counts.sources ?? 0}</b> sources
+                </span>
+              </>
+            )}
+            <span>
+              <b>{publication.document_count}</b> documents ({publication.rendered_count} rendered,{" "}
+              {publication.carried_count} carried unchanged)
+            </span>
+            {bundle.data.valid ? (
+              <Pill tone="ok">publishable</Pill>
+            ) : (
+              <Pill tone="bad">{`${bundle.data.findings.length} policy finding(s)`}</Pill>
+            )}
+          </div>
+          <div className="kview__digest">
+            bundle {bundle.data.bundle_content_digest.slice(0, 16)} · checked current{" "}
+            {new Date(bundle.data.validated_at).toLocaleString()} · spec {bundle.data.spec_revision.slice(0, 8)} (
+            {bundle.data.spec_conformance.toLowerCase().replace(/_/g, " ")})
+          </div>
+
+          <div className="kview__cols">
+            <nav aria-label="Bundle documents">
+              <p className="kview__sub">Documents</p>
+              {grouped(paths).map((group) => (
+                <div key={group.label}>
+                  <div className="kview__group">{group.label}</div>
+                  <ul className="kview__files">
+                    {group.paths.map((p) => (
+                      <li key={p}>
+                        <button
+                          type="button"
+                          className="kview__file"
+                          aria-current={p === path ? "true" : undefined}
+                          onClick={() => setPath(p)}
+                          title={p}
+                        >
+                          <span>{pathLabel(p, names)}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </nav>
+            <section className="kview__reader" aria-label="Document">
+              {doc.loading ? (
+                <LoadingPanel label="Opening document…" />
+              ) : doc.error ? (
+                <p className="kview__error" role="alert">
+                  {doc.error}
+                </p>
+              ) : doc.data ? (
+                <>
+                  <div className="kview__docmeta">
+                    <code>{doc.data.path}</code>
+                    <span>sha256 {doc.data.sha256.slice(0, 12)}</span>
+                    <span>
+                      {doc.data.rendered_in_sequence === doc.data.publication_sequence
+                        ? `changed in publication ${doc.data.rendered_in_sequence}`
+                        : `unchanged since publication ${doc.data.rendered_in_sequence}`}
+                    </span>
+                  </div>
+                  <KnowledgeDocument content={doc.data.content} path={doc.data.path} onNavigate={open} />
+                </>
+              ) : (
+                <Empty title="Pick a document" hint="Links inside a document open their target here." />
+              )}
+            </section>
+          </div>
+
+          <AgentContextPreview
+            scopeKey={reads.key}
+            select={reads.select}
+            publicationId={publicationId}
+            names={names}
+            onOpen={open}
+          />
+
+          <section aria-label="Version changes">
+            <p className="kview__sub">Version changes</p>
+            {history.loading ? (
+              <LoadingPanel label="Reading publication history…" />
+            ) : history.error ? (
+              <p className="kview__error" role="alert">
+                {history.error}
+              </p>
+            ) : (
+              <ul className="kview__history">
+                {(history.data?.items ?? []).map((item) => (
+                  <PublicationEntry
+                    key={item.publication_id}
+                    publication={item}
+                    names={names}
+                    onOpen={item.publication_id === publicationId ? open : null}
+                  />
+                ))}
+              </ul>
+            )}
+            <p className="kview__note">
+              A downloaded bundle cannot be recalled. It carries its publication id and digests;
+              what you download is the publication shown here.
+            </p>
+          </section>
+        </>
+      ) : null}
+    </article>
+  );
+}

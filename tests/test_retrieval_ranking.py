@@ -72,11 +72,17 @@ class _ScalarResult:
 
 class _RetrievalSession:
     """Answers hybrid_retrieve's sequential fetches in call order: three
-    `scalars()` calls (tables, columns, dbt project ids) and four `execute()`
-    calls (governed tool versions, business annotations, SM-2 semantic-metric
-    term bindings, SM-2 glossary-term semantic bindings). Leaving
+    `scalars()` calls (tables, columns, dbt project ids) and eight `execute()`
+    calls (R11-FP11 view definitions, governed tool versions, business
+    annotations, SM-2 semantic-metric term bindings, SM-2 glossary-term semantic
+    bindings, R11-FP11 routines, R11-FP01 SQL Server/Oracle triggers, R11-FP09
+    published ontology versions). Leaving
     dbt_project_ids empty (the default) short-circuits the dbt-resource branch,
-    which otherwise issues two further fetches.
+    which otherwise issues two further fetches; leaving routine_rows empty skips
+    the routine parameter and
+    lineage fetches the same way; leaving trigger_rows empty skips the firing-table
+    bulk lookup it would otherwise issue; and ontology_rows empty skips the mapping
+    target fetches.
     """
 
     def __init__(
@@ -84,11 +90,15 @@ class _RetrievalSession:
         *,
         table_rows: list[object] | None = None,
         column_rows: list[object] | None = None,
+        view_definition_rows: list[tuple[object, object]] | None = None,
         tool_rows: list[tuple[object, object]] | None = None,
         biz_rows: list[tuple[object, ...]] | None = None,
         dbt_project_ids: list[object] | None = None,
         metric_term_rows: list[tuple[object, ...]] | None = None,
         term_binding_rows: list[tuple[object, ...]] | None = None,
+        routine_rows: list[tuple[object, ...]] | None = None,
+        trigger_rows: list[tuple[object, ...]] | None = None,
+        ontology_rows: list[tuple[object, ...]] | None = None,
     ) -> None:
         self._scalars_queue: list[list[object]] = [
             table_rows or [],
@@ -96,10 +106,14 @@ class _RetrievalSession:
             dbt_project_ids or [],
         ]
         self._execute_queue: list[list[tuple[object, ...]]] = [
+            view_definition_rows or [],
             tool_rows or [],
             biz_rows or [],
             metric_term_rows or [],
             term_binding_rows or [],
+            routine_rows or [],
+            trigger_rows or [],
+            ontology_rows or [],
         ]
 
     async def scalars(self, _statement: object) -> _ScalarResult:

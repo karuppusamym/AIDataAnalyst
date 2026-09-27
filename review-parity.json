@@ -1,0 +1,69 @@
+{
+  "base_url": "http://localhost:8000",
+  "findings": [
+    {
+      "name": "database schema is at the source head",
+      "outcome": "MATCH",
+      "detail": "deployed=['e3a9c7d51f02'] == source heads",
+      "lines": []
+    },
+    {
+      "name": "live OpenAPI paths match the committed baseline",
+      "outcome": "DRIFT",
+      "detail": "live=420 baseline=421",
+      "lines": [
+        "in the baseline, missing from the deployment (path): /v1/datasources/{datasource_id}/triggers/{trigger_id}/parse-coverage"
+      ]
+    },
+    {
+      "name": "live OpenAPI schemas match the committed baseline",
+      "outcome": "DRIFT",
+      "detail": "live=533 baseline=534",
+      "lines": [
+        "in the baseline, missing from the deployment (schema): TriggerParseCoverageRead"
+      ]
+    },
+    {
+      "name": "live API version matches the baseline's",
+      "outcome": "MATCH",
+      "detail": "live=2.0.0 baseline=2.0.0",
+      "lines": []
+    },
+    {
+      "name": "every required dependency is UP",
+      "outcome": "MATCH",
+      "detail": "{'postgresql': 'UP'}",
+      "lines": []
+    },
+    {
+      "name": "readiness states its control posture",
+      "outcome": "MATCH",
+      "detail": "{'workspace_authorization': 'OBSERVING'}",
+      "lines": []
+    },
+    {
+      "name": "backlog and authorization signals are readable",
+      "outcome": "MATCH",
+      "detail": "status=UP version=2.0.0",
+      "lines": [
+        "delivery_backlog.detail = failed=0;oldest_age_seconds=504807.2;queued=9;queued_notification=9;worker=disabled",
+        "outbox_backlog.detail = pending=0",
+        "workspace_authorization.declared = OBSERVING",
+        "workspace_authorization.unresolved_scope = PROCEEDS_UNDECIDED",
+        "workspace_authorization.workspaces_enforcing = 0",
+        "workspace_authorization.workspaces_observing = 1",
+        "workspace_authorization.workspaces_total = 1"
+      ]
+    },
+    {
+      "name": "the deployed image declares every setting the source declares",
+      "outcome": "DRIFT",
+      "detail": "source=272 deployed=270",
+      "lines": [
+        "declared in the source, absent from the image: okf_context_ask_max_chars",
+        "declared in the source, absent from the image: okf_context_default_max_chars",
+        "a missing setting means the image predates the code that reads it, so the feature it configures is not in the running process at any value"
+      ]
+    }
+  ]
+}

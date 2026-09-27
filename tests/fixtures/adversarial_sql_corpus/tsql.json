@@ -3,6 +3,15 @@
   "description": "QG-1 adversarial SQL corpus for the tsql dialect. Every case must be rejected by aida.query_gateway.QueryExecutionGateway's single validation pipeline -- zero bypasses is the exit condition.",
   "cases": [
     {
+      "id": "tsql-dialect_specific-unauthorized-udf-schema-qualified",
+      "category": "dialect_specific",
+      "sql": "SELECT dbo.fn_rate(c.customer_id) AS rate FROM retail.customer AS c",
+      "description": "a dbo-qualified scalar function: user-defined, refused unless authorized by its qualified name",
+      "expected_codes": [
+        "UNAUTHORIZED_FUNCTION"
+      ]
+    },
+    {
       "id": "tsql-stacked_statement-stacked-ddl",
       "category": "stacked_statement",
       "sql": "SELECT customer_id FROM retail.customer; DROP TABLE retail.customer;",

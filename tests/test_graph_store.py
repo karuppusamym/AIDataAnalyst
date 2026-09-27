@@ -1,8 +1,8 @@
 """Coverage for the graph-store port (C7 / ADR-0020's 2026-08-30 amendment).
 
 `PostgresGraphStore` is exercised against a real ORM session backed by
-in-memory SQLite (the same pattern `tests/test_view_lineage_api.py` and
-`tests/test_vector_store.py` use) -- genuine query execution through
+in-memory SQLite (the same pattern `tests/test_parsed_lineage_review.py`
+and `tests/test_vector_store.py` use) -- genuine query execution through
 `aida.unified_lineage_api._build_unified_graph`, not a mock, satisfying the
 tracker's "implement it for real ... not a fake" requirement for the default
 adapter. `DisabledGraphStore` and the per-organization setting are covered

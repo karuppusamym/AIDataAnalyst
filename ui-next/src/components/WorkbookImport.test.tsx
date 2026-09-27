@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type {
   ModelImportBatchRead,
@@ -78,6 +78,63 @@ function selectFile(name = "warehouse-model.xlsx") {
   return file;
 }
 
+it("blocks submission when the preview fails and retries without uploading again", async () => {
+  upload.mockResolvedValue(batch());
+  fetchChanges.mockRejectedValueOnce(new Error("preview unavailable"));
+  fetchChanges.mockResolvedValueOnce([change()]);
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+  await screen.findByText("preview unavailable");
+  const submitButton = screen.getByRole("button", { name: "Submit 1 change for review" });
+  expect(submitButton).toBeDisabled();
+  fireEvent.click(submitButton);
+  expect(submit).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Retry change preview" }));
+  await screen.findByText("customers.customer_id");
+  expect(submitButton).toBeEnabled();
+  expect(upload).toHaveBeenCalledTimes(1);
+  expect(fetchChanges).toHaveBeenCalledTimes(2);
+});
+
+it("pages large previews without hiding the total or rendering every row at once", async () => {
+  upload.mockResolvedValue(batch({ change_count: 101 }));
+  fetchChanges.mockResolvedValue(Array.from({ length: 101 }, (_, i) => change({ id: String(i), row_number: i + 2, subject_label: `column_${i}` })));
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+  await screen.findByText("column_0");
+  expect(screen.queryByText("column_100")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Next changes" }));
+  expect(screen.getByText("column_100")).toBeInTheDocument();
+  expect(screen.queryByText("column_0")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Next changes" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Previous changes" }));
+  expect(screen.getByText("column_0")).toBeInTheDocument();
+});
+
+it("cannot reset while an upload is still loading its preview", async () => {
+  upload.mockResolvedValue(batch());
+  let resolvePreview!: (rows: ModelImportChangeRead[]) => void;
+  fetchChanges.mockReturnValue(new Promise<ModelImportChangeRead[]>(resolve => { resolvePreview = resolve; }));
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+  expect(await screen.findByRole("button", { name: "Start over" })).toBeDisabled();
+  await act(async () => resolvePreview([change()]));
+  expect(screen.getByRole("button", { name: "Start over" })).toBeEnabled();
+});
+
+it("discards the previous source's batch when the source changes", async () => {
+  upload.mockResolvedValue(batch());
+  fetchChanges.mockResolvedValue([change()]);
+  const view = render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+  await screen.findByText("customers.customer_id");
+  view.rerender(<WorkbookImport datasourceId="d2" />);
+  expect(screen.queryByText("customers.customer_id")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Submit/ })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Edited model workbook")).toBeInTheDocument();
+  expect(submit).not.toHaveBeenCalled();
+});
+
 it("parses a chosen file and shows what it would change without publishing", async () => {
   upload.mockResolvedValue(batch());
   fetchChanges.mockResolvedValue([change()]);
@@ -134,6 +191,21 @@ it("shows the value being replaced next to the new one", async () => {
 
   await waitFor(() => expect(screen.getByText("New wording.")).toBeInTheDocument());
   expect(screen.getByText("Old wording.")).toBeInTheDocument();
+});
+
+it("says a reversal withdraws a value rather than showing a blank one", async () => {
+  // R11-C8: a reversal's change carries no value when the field had none
+  // before the import it undoes.
+  upload.mockResolvedValue(batch({ filename: "reversal of warehouse-model.xlsx" }));
+  fetchChanges.mockResolvedValue([
+    change({ old_value: "Agent wording.", new_value: null, expected_version: 1 }),
+  ]);
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+
+  await waitFor(() => expect(screen.getByText("(no value: withdrawn)")).toBeInTheDocument());
+  expect(screen.getByText("Agent wording.")).toBeInTheDocument();
 });
 
 it("submits only when asked, and then says a reviewer still has to decide", async () => {

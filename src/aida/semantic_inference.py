@@ -14,6 +14,7 @@ from aida.business_annotation_versions import AnnotationVersionContent, write_an
 from aida.business_graph import ancestor_closure, classification_scope
 from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
+from aida.ingest_screening import screen_text
 from aida.model_gateway import (
     ApprovedModelRoute,
     ModelGatewayError,
@@ -349,13 +350,15 @@ def model_input(
 async def approved_classification_route(
     session: AsyncSession, organization_id: UUID, settings: Settings
 ) -> ApprovedModelRoute | None:
-    if not settings.model_route:
+    # R11-MP03: the CLASSIFICATION purpose route, else the default route.
+    route_key = settings.model_route_for("CLASSIFICATION")
+    if not route_key:
         return None
     route = await session.scalar(
         select(ModelRouteConfiguration)
         .where(
             ModelRouteConfiguration.organization_id == organization_id,
-            ModelRouteConfiguration.route_key == settings.model_route,
+            ModelRouteConfiguration.route_key == route_key,
             ModelRouteConfiguration.status == "APPROVED",
         )
         .order_by(ModelRouteConfiguration.version.desc())
@@ -484,11 +487,29 @@ async def enrich_with_optional_model(
             for baseline in baselines
         ], None
 
+    # AR-10: the model is sent names -- schema, table, column -- and a name is
+    # text the source chose, like a comment. A table any of whose names fails
+    # screening is not sent at all, and keeps its rules-engine proposal.
+    verdicts: dict[str, bool] = {}
+
+    def clean(name: str) -> bool:
+        if name not in verdicts:
+            verdicts[name] = screen_text(name, content_origin="semantic_inference:name").is_clean
+        return verdicts[name]
+
+    screened_out = {
+        table.id
+        for table, schema_name, columns, _constraints in entries
+        if not all(clean(name) for name in (schema_name, table.name, *(c.name for c in columns)))
+    }
+    sendable = [
+        (baseline, entry)
+        for baseline, entry in zip(baselines, entries, strict=True)
+        if entry[0].id not in screened_out
+    ]
     resolved: dict[UUID, tuple[TableSemanticOutput, dict[str, Any]]] = {}
     model_gateway = gateway or ProviderNeutralModelGateway(settings)
-    for start in range(0, len(entries), 25):
-        entry_batch = entries[start : start + 25]
-        baseline_batch = baselines[start : start + 25]
+    for start in range(0, len(sendable), 25):
         inputs = [
             model_input(
                 baseline=baseline,
@@ -497,9 +518,9 @@ async def enrich_with_optional_model(
                 columns=columns,
                 constraints=constraints,
             )
-            for baseline, (table, schema_name, columns, constraints) in zip(
-                baseline_batch, entry_batch, strict=True
-            )
+            for baseline, (table, schema_name, columns, constraints) in sendable[
+                start : start + 25
+            ]
         ]
         try:
             suggestions, call_evidence = await model_enrich_batch(
@@ -540,7 +561,11 @@ async def enrich_with_optional_model(
                         "value_scope": "METADATA_ONLY",
                         "rules_version": SEMANTIC_INFERENCE_VERSION,
                         "model_used": False,
-                        "fallback_reason": "MODEL_UNAVAILABLE_OR_INVALID",
+                        "fallback_reason": (
+                            "INDIRECT_INJECTION_SCREENING"
+                            if baseline.table_id in screened_out
+                            else "MODEL_UNAVAILABLE_OR_INVALID"
+                        ),
                     },
                 )
             )

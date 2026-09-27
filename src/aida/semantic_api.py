@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.access_change_review import decide_access_policy, decide_workspace_membership
 from aida.agent_contract_request_api import definition_from_json
 from aida.agent_contracts import AgentContractValidationError, validate_contract_definition
 from aida.agent_eval_gate import (
@@ -25,6 +26,10 @@ from aida.asset_description_service import (
     reject_asset_description_draft,
 )
 from aida.classification_propagation import apply_classification_promotion
+from aida.column_description_service import (
+    apply_column_description_draft,
+    reject_column_description_draft,
+)
 from aida.config import Settings, get_settings
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
@@ -34,6 +39,7 @@ from aida.description_withdrawal import (
     reject_description_withdrawal,
 )
 from aida.document_ingestion import apply_document_claim, reject_document_claim
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.events import record_audit, record_outbox
 from aida.governance_decision_contracts import (
     DecisionOutcome,
@@ -64,6 +70,7 @@ from aida.models import (
     AssetDescriptionDraft,
     AssetDocumentationVersion,
     BulkStewardshipOperation,
+    ColumnDescriptionDraft,
     ContextProductVersion,
     CrossBoundaryGrant,
     DataContractVersion,
@@ -91,9 +98,16 @@ from aida.models import (
     SemanticModelVersion,
     TermSemanticBinding,
 )
+from aida.ontology_api import decide_ontology_version
 from aida.product_marketplace_api import approve_access_request
+from aida.prompt_registry import prompt_approval_problem
+from aida.quality_rule_proposals import decide_quality_rule_proposal
 from aida.query_history_miner import apply_query_history_metric_candidate_decision
 from aida.retrieval import hybrid_retrieve_cross_source
+from aida.routine_description_service import (
+    apply_routine_description_draft,
+    reject_routine_description_draft,
+)
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
     ApiModel,
@@ -130,6 +144,7 @@ from aida.stewardship_service import (
     reject_conflict_resolution,
     reject_link_proposal,
 )
+from aida.tool_source_binding import source_binding_drift, source_binding_refusal
 
 router = APIRouter(prefix="/v1", tags=["semantic-governance"])
 
@@ -1385,7 +1400,16 @@ async def compose_governance_review_diff(
     after: dict[str, Any] | None = None
     message: str | None = None
 
-    if review.object_type == "SEMANTIC_MODEL_VERSION":
+    if review.object_type in {
+        "CONTEXT_PRODUCT_VERSION",
+        "MODEL_IMPORT_BATCH",
+        "OKF_IMPORT_BATCH",
+        "ONTOLOGY_VERSION",
+    }:
+        from aida.review_detail_snapshots import detail_snapshots
+
+        before, after, message = await detail_snapshots(session, review)
+    elif review.object_type == "SEMANTIC_MODEL_VERSION":
         model = await session.get(SemanticModelVersion, UUID(review.object_id))
         if model is None:
             raise HTTPException(status_code=409, detail="review target is unavailable")
@@ -1407,6 +1431,14 @@ async def compose_governance_review_diff(
             if published_id is not None
             else {}
         )
+    elif review.object_type in {"ACCESS_POLICY", "WORKSPACE_MEMBERSHIP"}:
+        # R11-AUD12: the batched queue's own snapshot, so both surfaces show one content.
+        from aida.review_queue_read_model import access_change_snapshot
+
+        after = await access_change_snapshot(session, review)
+        if after is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        before = {}
     else:
         message = (
             f"structured diffs are not yet available for {review.object_type}; "
@@ -1561,6 +1593,12 @@ async def _decide_governed_tool_version(
         else:
             event_type = "tool.version.deprecation_rejected.v1"
     elif decision == "APPROVE":
+        # R11-FP16: approval time proves nothing about which view or routine definition a
+        # generated tool's SQL came from; its binding does. A draft generated before its
+        # source changed is refused, not published.
+        drift = await source_binding_drift(session, tool_version)
+        if drift is not None:
+            raise HTTPException(status_code=409, detail=source_binding_refusal(drift))
         await session.execute(
             update(GovernedToolVersion)
             .where(
@@ -1863,6 +1901,11 @@ async def _decide_data_product_access_request(
             reason=reason,
             approved=decision == "APPROVE",
             now=now,
+            # R11-B4: an approval that does not fulfil is an approval that
+            # grants nothing. Passing the session stages the entitlement in
+            # this same review transaction.
+            session=session,
+            context=context,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1958,6 +2001,15 @@ async def _decide_ai_asset_version(
         # or manufactured evidence blob can never let a publish through:
         # the CONFIRMED_RUN half is always recomputed fresh here from the
         # organization's real, current confirmed-run corpus.
+        # R11-MP08: a PROMPT version (guidance for SQL generation) is approved only
+        # on optimiser evidence computed for its exact instruction that scored no
+        # worse than the baseline over enough cases with no unsafe statement.
+        if ai_asset.asset_kind == "PROMPT":
+            problem = prompt_approval_problem(ai_version)
+            if problem is not None:
+                raise HTTPException(
+                    status_code=409, detail=f"prompt version cannot be approved: {problem}"
+                )
         if ai_asset.asset_kind == "AGENT":
             gate_result = await compute_agent_eval_gate(
                 session,
@@ -2522,6 +2574,123 @@ async def _decide_asset_description_draft(
     return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
 
 
+async def _decide_column_description_draft(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one drafted column description.
+
+    The column-level twin of `_decide_asset_description_draft`, with the same
+    rule on top of the shared maker != checker guard: anyone recorded as having
+    *edited* the draft is refused as its approver, because editing is
+    authorship. Publishing belongs to `apply_column_description_draft`, which
+    also refuses a draft whose column description moved after it was composed
+    -- so a draft written against v2 cannot silently replace a v3."""
+    draft = await session.get(ColumnDescriptionDraft, UUID(review.object_id))
+    if draft is None or draft.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    published_version_id: str | None = None
+    if decision == "APPROVE":
+        evidence = draft.evidence or {}
+        if (
+            context.principal_id in evidence.get("editors", [])
+            or evidence.get("edited_by") == context.principal_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="A description editor cannot approve their own edits"
+            )
+        event_type, published_version = await apply_column_description_draft(
+            session,
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_version_id = str(published_version.id)
+    else:
+        event_type = await reject_column_description_draft(
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    payload = {
+        "draft_id": str(draft.id),
+        "table_id": str(draft.table_id),
+        "column_id": str(draft.column_id),
+        "overall_score": draft.overall_score,
+        "published_version_id": published_version_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, "column_description_draft", str(draft.id), payload)
+
+
+async def _decide_routine_description_draft(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one drafted routine description.
+
+    R11-FP08: the routine-level twin of `_decide_asset_description_draft` and
+    `_decide_column_description_draft`, and the **sole** call site that
+    publishes a routine description -- there is no direct-publish endpoint, for
+    the reason the other two have none. On top of the shared maker != checker
+    guard it carries the same editor rule: anyone recorded as having *edited* the
+    draft is refused as its approver, because editing is authorship. That rule
+    is the reason `routine_description_api.edit_routine_description_draft`
+    stamps `editors`; without this guard the stamp would be decoration.
+
+    Publishing belongs to `apply_routine_description_draft`, which additionally
+    refuses a draft whose routine has gone or been retired, whose body moved
+    after the draft was composed (`routine_definition_moved`), or whose
+    description version moved since -- all 409, so the review stays PENDING and
+    the reviewer can reject it instead of being handed a dead end.
+    """
+    draft = await session.get(RoutineDescriptionDraft, UUID(review.object_id))
+    if draft is None or draft.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    published_version_id: str | None = None
+    if decision == "APPROVE":
+        evidence = draft.evidence or {}
+        if (
+            context.principal_id in evidence.get("editors", [])
+            or evidence.get("edited_by") == context.principal_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="A description editor cannot approve their own edits"
+            )
+        event_type, published_version = await apply_routine_description_draft(
+            session,
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_version_id = str(published_version.id)
+    else:
+        event_type = await reject_routine_description_draft(
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    payload = {
+        "draft_id": str(draft.id),
+        "routine_id": str(draft.routine_id),
+        "datasource_id": str(draft.datasource_id),
+        "overall_score": draft.overall_score,
+        "published_version_id": published_version_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, "routine_description_draft", str(draft.id), payload)
+
+
 async def _decide_document_claim(
     session: AsyncSession,
     review: GovernanceReview,
@@ -2534,8 +2703,9 @@ async def _decide_document_claim(
     """Publish or reject one document-derived description claim.
 
     Publishes into the store for the claim's subject (column or table).
-    This is the only write path for column descriptions, which is why no
-    direct-authoring endpoint for them exists."""
+    One of three reviewed write paths for column descriptions -- the others
+    are workbook import batches and column description drafts -- and none of
+    them has a direct-authoring endpoint."""
     claim = await session.get(DocumentClaim, UUID(review.object_id))
     if claim is None or claim.organization_id != review.organization_id:
         raise HTTPException(status_code=409, detail="review target is unavailable")
@@ -2655,6 +2825,8 @@ async def _decide_model_import_batch(
         "applied_count": applied,
         "skipped_count": batch.skipped_count,
         "review_id": str(review.id),
+        # R11-C8: set when the batch undoes an applied one.
+        "reverses_batch_id": str(batch.reverses_batch_id) if batch.reverses_batch_id else None,
     }
     return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
 
@@ -2769,6 +2941,7 @@ async def _decide_query_history_metric_candidate(
 #: reviewer_agent -> semantic_api` cycle the review recorded (R03) cannot
 #: re-form through the automation path.
 _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
+    "ONTOLOGY_VERSION": decide_ontology_version,
     "SEMANTIC_MODEL_VERSION": _decide_semantic_model_version,
     "GOVERNED_TOOL_VERSION": _decide_governed_tool_version,
     "MODEL_ROUTE_CONFIGURATION": _decide_model_route_configuration,
@@ -2776,6 +2949,10 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "DATA_PRODUCT_VERSION": _decide_data_product_version,
     "DATA_CONTRACT_VERSION": _decide_data_contract_version,
     "DATA_PRODUCT_ACCESS_REQUEST": _decide_data_product_access_request,
+    # R11-AUD02: the two T3 access changes that had a tier and no adapter. Their adapters live
+    # in `access_change_review`, beside the proposals they decide, as the quality agent's does.
+    "ACCESS_POLICY": decide_access_policy,
+    "WORKSPACE_MEMBERSHIP": decide_workspace_membership,
     "AI_ASSET": _decide_ai_asset,
     "AI_ASSET_VERSION": _decide_ai_asset_version,
     "AGENT_CONTRACT_REQUEST": _decide_agent_contract_request,
@@ -2788,12 +2965,22 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "TERM_SEMANTIC_BINDING": _decide_term_semantic_binding,
     "CROSS_BOUNDARY_GRANT": _decide_cross_boundary_grant,
     "ASSET_DESCRIPTION_DRAFT": _decide_asset_description_draft,
+    "COLUMN_DESCRIPTION_DRAFT": _decide_column_description_draft,
+    # R11-FP08: the third member of the description family, dispatched through
+    # the same registry rather than a second decision surface.
+    "ROUTINE_DESCRIPTION_DRAFT": _decide_routine_description_draft,
     "DOCUMENT_CLAIM": _decide_document_claim,
     "DESCRIPTION_WITHDRAWAL": _decide_description_withdrawal,
     "MODEL_IMPORT_BATCH": _decide_model_import_batch,
+    # R11-OKF03: an OKF import's description batch is the same batch store, applied by the same
+    # adapter; only its review type differs, so its tier is pinned at T2 (`review_risk_tiers`).
+    "OKF_IMPORT_BATCH": _decide_model_import_batch,
     "SEMANTIC_METRIC_PROPOSAL": _decide_semantic_metric_proposal,
     "COLUMN_CLASSIFICATION_PROMOTION": _decide_column_classification_promotion,
     "QUERY_HISTORY_METRIC_CANDIDATE": _decide_query_history_metric_candidate,
+    # ADR-0029: the quality agent's proposals. The adapter lives beside the
+    # rules they are derived by rather than here.
+    "QUALITY_RULE_PROPOSAL": decide_quality_rule_proposal,
 }
 
 register_target_adapters(_TARGET_EFFECT_ADAPTERS)

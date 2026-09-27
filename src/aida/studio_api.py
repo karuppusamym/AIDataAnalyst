@@ -29,7 +29,6 @@ from aida.models import (
     StudioEvalQuestion,
     StudioEvalResult,
     StudioEvalRun,
-    StudioTestRun,
 )
 from aida.schemas import (
     StudioChangeItemCreate,
@@ -207,6 +206,8 @@ async def create_change_set(
         correlation_id=get_correlation_id(),
         details={"name": body.name},
     )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return StudioChangeSetRead.model_validate(cs)
 
@@ -306,6 +307,8 @@ async def add_item(
             "operation": body.operation,
         },
     )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return StudioChangeItemRead.model_validate(item)
 
@@ -361,6 +364,8 @@ async def remove_item(
         correlation_id=get_correlation_id(),
         details={"change_set_id": str(cs.id)},
     )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -468,16 +473,17 @@ async def run_tests(
     combined_evidence["eval_regression_checked"] = len(eval_checks)
     combined_evidence["eval_regression_failed"] = len(eval_failed)
 
-    test_run = StudioTestRun(
-        organization_id=context.organization_id,
+    # R11-X2: the result is the response and the audit record below, and is not
+    # stored a third time. `studio_test_run` held a copy nothing read back; the
+    # outcome and its counts are in `studio.change_set.test`, and each eval
+    # question's verdict is in `StudioEvalResult`.
+    test_result = StudioTestResultRead(
         change_set_id=cs.id,
         started_at=suite_result.started_at,
         completed_at=suite_result.completed_at or datetime.now(UTC),
         passed=overall_passed,
         evidence=combined_evidence,
     )
-    session.add(test_run)
-    await session.flush()
 
     record_audit(
         session,
@@ -509,8 +515,10 @@ async def run_tests(
                 "failed_question_ids": [str(c.question.id) for c in eval_failed],
             },
         )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
-    return StudioTestResultRead.model_validate(test_run)
+    return test_result
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +750,8 @@ async def detect_conflicts_endpoint(
         outcome=cs.conflict_status,
         correlation_id=get_correlation_id(),
     )
-    await session.flush()
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return [
         StudioConflict(

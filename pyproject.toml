@@ -31,6 +31,10 @@ dependencies = [
   "sqlalchemy[asyncio]==2.0.52",
   "sqlglot==30.17.0",
   "snowflake-connector-python==4.7.1",
+  # R11-GQL01: the metadata GraphQL facade (`aida.graphql_api`). Chosen over
+  # ariadne by a spike against this app's auth/session stack; see the GQL01
+  # evidence. Pinned exactly: the library is pre-1.0 and releases often.
+  "strawberry-graphql==0.327.7",
   "structlog==25.4.0",
   "temporalio==1.32.0",
   "uvicorn[standard]==0.35.0",
@@ -60,7 +64,12 @@ packages = ["src/aida", "src/atlas", "sdk/aida_tool_sdk"]
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# `src/atlas` too: each bounded context carries a `tests/test_module_scaffold.py`
+# asserting its own privacy invariant (the public face does not import the
+# private modules), which complements the import-linter contracts. They were
+# collected only when someone pointed pytest at that path by hand, so CI never
+# ran them and a context could violate its own contract unnoticed.
+testpaths = ["tests", "src/atlas"]
 # The Tier-0 invariant harnesses live in `tests/support/` and are imported as
 # `tests.support.*`, so the repository root has to be importable. Without this,
 # `pytest` collects them only when invoked as `python -m pytest` (which puts the
@@ -159,23 +168,14 @@ root_packages = ["aida", "atlas"]
 name = "identity_tenancy module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.identity_tenancy.service",
-  "atlas.modules.identity_tenancy.repository",
   "atlas.modules.identity_tenancy.models",
   "atlas.modules.identity_tenancy.schemas",
   "atlas.modules.identity_tenancy.router",
-  "atlas.modules.identity_tenancy.workers",
 ]
 allowed_importers = [
-  "atlas.modules.identity_tenancy.api",
-  "atlas.modules.identity_tenancy.contracts",
-  "atlas.modules.identity_tenancy.service",
-  "atlas.modules.identity_tenancy.repository",
   "atlas.modules.identity_tenancy.models",
   "atlas.modules.identity_tenancy.schemas",
   "atlas.modules.identity_tenancy.router",
-  "atlas.modules.identity_tenancy.workers",
-  "atlas.modules.identity_tenancy.tests",
   "aida.models",
   "aida.schemas",
   # ST-07 Commit C for identity_tenancy (2026-09-03): workspace_api moved into
@@ -197,22 +197,15 @@ allowed_importers = [
 name = "connectivity module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.connectivity.service",
-  "atlas.modules.connectivity.repository",
   "atlas.modules.connectivity.models",
   "atlas.modules.connectivity.schemas",
   "atlas.modules.connectivity.router",
-  "atlas.modules.connectivity.workers",
 ]
 allowed_importers = [
   "atlas.modules.connectivity.api",
-  "atlas.modules.connectivity.contracts",
-  "atlas.modules.connectivity.service",
-  "atlas.modules.connectivity.repository",
   "atlas.modules.connectivity.models",
   "atlas.modules.connectivity.schemas",
   "atlas.modules.connectivity.router",
-  "atlas.modules.connectivity.workers",
   "atlas.modules.connectivity.tests",
   "aida.models",
   "aida.schemas",
@@ -224,23 +217,14 @@ allowed_importers = [
 name = "ingestion module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.ingestion.service",
-  "atlas.modules.ingestion.repository",
   "atlas.modules.ingestion.models",
   "atlas.modules.ingestion.schemas",
   "atlas.modules.ingestion.router",
-  "atlas.modules.ingestion.workers",
 ]
 allowed_importers = [
-  "atlas.modules.ingestion.api",
-  "atlas.modules.ingestion.contracts",
-  "atlas.modules.ingestion.service",
-  "atlas.modules.ingestion.repository",
   "atlas.modules.ingestion.models",
   "atlas.modules.ingestion.schemas",
   "atlas.modules.ingestion.router",
-  "atlas.modules.ingestion.workers",
-  "atlas.modules.ingestion.tests",
   "aida.models",
   "aida.schemas",
   # ST-07 Commit C for ingestion (2026-09-03): ingestion_api moved into
@@ -264,17 +248,14 @@ protected_modules = [
   "atlas.modules.catalog.models",
   "atlas.modules.catalog.schemas",
   "atlas.modules.catalog.router",
-  "atlas.modules.catalog.workers",
 ]
 allowed_importers = [
   "atlas.modules.catalog.api",
-  "atlas.modules.catalog.contracts",
   "atlas.modules.catalog.service",
   "atlas.modules.catalog.repository",
   "atlas.modules.catalog.models",
   "atlas.modules.catalog.schemas",
   "atlas.modules.catalog.router",
-  "atlas.modules.catalog.workers",
   "atlas.modules.catalog.tests",
   "aida.models",
   "aida.schemas",
@@ -298,23 +279,14 @@ allowed_importers = [
 name = "observability_audit module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.observability_audit.service",
-  "atlas.modules.observability_audit.repository",
   "atlas.modules.observability_audit.models",
   "atlas.modules.observability_audit.schemas",
   "atlas.modules.observability_audit.router",
-  "atlas.modules.observability_audit.workers",
 ]
 allowed_importers = [
-  "atlas.modules.observability_audit.api",
-  "atlas.modules.observability_audit.contracts",
-  "atlas.modules.observability_audit.service",
-  "atlas.modules.observability_audit.repository",
   "atlas.modules.observability_audit.models",
   "atlas.modules.observability_audit.schemas",
   "atlas.modules.observability_audit.router",
-  "atlas.modules.observability_audit.workers",
-  "atlas.modules.observability_audit.tests",
   "aida.models",
   "aida.schemas",
   # ST-07 Commit C for observability_audit (2026-09-03): observability_api
@@ -361,23 +333,14 @@ allowed_importers = [
 name = "profiling module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.profiling.service",
-  "atlas.modules.profiling.repository",
   "atlas.modules.profiling.models",
   "atlas.modules.profiling.schemas",
   "atlas.modules.profiling.router",
-  "atlas.modules.profiling.workers",
 ]
 allowed_importers = [
-  "atlas.modules.profiling.api",
-  "atlas.modules.profiling.contracts",
-  "atlas.modules.profiling.service",
-  "atlas.modules.profiling.repository",
   "atlas.modules.profiling.models",
   "atlas.modules.profiling.schemas",
   "atlas.modules.profiling.router",
-  "atlas.modules.profiling.workers",
-  "atlas.modules.profiling.tests",
   "aida.models",
   "aida.schemas",
 ]
@@ -468,6 +431,9 @@ source_modules = [
   # with them rather than being left behind on the thin handlers.
   "aida.unified_lineage_builder",
   "aida.knowledge_graph_neighborhood",
+  # R11-GQL01: the graph and impact builders, moved out of `unified_lineage_api` so
+  # GraphQL can serve the same reads; the ratchet moves with them.
+  "aida.unified_lineage_service",
 ]
 forbidden_modules = ["aida.query_gateway"]
 
@@ -506,6 +472,7 @@ forbidden_modules = [
   "aida.agent_contract_api",
   "aida.agent_contract_request_api",
   "aida.asset_description_api",
+  "aida.column_description_api",
 ]
 
 [[tool.importlinter.contracts]]
@@ -533,6 +500,9 @@ source_modules = [
   "aida.knowledge_graph_neighborhood",
   "aida.portfolio_analytics_read_model",
   "aida.unified_lineage_builder",
+  # R11-GQL01: the builders `unified_lineage_api` re-exports; it imports them, never
+  # the reverse.
+  "aida.unified_lineage_service",
 ]
 forbidden_modules = [
   "aida.api",
@@ -540,4 +510,165 @@ forbidden_modules = [
   "aida.product_marketplace_api",
   "aida.semantic_api",
   "aida.unified_lineage_api",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-0029. The steward agent is automation, not a router, and it drafts through
+# the same rules a steward's own buttons use. Those rules were two private
+# functions inside `stewardship_api` (the AT-5 worklist gatherer and the GL-8 label
+# matcher); they moved to `aida.documentation_worklist_signals` and
+# `aida.glossary_link_candidates` so the agent could reach them without importing
+# a router. This pins that: the cheapest way to add a third shared rule would
+# otherwise be another import back into the router it lives beside -- R03's
+# "services should not obtain business models from routers", and the same edge the
+# F05 contract above forbids the reviewer agent. The lineage, quality and tool
+# agents, and the rules they share, are held to the same line -- R11-FP14 moved the
+# tool draft write out of `tool_api` into `aida.tool_drafts` for exactly this reason.
+name = "ADR-0029 the steward agent and the rules it shares never import a router"
+type = "forbidden"
+source_modules = [
+  "aida.documentation_worklist_signals",
+  "aida.glossary_link_candidates",
+  "aida.lineage_agent",
+  "aida.lineage_table_resolution",
+  "aida.quality_agent",
+  "aida.quality_rule_proposal_model",
+  "aida.quality_rule_proposals",
+  "aida.routine_lineage_edges",
+  "aida.steward_agent",
+  "aida.task_agent",
+  "aida.task_agent_registry",
+  "aida.task_agent_schedule",
+  "aida.tool_agent",
+  "aida.tool_drafts",
+]
+forbidden_modules = [
+  "aida.agent_contract_api",
+  "aida.api",
+  "aida.asset_description_api",
+  "aida.lineage_agent_api",
+  "aida.parsed_lineage_review_api",
+  "aida.procedure_lineage_api",
+  "aida.procedure_tool_api",
+  "aida.quality_agent_api",
+  "aida.quality_api",
+  "aida.semantic_api",
+  "aida.steward_agent_api",
+  "aida.stewardship_api",
+  "aida.task_agent_api",
+  "aida.tool_agent_api",
+  "aida.tool_api",
+  "aida.view_lineage_api",
+]
+
+[[tool.importlinter.contracts]]
+# R11-GQL01. GraphQL's read modules, the stored-OKF read model and the shared context-product
+# read services answer for REST routes without importing them ("reuse domain services, not HTTP
+# loopback calls or router imports", design section 13). That was held by one test reading the
+# direct imports of four GraphQL modules -- and `okf_store`, which GraphQL reaches, imported the
+# compile router for its scope resolver. `aida.context_product_read_service` closed that edge;
+# this pins it, indirect chains included, so the cheapest fix for the next shared decision is a
+# service and not an import back into the router it lives beside.
+#
+# `aida.graphql_schema` is a source module as of 2026-09-20: the execution path it reaches
+# through `aida.governed_execution` (R11-GQL02) moved out of the `aida.tool_api` router into
+# `aida.tool_execution`, so the whole GraphQL facade -- reads, limits, schema and execution --
+# is held to this line, indirect chains included.
+name = "R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router"
+type = "forbidden"
+source_modules = [
+  "aida.context_product_read_service",
+  "aida.context_product_reads",
+  "aida.governed_execution",
+  "aida.graphql_limits",
+  "aida.graphql_okf",
+  "aida.graphql_reads",
+  "aida.graphql_schema",
+  "aida.okf_read_model",
+  "aida.okf_store",
+  "aida.tool_execution",
+]
+# Every `*_api` module is a router in this codebase, and an import-linter wildcard cannot
+# match a suffix, so they are listed; `tests/test_r11_gql01_compile_read_service.py` fails
+# when a new one is missing from this list.
+forbidden_modules = [
+  "aida.api",
+  "aida.main",
+  "aida.mcp_server",
+  "aida.access_review_api",
+  "aida.agent_contract_api",
+  "aida.agent_contract_request_api",
+  "aida.agent_roster_api",
+  "aida.ai_decision_lineage_api",
+  "aida.ai_governance_api",
+  "aida.ai_registry_api",
+  "aida.asset_description_api",
+  "aida.asset_evidence_api",
+  "aida.audit_export_api",
+  "aida.bi_api",
+  "aida.change_signals_api",
+  "aida.column_description_api",
+  "aida.column_documentation_api",
+  "aida.compliance_api",
+  "aida.composite_key_api",
+  "aida.consumption_lineage_api",
+  "aida.context_compiler_api",
+  "aida.context_product_api",
+  "aida.conversation_api",
+  "aida.dbt_api",
+  "aida.definition_history_api",
+  "aida.delegation_api",
+  "aida.description_withdrawal_api",
+  "aida.detokenization_api",
+  "aida.document_ingestion_api",
+  "aida.engine_capability_api",
+  "aida.external_mcp_api",
+  "aida.footprint_gaps_api",
+  "aida.glossary_api",
+  "aida.ingestion_api",
+  "aida.intelligence_api",
+  "aida.lineage_agent_api",
+  "aida.lineage_evidence_export_api",
+  "aida.metric_suggestion_api",
+  "aida.model_export_api",
+  "aida.model_import_api",
+  "aida.negative_knowledge_api",
+  "aida.notification_api",
+  "aida.observability_api",
+  "aida.okf_export_api",
+  "aida.okf_import_api",
+  "aida.ontology_api",
+  "aida.openlineage_api",
+  "aida.operational_api",
+  "aida.parsed_lineage_review_api",
+  "aida.persona_api",
+  "aida.playbooks_api",
+  "aida.policy_native_sync_api",
+  "aida.procedure_lineage_api",
+  "aida.procedure_tool_api",
+  "aida.product_marketplace_api",
+  "aida.quality_agent_api",
+  "aida.quality_api",
+  "aida.relationship_validation_api",
+  "aida.retrieval_ops_api",
+  "aida.review_batch_api",
+  "aida.review_queue_api",
+  "aida.routine_description_api",
+  "aida.runtime_contracts_api",
+  "aida.search_api",
+  "aida.semantic_api",
+  "aida.semantic_intelligence_api",
+  "aida.sql_validation_api",
+  "aida.sql_workspace_api",
+  "aida.steward_agent_api",
+  "aida.stewardship_api",
+  "aida.studio_api",
+  "aida.table_family_api",
+  "aida.task_agent_api",
+  "aida.token_revocation_api",
+  "aida.tool_agent_api",
+  "aida.tool_api",
+  "aida.tool_plans_api",
+  "aida.unified_lineage_api",
+  "aida.workspace_api",
 ]

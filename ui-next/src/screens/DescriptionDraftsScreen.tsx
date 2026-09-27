@@ -9,6 +9,7 @@ import {
   submitAssetDescriptionDraft,
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
+import { pushLocation } from "../lib/location";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "./DescriptionDraftsScreen.css";
@@ -120,7 +121,10 @@ function DraftRow({
     `style ${pct(draft.style_score)} · completeness ${pct(draft.completeness_score)}`;
 
   return (
-    <div className={`draftrow${expanded ? " draftrow--exp" : ""}`}>
+    // `role="listitem"`: the container is `role="list"`, and a list none of whose children is a
+    // listitem is an axe `aria-required-children` violation -- one the jsdom sweep could not see
+    // (it renders this screen with no drafts) and the real-browser journey did.
+    <div className={`draftrow${expanded ? " draftrow--exp" : ""}`} role="listitem">
       <div className="draftrow__head">
         <div className="draftrow__name">
           <button
@@ -329,9 +333,17 @@ export function DescriptionDraftsScreen() {
     }
   }, []);
 
+  /* R11-S10: through the location store, not by hand.
+   *
+   * This was the last `history.pushState` + synthetic `hashchange` left in the
+   * app -- the exact pattern F09 replaced everywhere else -- and it hard-coded
+   * the screen's path. Grouping the routes is what made that visible: it wrote
+   * `#/catalog` while every other link in the app had moved to
+   * `#/analyst/catalog`, so this one button sent the user to a URL the shell
+   * immediately had to rewrite. `pushLocation` gets the path from the route
+   * table, which is the only thing that knows it. */
   const goToCatalog = useCallback(() => {
-    if (location.hash !== "#/catalog") history.pushState(null, "", "#/catalog");
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    pushLocation({ screen: "catalog" });
   }, []);
 
   return (

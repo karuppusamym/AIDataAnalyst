@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import type { CompliancePackRead } from "../lib/types";
+import type { CompliancePackRead, MeRead } from "../lib/types";
 import { ApiError } from "../lib/api";
+import type { Session } from "../lib/session";
 
 /* ---------------------------------------------------------------------------
    Compliance packs against the real, already-merged `compliance_api.py`
@@ -21,6 +22,33 @@ vi.mock("../lib/api", async (importOriginal) => {
     generateCompliancePack: (body: unknown, signal?: AbortSignal) => generateCompliancePack(body, signal),
     downloadCompliancePack: (packId: string, signal?: AbortSignal) => downloadCompliancePack(packId, signal),
   };
+});
+
+/* Who is offered Generate and Download is decided by the session's roles. `null` is
+   "`/v1/me` has not answered" -- what every test before the role block runs as, and
+   the controls are offered then (the server's 403 stays the authority). */
+let sessionMe: MeRead | null = null;
+vi.mock("../lib/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/session")>();
+  return {
+    ...actual,
+    useSession: (): Session => ({
+      state: "demo",
+      me: sessionMe,
+      lapsed: false,
+      lastSuccessAt: null,
+      error: null,
+      dataMode: "fixtures",
+      authMode: "development",
+      authModeInferred: false,
+      reload: () => undefined,
+    }),
+  };
+});
+
+const asRoles = (...roles: string[]): MeRead => ({
+  principal_id: "someone", principal_type: "USER", organization_id: null, roles,
+  persona: null, identity_provider: "DEVELOPMENT",
 });
 
 const PACK: CompliancePackRead = {
@@ -44,6 +72,7 @@ beforeEach(() => {
   fetchCompliancePacks.mockResolvedValue({ items: [], limit: 100, offset: 0, total: 0 });
   vi.resetModules();
   history.replaceState(null, "", "/");
+  sessionMe = null;
 });
 
 afterEach(() => {
@@ -111,7 +140,9 @@ describe("ComplianceScreen against the real compliance_api.py", () => {
     expect(typeof call.period_end).toBe("string");
     expect(call.name).toBeNull();
     await waitFor(() => expect(fetchCompliancePacks).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("Compliance pack generated and archived.")).toBeInTheDocument();
+    // R11-D3: the pack is persisted as a checksummed row, not written to WORM
+    // storage, so the confirmation says stored rather than archived.
+    expect(await screen.findByText("Compliance pack generated and stored.")).toBeInTheDocument();
   });
 
   it("shows the real 422 (period_end not after period_start) without changing pack state", async () => {
@@ -125,5 +156,58 @@ describe("ComplianceScreen against the real compliance_api.py", () => {
 
     expect(await screen.findByText("period_end must be after period_start")).toBeInTheDocument();
     expect(fetchCompliancePacks).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ComplianceScreen: who is offered Generate and Download", () => {
+  it("offers an Auditor the evidence to read, and tells them why there is no Generate (R11-AUD01)", async () => {
+    // The Auditor's job is reading evidence: the download route admits them, generating a pack
+    // (which writes a record) still does not.
+    sessionMe = asRoles("Auditor", "Viewer");
+    fetchCompliancePacks.mockResolvedValue({ items: [PACK], limit: 100, offset: 0, total: 1 });
+    const ComplianceScreen = await loadScreen();
+
+    render(<ComplianceScreen />);
+
+    await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Generate pack" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download evidence" })).toBeInTheDocument();
+    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toHaveTextContent(
+      "Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither. Your roles can list the packs below and download their evidence.",
+    );
+    expect(screen.queryByText("Not available to your roles")).not.toBeInTheDocument();
+    expect(generateCompliancePack).not.toHaveBeenCalled();
+  });
+
+  it("tells a Viewer, who may only list packs, instead of offering controls that answer 403", async () => {
+    sessionMe = asRoles("Viewer");
+    fetchCompliancePacks.mockResolvedValue({ items: [PACK], limit: 100, offset: 0, total: 1 });
+    const ComplianceScreen = await loadScreen();
+
+    render(<ComplianceScreen />);
+
+    await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Generate pack" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download evidence" })).not.toBeInTheDocument();
+    // Two sentences, with the space between them (they once rendered as "neither.Your").
+    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toHaveTextContent(
+      "Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither. Your roles can list the packs below.",
+    );
+    expect(screen.getByText("Not available to your roles")).toBeInTheDocument();
+    expect(generateCompliancePack).not.toHaveBeenCalled();
+    expect(downloadCompliancePack).not.toHaveBeenCalled();
+  });
+
+  it.each(["DataSteward", "PlatformAdmin"])("offers both to %s", async (role) => {
+    sessionMe = asRoles(role);
+    fetchCompliancePacks.mockResolvedValue({ items: [PACK], limit: 100, offset: 0, total: 1 });
+    const ComplianceScreen = await loadScreen();
+
+    render(<ComplianceScreen />);
+
+    await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Generate pack" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download evidence" })).toBeInTheDocument();
+    expect(screen.queryByText("Not available to your roles")).not.toBeInTheDocument();
   });
 });

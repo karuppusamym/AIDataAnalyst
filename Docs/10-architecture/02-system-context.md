@@ -78,7 +78,7 @@ Each crossing is a place where something outside Atlas can influence something i
 | X1 | User / agent → API | in | **Untrusted** | Signed OIDC verification (issuer, audience, expiry, algorithm, subject); role and organization claim mapping; deny by default |
 | X2 | User question → agent runtime | in | **Hostile-capable** | Pre-retrieval prompt-risk screening before retrieval, model context, or tool selection |
 | X3 | Source metadata → catalog | in | **Semi-trusted, value-suspect** | Envelope validation; bounded sizes; rejection of value-bearing attribute keys; no raw payload retention |
-| X4 | Retrieved metadata → model context | internal | **Untrusted content** | Indirect-injection screening (planned P0); bounded grounding; no raw values |
+| X4 | Retrieved metadata → model context | internal | **Untrusted content** | Indirect-injection screening — built: deterministic pattern matching in `src/aida/injection_defense.py`, applied to source text at ingest by `src/aida/ingest_screening.py` and to retrieved free text before it reaches the model by `src/aida/agent_orchestrator.py`, which withholds what it quarantines. It is evadable by paraphrase, so INV-3 stays the load-bearing control; bounded grounding; no raw values |
 | X5 | Model → runtime | in | **Untrusted** | Strict schema validation; proposal types are inert (INV-3) |
 | X6 | Runtime → source | out | **Privileged** | Query Execution Gateway: identity, purpose, AST validation, allowlist, cost gate, timeout, row/byte caps, masking (INV-2) |
 | X7 | Atlas → secret manager | out | **Reference-only** | Only opaque references persisted; plaintext never stored; bounded cache with rotation invalidation |
@@ -87,6 +87,7 @@ Each crossing is a place where something outside Atlas can influence something i
 | X10 | dbt artifacts → transformation intelligence | in | **Semi-trusted** | Immutable import; SQL literal redaction; raw artifact not persisted; artifact SQL never executed |
 | X11 | OpenLineage events → lineage | in | **Semi-trusted** | Schema validation; producer identity; bounded event size |
 | X12 | Outbox → Kafka → projectors | internal | **At-least-once** | Stable event IDs; idempotent consumers; committed offsets; dead-letter with authorized requeue |
+| X13 | GraphQL client → metadata reads, and one governed-execution mutation | in | **Untrusted** | `POST /graphql` (`src/aida/graphql_api.py`), also proxied by `ui-next`'s nginx. Authenticated and role-gated like the REST reads it mirrors, with each field requiring its REST route's roles, tenant boundary and workspace gate; body byte ceiling, document depth, alias, page-size and introspection limits, a deadline and a response byte budget. The one execution mutation goes through the governed tool path and so through the Query Execution Gateway (INV-2) |
 
 **The key reading of this table.** X2, X4, and X5 are the AI attack surface. X6 is the blast-radius control. Every competitor in `00-product/03-market-landscape.md` has X2 and X5; almost none has a real X6.
 

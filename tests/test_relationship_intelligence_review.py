@@ -34,7 +34,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from aida.config import get_settings
+from aida.config import Settings, get_settings
 from aida.db import Base
 from aida.intelligence_api import (
     _relationship_candidate_decision_event_type,
@@ -259,6 +259,19 @@ async def _seed_candidate(
         column_name="customer_id",
         physical_type="INTEGER",
     )
+    # R11-FP06: the rule name claims a declared key on the target, and an approval now
+    # checks the catalog for it.
+    session.add(
+        MetadataConstraint(
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            table_id=target_table.id,
+            name=f"pk_{target_table.name}",
+            constraint_type="PRIMARY_KEY",
+            columns=[target_column.name],
+            fingerprint="f" * 8,
+        )
+    )
     candidate = RelationshipCandidate(
         organization_id=org.id,
         datasource_id=datasource.id,
@@ -312,6 +325,7 @@ async def test_decide_relationship_candidate_emits_a_projectable_event(
         RelationshipCandidateDecision(decision="APPROVE"),
         context=_context(org),
         session=session,
+        settings=Settings(),
     )
     assert result.status == "APPROVED"
 
@@ -353,6 +367,7 @@ async def test_rejecting_a_candidate_emits_the_reject_sibling_event(
         RelationshipCandidateDecision(decision="REJECT", reason="not a real key"),
         context=_context(org),
         session=session,
+        settings=Settings(),
     )
     event = (await session.scalars(select(OutboxEvent))).one()
     assert event.event_type == "relationship_candidate.rejected.v1"
@@ -653,6 +668,7 @@ async def test_bulk_decide_by_explicit_ids_reports_partial_success(
         ),
         context=context,
         session=session,
+        settings=Settings(),
     )
     assert result.requested_count == 3
     assert result.succeeded_count == 1
@@ -692,6 +708,7 @@ async def test_bulk_decide_by_filter_only_selects_pending_and_respects_cap(
         ),
         context=context,
         session=session,
+        settings=Settings(),
     )
     assert result.selection_mode == "FILTER"
     assert result.requested_count == 3
@@ -739,6 +756,7 @@ async def test_bulk_decide_cross_organization_candidate_is_reported_failed(
         RelationshipCandidateBulkDecisionRequest(candidate_ids=[candidate.id], decision="APPROVE"),
         context=context,
         session=session,
+        settings=Settings(),
     )
     assert result.succeeded_count == 0
     assert result.results[0].status == "FAILED"

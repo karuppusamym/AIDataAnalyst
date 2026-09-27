@@ -4,6 +4,8 @@ import type { CatalogRowRead } from "../lib/ui-types";
 import { ApiError, exportAssetEvidence, fetchAssetEvidence } from "../lib/api";
 import type { ScreenId } from "../lib/routes";
 import { ColumnPanel } from "./ColumnPanel";
+import { ProfilePanel } from "./ProfilePanel";
+import { ObjectKnowledge } from "./ObjectKnowledge";
 import { CrossLinks } from "./CrossLinks";
 import type { CrossLink } from "./CrossLinks";
 import { AsyncState, Button, CopyLinkButton, Empty, Pill } from "./primitives";
@@ -147,7 +149,28 @@ export function EvidencePane({
             mean?" previously had nowhere in this app to look. Rendered after
             the evidence list and before the cross-links so the table-level
             answer still leads. */}
-        <ColumnPanel tableId={tableId} />
+        <ColumnPanel tableId={tableId} datasourceId={row?.datasource_id ?? null} />
+
+        {/* R11-FP04: what was measured about this table, and what the
+            measurement did not see. Mounted after the described columns and
+            before the cross-links, on the same rule 1 this pane already
+            follows: a statistic is a claim, so it renders with its scope --
+            here `observation_scope` -- rather than as a bare number. The
+            profile read is separately gated and separately fallible, so it
+            loads itself and its failure never blanks the descriptions above.
+
+            Withheld once the pane's own evidence read has failed, though: a
+            caller refused the asset's evidence is refused its profile too, and
+            mounting this would answer one denial with a second `role="alert"`
+            beside the first. The pane has already said so, with the
+            correlation id support needs. */}
+        {error ? null : <ProfilePanel tableId={tableId} />}
+
+        {/* R11-OKF02: this object's document in the published knowledge
+            bundles the caller may read -- collapsed until opened, because each
+            bundle behind it is a full authorized read. Withheld after an
+            evidence refusal for the same reason the profile is. */}
+        {error ? null : <ObjectKnowledge tableId={tableId} />}
 
         {links.length > 0 ? (
           <div className="evp__links">

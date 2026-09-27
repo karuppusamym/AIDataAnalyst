@@ -277,6 +277,12 @@ async def _fake_execute(
     requested_limit: int | None,
     semantic_version: str | None,
     workspace_id: UUID | None = None,
+    # F01: the real `execute` now takes the caller's context-product boundary and
+    # enforces it before opening a connector. Accepted and ignored here -- these
+    # tests ask no question through a product, so the orchestrator passes None,
+    # and a double that refused the keyword would only be asserting its own
+    # signature.
+    context_product_scope: object | None = None,
 ) -> GatewayResult:
     """Stands in for a real warehouse round-trip: gating/warning behaviour is
     what these tests prove, not `QueryExecutionGateway`'s own SQL execution

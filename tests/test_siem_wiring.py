@@ -221,9 +221,13 @@ async def test_routine_success_audit_events_are_not_queued(
     record_audit(
         session,
         _context(),
-        action="observability.slo.create",
-        resource_type="slo_definition",
-        resource_id="slo-1",
+        # Any ordinary, non-security audit action. This was
+        # `observability.slo.create` until the SLO surface was retired on
+        # 2026-09-12 (R11-D10); `glossary.category.create` is the same shape --
+        # a routine governed write that a SOC has no reason to see.
+        action="glossary.category.create",
+        resource_type="glossary_category",
+        resource_id="cat-1",
         outcome="SUCCESS",
         correlation_id="corr-siem-4",
     )

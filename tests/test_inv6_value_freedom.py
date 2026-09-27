@@ -22,11 +22,14 @@ executor returning rows full of sentinels. Everything that path persists (the
 is then searched for those sentinels.
 
 That is narrower than the specced fixture in one specific way, stated plainly: it
-proves the *query* path is value-free, not the ingestion and profiling pipelines,
-which cannot run without a source. The structural tests below cover the rest by
-enumeration instead -- every mapped column, every profile snapshot field, every
-dialect -- so a value-bearing column added tomorrow fails immediately even though
-no fixture exercises it.
+proves the *query* path is value-free end to end, and it proves the *profiling*
+path is value-free from the connector boundary inwards -- the profiling activity
+is driven against a fake connector (`_SentinelFacetConnector`, R11-FP04), which
+is where source values would enter, but there is no real warehouse behind it.
+Ingestion is covered the same way, one helper down. The structural tests below
+cover the rest by enumeration -- every mapped column, every profile snapshot
+field, every dialect -- so a value-bearing column added tomorrow fails
+immediately even though no fixture exercises it.
 """
 
 import json
@@ -40,7 +43,12 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 
 from aida import models
 from aida.config import Settings
-from aida.connectors.base import ColumnProfileSnapshot, TableProfileSnapshot
+from aida.connectors.base import (
+    ColumnProfileSnapshot,
+    ConnectorCapabilities,
+    ProfileFacetStatus,
+    TableProfileSnapshot,
+)
 from aida.connectors.registry import connector_registry
 from aida.models import AuditEvent, DataSource, OutboxEvent, QueryExecution
 from aida.query_gateway import (
@@ -171,6 +179,24 @@ async def test_no_source_values_in_control_plane(monkeypatch: pytest.MonkeyPatch
         "the sentinel never reached the result set, so the scan above proved nothing"
     )
 
+    # R11-FP04 widened the profiling path: ten new facet columns on
+    # `column_profile`/`table_profile`. The same scan has to cover them, and
+    # the interesting part is that only *one* of them can hold a string a
+    # connector chose -- a facet's reason code. That is the field the obvious
+    # implementation fills with the driver's own message, which routinely quotes
+    # the offending row (the rule this file already enforces for
+    # `analysis_run.error_message`). So the profiling half of this scan plants a
+    # sentinel exactly there.
+    await _scan_the_profiling_path_for_sentinels(monkeypatch)
+
+    # R11-FP02 widened the discovery path in the same shape. A facet whose read the source
+    # refuses is now recorded on the run's receipt instead of failing the run, and the
+    # obvious implementation of "why" is the driver's own message -- which for a refusal
+    # names the relation and can quote the row that provoked it, and which no two drivers
+    # spell the same way. So the discovery half of this scan plants a sentinel in exactly
+    # that message and requires the receipt to carry a classification instead.
+    await _scan_the_refused_facet_path_for_sentinels(monkeypatch)
+
 
 async def test_the_control_plane_scan_would_notice_a_leak(
     monkeypatch: pytest.MonkeyPatch,
@@ -195,7 +221,10 @@ async def test_the_control_plane_scan_would_notice_a_leak(
         lambda settings: type("_Resolver", (), {"resolve": staticmethod(lambda ref: "dsn://x")})(),
     )
     # Break the property on purpose: persist the statement verbatim.
-    monkeypatch.setattr("aida.query_gateway.redact_sql_literals", lambda sql, *, dialect: sql)
+    monkeypatch.setattr(
+        "aida.query_gateway.redact_sql_literals",
+        lambda sql, *, dialect, strip_comments=False: sql,
+    )
 
     session = CatalogSession(
         tables=[("analytics_db", "analytics", "customers")],
@@ -296,7 +325,13 @@ def test_sql_audit_digest_is_keyed_and_does_not_carry_the_statement() -> None:
 
 # --- profiles contain statistics only ---------------------------------------
 
-_STATISTIC_ONLY_TYPES = (TableProfileSnapshot, ColumnProfileSnapshot)
+# R11-FP04 added `ProfileFacetStatus` -- the per-column register of facets an
+# engine could not produce. It belongs in this ratchet for the same reason the
+# two snapshots do: it travels the profiling path, it is the newest place a
+# field could be added, and a `mode_value` or `example` on it would reach
+# `column_profile.unavailable_facets` as JSON, where the mapped-column ratchet
+# below cannot see it.
+_STATISTIC_ONLY_TYPES = (TableProfileSnapshot, ColumnProfileSnapshot, ProfileFacetStatus)
 
 # Field names that would carry a source value rather than a statistic about one.
 _VALUE_BEARING_FIELD_FRAGMENTS = (
@@ -418,6 +453,27 @@ _COLUMN_NAME_EXEMPTIONS: dict[str, str] = {
         "foreign key to studio_eval_question.id (ST-A8) -- an object reference, never "
         "raw question or query text; the mined question row itself carries no source "
         "values either, only object_type/object_id and an evidence edge id"
+    ),
+    "model_import_batch.review_audit_sample_id": (
+        "foreign key to review_audit_sample.id (R11-C8) -- the same governance edge "
+        "bulk_stewardship_operation.review_audit_sample_id carries, here on the "
+        "reversal batch raised from a disputed agent decision: the id of a row in "
+        "this platform's own audit table, never a sample of source data"
+    ),
+    "description_withdrawal.review_audit_sample_id": (
+        "foreign key to review_audit_sample.id (R11-C8) -- the same governance edge "
+        "bulk_stewardship_operation.review_audit_sample_id carries, here on the "
+        "withdrawal raised from a disputed agent decision: the id of a row in this "
+        "platform's own audit table, never a sample of source data"
+    ),
+    "bulk_stewardship_operation.review_audit_sample_id": (
+        "foreign key to review_audit_sample.id (AR-11, R11-C8) -- the governance "
+        "record of which decision a human re-checked, not a sample of source data. "
+        "The `sample_` fragment is banned because a column like `sample_values` "
+        "would carry rows out of a warehouse; this one carries the id of a row in "
+        "this platform's own audit table, whose own columns are a governance review "
+        "id, an object type, a risk tier, a decision and an outcome -- no content "
+        "from the reviewed object at all"
     ),
 }
 
@@ -796,6 +852,428 @@ async def test_the_worker_scan_would_notice_a_leak() -> None:
     assert SENTINEL_DRIVER_DETAIL in str(excinfo.value), (
         "the fixture connector's exception does not even carry the sentinel; the "
         "positive test above would pass regardless of whether the fix works"
+    )
+
+
+# --- R11-FP04: the widened profiling path -----------------------------------
+#
+# The value-free aggregate half of FP-04 added ten facet columns to
+# `column_profile`/`table_profile`. Nine of them can only ever hold a number, a
+# boolean or a code this codebase defines. Two are `String` columns a *connector*
+# fills in -- `table_profile.observation_scope` and each entry's `reason_code` in
+# `column_profile.unavailable_facets` -- and a connector is precisely where a
+# source driver's own text is in scope. The honest-looking implementation of an
+# unavailable reason forwards the driver's message, which is the same mistake
+# AU-4 fixed one column over.
+#
+# So both are closed vocabularies, and the write path drops anything else
+# (`atlas.modules.profiling.facets.persistable_facet_status` /
+# `persistable_observation_scope`). These drive the real activity to prove it.
+
+SENTINEL_FACET_REASON = "ZZQ-SENTINEL-FACETREASON-2f6b"
+SENTINEL_SCOPE = "ZZQ-SENTINEL-SCOPE-b840"
+_PROFILING_SENTINELS = (SENTINEL_FACET_REASON, SENTINEL_SCOPE)
+
+
+class _SentinelFacetConnector:
+    """A connector that answers with value-bearing text in every string it controls.
+
+    Shaped like a plausible mistake rather than an implausible attack: a driver
+    that could not group by a column raises quoting the offending row, and an
+    adapter author who passes that message through as the facet's
+    `unavailable_reason` has written something that looks careful and leaks.
+    """
+
+    capabilities = ConnectorCapabilities()
+
+    async def profile_table(self, *args: Any, **kwargs: Any) -> Any:
+        return TableProfileSnapshot(
+            row_count_estimate=1000,
+            sampled_row_count=1000,
+            columns=(
+                ColumnProfileSnapshot(
+                    name="account_no",
+                    null_count=0,
+                    non_null_count=1000,
+                    approximate_distinct_count=1000,
+                    min_length=3,
+                    max_length=40,
+                    blank_count=0,
+                    whitespace_only_count=0,
+                    length_bucket_counts=(0, 1000, 0, 0, 0),
+                    frequency_entropy_bits=9.97,
+                    facet_status=(
+                        ProfileFacetStatus(
+                            "ENTROPY",
+                            "UNAVAILABLE",
+                            f"GROUP BY failed on (account_no)=({SENTINEL_FACET_REASON})",
+                        ),
+                    ),
+                ),
+            ),
+            observation_scope=SENTINEL_SCOPE,
+        )
+
+
+async def _scan_the_profiling_path_for_sentinels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the real `profile_table_task` and scan every row it persisted.
+
+    Called from `test_no_source_values_in_control_plane` so that the one test
+    named for this invariant covers the profiling path too rather than only the
+    query path -- which is the gap that let envelope 1.1's tables sit outside
+    this file's scan entirely (see the ingestion test above).
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import ColumnProfile, TableProfile
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, table = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_FP04_SENTINEL"
+            )
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_FP04_SENTINEL", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry,
+                "create",
+                lambda *a, **k: _SentinelFacetConnector(),
+            )
+
+            result = await activities.profile_table_task(
+                {"run_id": str(run.id), "table_id": str(table.id)}
+            )
+            assert result["profiled_columns"] == 1, (
+                "the activity did not persist a column profile, so the scan below "
+                "would be looking at nothing"
+            )
+
+            rows: list[Any] = [
+                *(await session.scalars(select(TableProfile))).all(),
+                *(await session.scalars(select(ColumnProfile))).all(),
+                *(await session.scalars(select(AuditEvent))).all(),
+                *(await session.scalars(select(OutboxEvent))).all(),
+            ]
+            leaks = [
+                f"{type(row).__name__}: {rendered[:200]}"
+                for row in rows
+                for rendered in _persisted_values(row)
+                for sentinel in _PROFILING_SENTINELS
+                if sentinel in rendered
+            ]
+            assert leaks == [], f"a connector's own text reached a profile row: {leaks}"
+
+            # Not merely absent: the facet is still recorded as unavailable, with
+            # the reason replaced. A write path that dropped the whole entry
+            # would pass the scan above while losing the honesty the facet
+            # register exists for.
+            profile = (await session.scalars(select(ColumnProfile))).one()
+            assert profile.unavailable_facets == [
+                {"facet": "ENTROPY", "status": "UNAVAILABLE", "reason_code": "UNRECORDED"}
+            ]
+            table_profile = (await session.scalars(select(TableProfile))).one()
+            assert table_profile.observation_scope is None, (
+                "an unrecognised scope must store NULL ('not recorded'), which is "
+                "also what stops it silently re-enabling the derivation R11-FP04 replaced"
+            )
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+
+# --- R11-FP02: a refused facet read, the newest place a driver's words could enter ---
+
+SENTINEL_REFUSAL = "ZZQ-SENTINEL-REFUSAL-9c14"
+
+
+class _RefusingDiscoveryConnector:
+    """A connector that inventories a source and is refused one facet of it.
+
+    Duck-typed exactly like `_SentinelFacetConnector` above, and shaped like the same
+    plausible mistake: the driver refuses the grants query and says why in a message that
+    quotes the row it choked on, and an adapter author who passes that message through as
+    the facet's reason has written something that looks careful and leaks.
+    """
+
+    capabilities = ConnectorCapabilities(grants=True, views=True)
+
+    async def test_connection(self) -> None:
+        return None
+
+    def scope_discovery(self, **kwargs: Any) -> bool:
+        return False
+
+    async def count_invisible_objects(self) -> dict[str, int] | None:
+        return None
+
+    async def discover_streaming(self, *, batch_size: int = 500) -> Any:
+        from aida.connectors.discovery import (
+            FACET_GRANTS,
+            assemble_catalog,
+            build_grants,
+            build_table_map_from_column_rows,
+            read_facet,
+        )
+
+        class _Refusal(Exception):
+            sqlstate = "42501"
+
+        async def _refused() -> Any:
+            raise _Refusal(
+                "permission denied for relation grants "
+                f"while reading (account_no)=({SENTINEL_REFUSAL})"
+            )
+
+        tables = build_table_map_from_column_rows(
+            [
+                {
+                    "table_schema": "public",
+                    "table_name": "accounts",
+                    "table_type": "BASE TABLE",
+                    "column_name": "account_no",
+                    "ordinal_position": 1,
+                    "data_type": "text",
+                    "is_nullable": "YES",
+                }
+            ]
+        )
+        grant_rows = await read_facet(FACET_GRANTS, _refused())
+        yield assemble_catalog("bank", tables, grants=build_grants(grant_rows))
+
+
+async def _scan_the_refused_facet_path_for_sentinels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the real `discover_datasource` through a refused facet and scan what it wrote.
+
+    Called from `test_no_source_values_in_control_plane` for the same reason the profiling
+    scan is: the receipt is control-plane state, a refusal is the one discovery outcome
+    whose natural explanation is a driver's message, and a run that now *completes* through
+    a refusal persists that outcome rather than throwing it away with the failure.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import AnalysisRun, MetadataTable
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, _ = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_FP02_SENTINEL"
+            )
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_FP02_SENTINEL", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry,
+                "create",
+                lambda *a, **k: _RefusingDiscoveryConnector(),
+            )
+
+            result = await activities.discover_datasource(str(run.id))
+            assert result["status"] == "COMPLETED", (
+                "the run did not complete through the refusal, so the receipt this scan "
+                "reads was never written"
+            )
+
+            rows: list[Any] = [
+                *(await session.scalars(select(AnalysisRun))).all(),
+                *(await session.scalars(select(MetadataTable))).all(),
+                *(await session.scalars(select(AuditEvent))).all(),
+                *(await session.scalars(select(OutboxEvent))).all(),
+            ]
+            leaks = [
+                f"{type(row).__name__}: {rendered[:200]}"
+                for row in rows
+                for rendered in _persisted_values(row)
+                if SENTINEL_REFUSAL in rendered
+            ]
+            assert leaks == [], f"a driver's refusal message reached a run row: {leaks}"
+
+            # Not merely absent: the refusal is still recorded, as a state and a reason
+            # code. A path that dropped the outcome would pass the scan above while losing
+            # the honesty the receipt exists for -- the facet would read as an empty one.
+            completed = await session.get(AnalysisRun, run.id)
+            assert completed is not None and completed.discovery_receipt is not None
+            assert completed.discovery_receipt["facets"]["grants"] == {
+                "support": "SUPPORTED",
+                "state": "PERMISSION_DENIED",
+                "reason": "SOURCE_DENIED_READ",
+            }
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+
+async def test_the_refused_facet_sentinel_scan_would_notice_a_leak() -> None:
+    """Negative control for `_scan_the_refused_facet_path_for_sentinels`.
+
+    Proves the fixture connector really hands the discovery path a value-bearing message,
+    and that a row of the shape the scan reads would surrender it. Without this, a fixture
+    that quietly stopped carrying a sentinel would leave the scan passing forever while
+    checking nothing.
+    """
+    from aida.models import AnalysisRun
+
+    refused: list[BaseException] = []
+    connector = _RefusingDiscoveryConnector()
+    try:
+        async for _ in connector.discover_streaming():
+            pass
+    except Exception as exc:  # noqa: BLE001 -- outside a scope the refusal is never absorbed
+        refused.append(exc)
+
+    assert refused, "the fixture connector did not refuse its grants read"
+    assert SENTINEL_REFUSAL in str(refused[0])
+    leaky = AnalysisRun(id=uuid4(), organization_id=uuid4(), error_message=str(refused[0]))
+    assert any(SENTINEL_REFUSAL in rendered for rendered in _persisted_values(leaky)), (
+        "the scan's own renderer cannot see this row shape, so the assertion it makes "
+        "in the positive test is vacuous"
+    )
+
+
+async def test_the_profiling_sentinel_scan_would_notice_a_leak() -> None:
+    """Negative control for `_scan_the_profiling_path_for_sentinels`.
+
+    Proves the fixture connector really does hand the write path value-bearing
+    text in both strings it controls. Without this, a fixture that quietly
+    stopped carrying a sentinel -- a renamed field, a changed default -- would
+    leave the scan passing forever while checking nothing.
+    """
+    snapshot = await _SentinelFacetConnector().profile_table()
+
+    assert snapshot.observation_scope == SENTINEL_SCOPE
+    assert SENTINEL_FACET_REASON in snapshot.columns[0].facet_status[0].reason_code
+
+
+async def test_no_profile_facet_reaches_a_trace_span_or_an_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-FP04's egress axes, in one pass: spans, audit, outbox, error_message.
+
+    The profiling activity is driven inside a real `@traced` call so a span
+    genuinely exists -- otherwise the span half of this assertion would be
+    vacuous, which is the failure mode `test_the_trace_span_scan_would_notice_a
+    _leak` exists to name. The connector both carries a sentinel facet reason
+    *and* raises with a sentinel in its message, so one run exercises the
+    success-path persistence and the failure-path `error_message` rule together.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.observability as observability_module
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import AnalysisRun
+    from aida.observability import TracingConfig, configure_tracing, traced
+
+    if not observability_module._tracer_configured:
+        assert configure_tracing(TracingConfig(enabled=True, exporter="console")) is True
+    exporter = InMemorySpanExporter()
+    trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+
+    class _FacetAndFailureConnector(_SentinelFacetConnector):
+        async def profile_table(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(
+                "could not compute the entropy facet: GROUP BY failed on "
+                f"(account_no)=({SENTINEL_FACET_REASON})"
+            )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, table = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_FP04_EGRESS"
+            )
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_FP04_EGRESS", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry,
+                "create",
+                lambda *a, **k: _FacetAndFailureConnector(),
+            )
+
+            @traced
+            async def profile_under_a_span(organization_id: str) -> None:
+                await activities.profile_table_task(
+                    {"run_id": str(run.id), "table_id": str(table.id)}
+                )
+
+            with pytest.raises(RuntimeError, match="entropy facet"):
+                await profile_under_a_span(organization_id=str(run.organization_id))
+
+            failed = await session.get(AnalysisRun, run.id)
+            assert failed is not None and failed.error_message is not None
+            assert SENTINEL_FACET_REASON not in failed.error_message
+
+            rows: list[Any] = [
+                failed,
+                *(await session.scalars(select(AuditEvent))).all(),
+                *(await session.scalars(select(OutboxEvent))).all(),
+            ]
+            leaks = [
+                f"{type(row).__name__}: {rendered[:200]}"
+                for row in rows
+                for rendered in _persisted_values(row)
+                if SENTINEL_FACET_REASON in rendered
+            ]
+            assert leaks == [], f"a facet reason reached an audit or event payload: {leaks}"
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+    spans = exporter.get_finished_spans()
+    assert spans, "no span was exported, so the span half of this test proved nothing"
+    span_text: list[str] = []
+    for span in spans:
+        span_text.append(span.name)
+        span_text.extend(str(value) for value in (span.attributes or {}).values())
+        for event in span.events:
+            span_text.append(event.name)
+            span_text.extend(str(value) for value in (event.attributes or {}).values())
+    assert not any(SENTINEL_FACET_REASON in text for text in span_text), (
+        "the facet reason reached an exported span; `observability.traced` records "
+        "only error_class for exactly this reason (TS-3)"
     )
 
 

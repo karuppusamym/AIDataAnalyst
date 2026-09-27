@@ -69,10 +69,17 @@ export interface ColumnDocumentationRead {
   withdrawn_description: string | null;
 }
 
+export function saveColumnWorksheet(tableId: string, changes: {column_id: string; description: string; expected_version: number | null}[]): Promise<ModelImportBatchRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error("Worksheet saving requires a connected backend."));
+  return postJson<ModelImportBatchRead>(`/v1/tables/${encodeURIComponent(tableId)}/column-worksheet`, { changes });
+}
+
 const readJson = get;
 
-/** Fixture columns for a table, so the pane renders something recognisable
- *  under the default `VITE_USE_FIXTURES=1`.
+/** Fixture columns for a table, so the pane renders something recognisable in
+ *  a demo build. These are written here rather than in `lib/fixtures.ts`, and
+ *  stay here: that module is dropped from a live build (R11-X1), which this
+ *  branch is never reached in anyway.
  *
  *  Deliberately mixed: some columns carry only a source comment, some carry
  *  an authored description, some carry neither -- because "most columns have
@@ -155,11 +162,26 @@ export async function fetchColumnDocumentation(
   signal?: AbortSignal,
 ): Promise<ColumnDocumentationRead[]> {
   if (USE_FIXTURES) return makeFixtureColumnDocumentation(tableId);
-  const page = await readJson<PageOf<ColumnDocumentationRead>>(
-    `/v1/tables/${encodeURIComponent(tableId)}/column-documentation?limit=1000`,
-    signal,
-  );
-  return page.items ?? [];
+  const columns: ColumnDocumentationRead[] = [];
+  const seen = new Set<string>();
+  let total: number | null = null;
+  while (true) {
+    const page = await readJson<PageOf<ColumnDocumentationRead>>(
+      `/v1/tables/${encodeURIComponent(tableId)}/column-documentation?limit=1000${columns.length ? `&offset=${columns.length}` : ""}`,
+      signal,
+    );
+    if (!Number.isInteger(page.total) || page.total < 0 || page.total > 10000 || (total !== null && page.total !== total)) {
+      throw new Error("Column count changed or exceeds the 10,000-column browser limit. Refresh or use a source export.");
+    }
+    total = page.total;
+    if (!page.items.length && columns.length < total) throw new Error("Column documentation is incomplete. Retry loading the table.");
+    for (const column of page.items) {
+      if (column.table_id !== tableId || seen.has(column.column_id)) throw new Error("Column documentation has inconsistent rows. Retry loading the table.");
+      seen.add(column.column_id); columns.push(column);
+    }
+    if (columns.length > total) throw new Error("Column documentation has an inconsistent count.");
+    if (columns.length === total) return columns;
+  }
 }
 
 function filenameFromDisposition(header: string | null, fallback: string): string {
@@ -231,6 +253,9 @@ export interface ModelImportBatchRead {
   uploaded_by: string;
   reviewed_by: string | null;
   reviewed_at: string | null;
+  /** R11-C8: set when this batch undoes an applied one. Optional only because
+   *  fixtures written before it existed omit it; the server always sends it. */
+  reverses_batch_id?: string | null;
 }
 
 /** `src/aida/model_import_api.py::ModelImportChangeRead`. */
@@ -244,7 +269,9 @@ export interface ModelImportChangeRead {
   subject_label: string;
   field: string;
   old_value: string | null;
-  new_value: string;
+  /** `null` only on a reversal: the field had no value before the import it
+   *  undoes, so applying the change withdraws what that import published. */
+  new_value: string | null;
   expected_version: number | null;
   status:
     | "PENDING"
@@ -296,11 +323,38 @@ export async function fetchModelImportChanges(
   signal?: AbortSignal,
 ): Promise<ModelImportChangeRead[]> {
   if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
-  const page = await readJson<PageOf<ModelImportChangeRead>>(
-    `/v1/model-imports/${encodeURIComponent(batchId)}/changes?limit=1000`,
-    signal,
-  );
-  return page.items ?? [];
+  const rows: ModelImportChangeRead[] = [];
+  let expectedTotal: number | null = null;
+  const seen = new Set<string>();
+  // Never present the first page as the complete diff for a larger batch.
+  // Bound the in-browser preview; an oversized workbook must be split rather
+  // than silently approving rows that were not available to inspect.
+  const previewLimit = 50_000;
+  while (true) {
+    const page = await readJson<PageOf<ModelImportChangeRead>>(
+      `/v1/model-imports/${encodeURIComponent(batchId)}/changes?limit=1000&offset=${rows.length}`,
+      signal,
+    );
+    if (!Number.isInteger(page.total) || page.total < 0 || page.total > previewLimit) {
+      throw new Error("The workbook preview exceeds the supported 50,000 changes or has an invalid count. Split large workbooks into smaller imports.");
+    }
+    if (expectedTotal !== null && page.total !== expectedTotal) {
+      throw new Error("The import changed while its preview was loading. Retry the preview.");
+    }
+    expectedTotal = page.total;
+    const items = page.items ?? [];
+    if ((items.length === 0 && rows.length < expectedTotal) || rows.length + items.length > expectedTotal) {
+      throw new Error("The workbook preview is incomplete. Retry the preview before submitting.");
+    }
+    for (const row of items) {
+      if (row.batch_id !== batchId || seen.has(row.id)) {
+        throw new Error("The workbook preview contains inconsistent rows. Retry the preview.");
+      }
+      seen.add(row.id);
+      rows.push(row);
+    }
+    if (rows.length === expectedTotal) return rows;
+  }
 }
 
 /** Submit a parsed batch into the shared review queue. Still publishes
@@ -347,7 +401,12 @@ export interface DescriptionWithdrawalRead {
  *  reader resolves until a *different* principal approves the review this
  *  creates, on the Review queue. There is deliberately no approve call here. */
 export async function requestDescriptionWithdrawal(
-  subjectType: "TABLE" | "COLUMN",
+  /* R11-FP08: ROUTINE joined the withdrawal subjects when routines gained an
+     Atlas-authored description. The route's own contract is
+     `^(TABLE|COLUMN|ROUTINE)$` (`description_withdrawal_api.py`), and the
+     service resolves a routine subject against its datasource rather than a
+     parent table, so this union was the last narrow link in the chain. */
+  subjectType: "TABLE" | "COLUMN" | "ROUTINE",
   subjectId: string,
   reason: string,
   requestType: "WITHDRAW" | "REINSTATE" = "WITHDRAW",

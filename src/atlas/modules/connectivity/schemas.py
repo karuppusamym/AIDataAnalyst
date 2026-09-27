@@ -14,12 +14,9 @@ read surfaces. `ConnectorCapabilityRead` has no backing table of its own
 but is grouped here since it is connectivity's own read surface, not any
 other module's.
 
-`ApiModel` stays defined in `aida.schemas` rather than moving here or to
-`atlas.platform` -- it is the shared pydantic base for every module's
-schemas, not connectivity-owned, and moving it is out of scope for this
-pass. Importing it back from `aida.schemas` here works safely only
-because `aida.schemas`' shim import of this module comes *after*
-`ApiModel` is defined in that file -- see the comment there.
+`ApiModel` is imported from `atlas.platform.schemas`, the neutral base this module and
+`aida.schemas` both use, so this module no longer imports `aida.schemas` and the two
+no longer form an import cycle (review 2026-09-05 R03, completed 2026-09-21).
 """
 
 from __future__ import annotations
@@ -30,7 +27,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from aida.schemas import ApiModel
+from atlas.platform.schemas import ApiModel
 
 
 class DataSourceCreate(ApiModel):
@@ -120,6 +117,24 @@ class DataSourceBulkOnboardResultRead(ApiModel):
     results: list[DataSourceBulkOnboardItemRead]
 
 
+class ConnectorCapabilityEvidenceRead(ApiModel):
+    """Why one capability flag reads as it does (INV-9).
+
+    `capabilities[flag]` is `claimed` narrowed to what the certification result
+    supports. `status` is that result's row (`CERTIFIED`, `NOT_CERTIFIED` or
+    `NOT_APPLICABLE`; null when the result has no row), and `tier` is `LIVE`
+    (probed against a real engine) or `FIXTURE` (proven against the connector's
+    own driver double) when the flag is certified. `held` marks a flag that is
+    advertised without being certified, kept only by an explicit uncertified-claim
+    entry in the certification result.
+    """
+
+    claimed: bool
+    status: str | None = None
+    tier: str | None = None
+    held: bool = False
+
+
 class ConnectorCapabilityRead(ApiModel):
     connector_type: str
     display_name: str
@@ -130,6 +145,11 @@ class ConnectorCapabilityRead(ApiModel):
     version: str
     notes: str
     capabilities: dict[str, bool]
+    #: Additive (INV-9): how each flag in `capabilities` came about. Empty for a
+    #: connector that is not implemented.
+    capability_evidence: dict[str, ConnectorCapabilityEvidenceRead] = Field(
+        default_factory=dict
+    )
 
 
 class ConnectorCertificationRead(ApiModel):

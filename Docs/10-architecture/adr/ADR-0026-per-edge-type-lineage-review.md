@@ -30,7 +30,7 @@ Every existing read path — `unified_lineage_api._build_unified_graph`, the dom
 
 - **Zero-cost on existing reads.** The 5 edge queries that already exist grow one `.where(model.review_status == "ACTIVE")` clause; the fetched rows still deserialize into the same ORM types, callers don't change, no polymorphic `isinstance` fan-out. A supertype would have forced a JOIN or a UNION in every read site to pick up per-type columns (`edge_kind`, `sql_hash`, `transformation_type`, `input_dataset_namespace`, `artifact_import_id` — no two of the five share the same natural key).
 - **Additive, backward-compatible.** New columns are nullable or defaulted; no ORM row shape shifts under an existing caller. The default config keeps every deployment on the pre-P1-05 write behavior.
-- **Each parser stays responsible for its own delete-and-insert semantics.** `view_lineage_api._persist_edges`'s scoped delete-then-insert is unique to that parser; forcing it into a shared supertype would have leaked the sentinel-target quirk (`PROCEDURE_RESULT_TARGET`) into every other table's insert path.
+- **Each parser stays responsible for its own delete-and-insert semantics.** `view_lineage_api._persist_edges`'s scoped delete-then-insert is unique to that parser; forcing it into a shared supertype would have leaked the sentinel-target quirk (`PROCEDURE_RESULT_TARGET`) into every other table's insert path. (R11-X5 removed `view_lineage_api` on 2026-09-11; the decision this bullet argues for is unchanged, and the surviving writers -- the lineage agent and `routine_lineage_edges` -- each still own their own insert semantics.)
 - **Reviewer trail lives with the edge.** `reviewed_by`, `reviewed_at`, `review_reason` are on the same row as the edge — no join required to answer "who approved this and why."
 - **Aligns with the RelationshipCandidate review contract.** Same maker-checker guard, same outbox event naming (`lineage.parsed_edge.approved.v1` / `rejected.v1`), same 409-on-self-review, same partial-success bulk semantics.
 
@@ -48,6 +48,20 @@ Every existing read path — `unified_lineage_api._build_unified_graph`, the dom
 | A separate `LineageEdgeReview` table with an edge_type + edge_id FK-like tuple | Fan-out cost same as the supertype on reads (join per query), plus a soft FK that no database enforces, plus two-writer atomicity problems (edge insert + review insert must be transactional). Nothing simpler than the per-column-on-the-edge shape. |
 | Reuse `GovernanceReview` for parsed lineage edges | `GovernanceReview` is scoped to the semantic/annotation/description/glossary domain (see ADR-0025) and its schema, its RBAC, its supersede semantics, and its queue read model were shaped around those artifact types. Shoehorning lineage edges into it would either dilute those semantics or require enough new columns and case branches on `object_type` that we'd effectively have built ADR-0026 inside `GovernanceReview` — with the extra cost of a table that now serves two very different workflows. |
 | Off by default, per-tenant flag only | The config knob IS off by default (`auto_active`), and per-tenant opt-in is a natural follow-up ADR building on the same columns; not doing it now is a scoping choice, not a design choice. |
+
+## Amendment (2026-09-11): a sixth table
+
+`deep_procedure_lineage_edge` is the routine-aware procedure table (N3). It arrived after this ADR, and it was the one parser-produced edge table without a review state. That is the cost the Negative consequences above named: a table added later has to remember all six columns, and this one had not.
+
+It now carries the same six columns and index (migration `d81f5a2c9e47`). The queue, the decision endpoint and the bulk endpoint accept it as edge type `ROUTINE`, and its queue item names the routine and the statement within it. `PROCEDURE` stays the raw-SQL table.
+
+* **A person's parse** of a captured routine is written under the same review mode as every other parser's. Under `require_review`, a re-parse replaces only PROPOSED rows and UNPARSED markers, and leaves every decided row alone.
+* **An UNPARSED marker** records a gap in the parse, not an edge, so it is never queued. It is ACTIVE in either mode.
+* **The unified graph** folds ACTIVE rows into `PROCEDURE_DEFINITION` edges together with the raw-SQL table's, one edge per table pair. Such an edge names the routines behind it. When one routine establishes it, the edge also carries AT-19's `get_transformation_detail` reference to that routine's body.
+* **A merged rename** (CT-4) moves the table's edges to the renamed table, as it does the other edge tables'.
+* **Fixed on the way.** Under `require_review`, re-parsing a view or pasted procedure SQL failed on the natural-key constraint when a reviewer had rejected one of its edges. Every decided row is now left alone, not only an ACTIVE one.
+
+The lineage agent ([ADR-0029](ADR-0029-steward-agent.md)) writes PROPOSED rows to this table.
 
 ## Related
 

@@ -51,8 +51,17 @@ sequenceDiagram
 - No event without committed state; no committed governed state without an event.
 - At-least-once delivery; consumers are idempotent (P5).
 - Stable event IDs enable consumer-side deduplication.
-- Repeated failures go to `dead_letter` with authorized requeue — never silent discard.
+- Repeated publish failures move the row to status `DEAD_LETTER` — a status on `outbox_event`, not a separate table — with authorized requeue, never silent discard.
 - Publication lag is measured, per topic, per tenant.
+
+> **Implementation status (2026-09-20).** Dead-lettering exists at the publisher only.
+> `record_publish_failure` in `src/aida/projectors/outbox_publisher.py` sets
+> `outbox_event.status = 'DEAD_LETTER'` once `outbox_max_attempts` is reached, and
+> `POST /v1/outbox-events/{event_id}/requeue` (`src/aida/operational_api.py`) is the authorized
+> requeue. There is no `dead_letter` table, and the graph projector
+> (`src/aida/projectors/graph_projector.py`) has no dead-letter path of its own: a failing event
+> raises out of its consume loop and ends the process with the batch's offsets uncommitted, so
+> consumer requirement 4 in §7 is a target.
 
 ## 3. Event taxonomy
 
@@ -70,21 +79,32 @@ The complete named catalog with schemas is in `30-contracts/04-event-catalog.md`
 
 Every event carries the same envelope. Payload shape varies; envelope never does.
 
+> **Implementation status (2026-09-20).** The example below is the target envelope; the one
+> published today is smaller. `serialize_event` in `src/aida/projectors/outbox_publisher.py` emits
+> seven fields: `event_id` (the `outbox_event` row's UUID, not a ULID), `event_type`,
+> `aggregate_type`, `aggregate_id`, `organization_id` (nullable), `occurred_at` and `payload`.
+> `aggregate_type` and `aggregate_id` take the place of `resource_type` and `resource_id`. Not
+> emitted: `event_version`, `producer`, the line-of-business and project ids, `correlation_id`,
+> `causation_id` and `actor`, so of the tenancy fields only `organization_id` is present.
+> `legal_entity_id` is an ADR-only concept that exists nowhere in `src/` or `migrations/` (see
+> `06-data-architecture.md`), so it is not in the example. Neither `record_outbox`
+> (`src/aida/events.py`) nor `serialize_event` inspects the payload, so "validated at publish"
+> in the rules below is a requirement, not a check that runs.
+
 ```json
 {
-  "event_id": "01J8X...ULID",
+  "event_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
   "event_type": "catalog.table.changed",
   "event_version": "1.0",
   "occurred_at": "2026-08-28T14:03:11.482Z",
   "producer": "atlas.catalog",
   "organization_id": "org_...",
-  "legal_entity_id": "le_...",
   "lob_id": "lob_...",
   "project_id": "prj_...",
   "resource_type": "table",
   "resource_id": "tbl_...",
   "correlation_id": "cor_...",
-  "causation_id": "01J8X...",
+  "causation_id": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
   "actor": {"kind": "USER|WORKLOAD|SYSTEM", "id": "..."},
   "payload": { }
 }
@@ -112,7 +132,7 @@ Every event carries the same envelope. Payload shape varies; envelope never does
 | Rename field | No | Add new, deprecate old |
 | Add event type | Yes | New topic or type; consumers opt in |
 
-Backward compatibility is intended to be enforced by a schema registry compatibility policy (`BACKWARD` minimum), checked in CI against the published catalog. **Planned, not built (2026-08-30):** there is no schema registry in `compose.yaml` or in the dependency list, and `.github/workflows/ci.yml` has no event-schema step — its gates are `ruff`, `mypy`, `lint-imports`, a single-Alembic-head check, and `pytest`.
+Backward compatibility is intended to be enforced by a schema registry compatibility policy (`BACKWARD` minimum), checked in CI against the published catalog. **Planned, not built (2026-09-20):** there is no schema registry in `compose.yaml` or in the dependency list, and `.github/workflows/ci.yml` (21 jobs as of 2026-09-20) has no event-schema compatibility step. The nearest thing is `tests/test_event_catalog_gate.py`, which runs in the `tests` job and fails when an emitted `event_type` is missing from the catalog — a name check, not a schema-compatibility check.
 
 ## 6. Topic design
 
@@ -151,7 +171,7 @@ Every consumer, internal or external, must:
 
 ## 8. Temporal workflow model
 
-> **Implementation status (2026-08-30). 2 of the 8 workflows below exist.** Verified by
+> **Implementation status (2026-09-20). 2 of the 8 workflows below exist.** Verified by
 > grepping `@workflow.defn` across `src/`: `DatasourceDiscoveryWorkflow`
 > (`src/aida/workflows/discovery.py`) and `MetadataBatchIngestionWorkflow`
 > (`src/aida/workflows/ingestion.py`). `SourceOnboarding`, `AnalysisRun`, `QualityEvaluation`,
@@ -160,8 +180,11 @@ Every consumer, internal or external, must:
 > workflows (`discover_datasource`, `profile_datasource`, `plan_profile_tasks`,
 > `profile_table_task`, `finalize_profile_tasks` in `workflows/activities.py`) or as
 > synchronous service code; none of it has the durable, resumable execution this table
-> attributes to it. `ProjectionRebuild` in particular does not exist, which is the same gap as
-> INV-1's missing `test_projection_rebuild` and the never-run rebuild drill.
+> attributes to it. `ProjectionRebuild` in particular does not exist as a workflow. INV-1's
+> `test_projection_rebuild` does exist (`tests/test_inv1_single_authoritative_store.py`): it runs
+> the real `project_discovery` twice against a recording graph driver and requires identical
+> output, which proves the projector is a pure function of PostgreSQL. It does not prove Neo4j
+> applies the projection, and the rebuild drill has never been run.
 
 | Workflow | Trigger | Activities | Durability need |
 |---|---|---|---|

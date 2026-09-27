@@ -41,9 +41,20 @@ Guards, in order, on every auto-decision:
    misconfiguration fails loudly rather than at the database.
 6. Suspension, process-wide or per-organization, stops everything
    (condition (c)) -- re-read before *each* commit, not only at batch entry.
+   That re-read bounds the stop at one item per worker only at READ
+   COMMITTED, so the batch refuses to start at any other isolation level
+   rather than running without the bound (`refuse_unsupported_isolation`).
 7. The unresolved audit-sample backlog must be inside its bound. Condition
    (b)'s safety argument is that humans read a 5% sample; an unread queue is
    not oversight, so the agent stops deciding rather than adding to it.
+8. And the sample must be read *in time*: the oldest unread one must be
+   younger than `reviewer_agent_max_sample_age_hours`. Guard 7 alone does not
+   imply this -- a queue that stays just under the count bound while nobody
+   opens its oldest item satisfies it forever, which is the shape unattended
+   oversight actually decays into. Added 2026-09-12 for AR-11, whose exit
+   condition recorded the time-to-verdict targets as reported but not
+   enforced; `reviewer_agent_metrics.oldest_pending_hours` was already the
+   number, and this is that number asked as a precondition.
 
 Guards 2, 3, 4 and the per-item half of 6 were added on 2026-09-09 closing
 AR-01 through AR-04 of `Docs/10-architecture/15-agent-architecture-critical-
@@ -56,32 +67,38 @@ raised mid-batch did not stop the batch it was raised during.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import structlog
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.config import Settings
+from aida.column_description_service import ORIGIN_METADATA, ORIGIN_MODEL_INFERRED
+from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
-from aida.governance_decision_contracts import TERMINAL_STATUS
+from aida.governance_decision_contracts import (
+    TERMINAL_STATUS,
+    AgentOversightOutcome,
+    normalize_verdict,
+)
 from aida.governance_decision_service import (
     GovernanceDecisionRefused,
     decide_review,
     record_decision_audit,
     record_decision_outbox,
+    register_agent_decision_guard,
 )
 from aida.models import (
     AssetDescriptionDraft,
     BulkStewardshipOperation,
+    ColumnDescriptionDraft,
     DataQualityIncident,
-    DocumentClaim,
-    GlossaryLinkProposal,
+    DescriptionWithdrawal,
     GovernanceReview,
     MetadataEnrichmentProposal,
     MetadataTable,
@@ -100,6 +117,8 @@ from aida.review_risk_tiers import (
 )
 from aida.security import SecurityContext
 
+_log = structlog.get_logger(__name__)
+
 _SAMPLING_FLOOR = 0.05
 _FINGERPRINT_BUCKETS = float(2**32)
 
@@ -110,6 +129,27 @@ REASON_SELF_PROPOSED = "reviewer_agent_cannot_decide_own_proposal"
 #: AR-11: the sample backlog has outgrown what humans are resolving, so the
 #: oversight ADR-0027 condition (b) claims is not actually happening.
 REASON_AUDIT_BACKLOG = "reviewer_agent_audit_backlog_exceeded"
+#: AR-04: the batch is running at a transaction isolation level under which
+#: the per-item suspension re-read cannot see the kill switch being thrown.
+REASON_UNSUPPORTED_ISOLATION = "reviewer_agent_unsupported_isolation"
+
+#: AR-11: the *oldest* unread sample has sat past its deadline. Distinct from
+#: the count bound above because the two fail differently: a small queue that
+#: nobody ever drains passes the count check forever, and is the shape
+#: unattended oversight actually rots into.
+REASON_SAMPLE_AGE = "reviewer_agent_sample_age_exceeded"
+
+#: AR-04: the only transaction isolation level at which
+#: `auto_decide_tier0_tier1`'s per-item suspension re-read can observe a
+#: suspension committed *after* the batch's transaction began, and therefore
+#: the only one at which the stop bound of one item per worker holds.
+#:
+#: PostgreSQL's REPEATABLE READ and SERIALIZABLE both serve every statement in
+#: a transaction from the snapshot taken at its first statement, so a plain
+#: re-read of `ReviewerAgentState` returns the pre-suspension row for the life
+#: of the batch however often it is repeated. That is a property of the
+#: isolation level, so it is enforced here rather than checked for.
+SUPPORTED_ISOLATION_LEVEL = "READ COMMITTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,24 +197,6 @@ def sampled_for_audit(review_id: UUID, sampling_rate: float) -> bool:
     effective = max(float(sampling_rate), _SAMPLING_FLOOR)
     bucket = int(hashlib.sha256(str(review_id).encode()).hexdigest()[:8], 16)
     return (bucket / _FINGERPRINT_BUCKETS) < effective
-
-
-def _payload_fingerprint(review: GovernanceReview) -> str:
-    """Identity of *what is being proposed*, not of the proposal row.
-
-    Two proposals of the same change to the same object share a
-    fingerprint, which is what makes "we rejected this before" answerable.
-    """
-    canonical = json.dumps(
-        {
-            "object_type": review.object_type,
-            "object_id": review.object_id,
-            "requested_action": review.requested_action,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 async def _negative_knowledge_hits(session: AsyncSession, review: GovernanceReview) -> int:
@@ -233,6 +255,10 @@ EVIDENCE_NO_RESOLVER = "no_evidence_resolver_for_object_type"
 EVIDENCE_SUBJECT_MISSING = "proposal_object_not_found"
 EVIDENCE_VALUE_MISSING = "proposal_carries_no_confidence"
 EVIDENCE_SIZE_UNRESOLVED = "bulk_change_count_unresolvable"
+EVIDENCE_MODEL_INFERRED = "model_inferred_proposal_needs_a_human"
+#: R11-MP19: a draft whose origin is missing or unrecognised. It may have been
+#: written by a model, so it is treated as though it were.
+EVIDENCE_ORIGIN_UNKNOWN = "draft_origin_not_recorded_needs_a_human"
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,25 +320,6 @@ def _by_object_id(model: Any, attribute: str) -> Any:
     return resolve
 
 
-def _by_review_link(model: Any, attribute: str) -> Any:
-    """A resolver for the reverse shape: the review was created before its
-    subject existed (`object_id == "pending"`), and the subject points back
-    through `governance_review_id`."""
-
-    async def resolve(session: AsyncSession, review: GovernanceReview) -> ProposalEvidence:
-        row = await session.scalar(
-            select(model).where(
-                model.governance_review_id == review.id,
-                model.organization_id == review.organization_id,
-            )
-        )
-        if row is None:
-            return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
-        return _confidence_evidence(row, model, attribute)
-
-    return resolve
-
-
 def _confidence_evidence(row: Any, model: Any, attribute: str) -> ProposalEvidence:
     value = _as_float(getattr(row, attribute, None))
     source = f"{model.__tablename__}.{attribute}"
@@ -353,6 +360,93 @@ async def _bulk_size_evidence(
     )
 
 
+async def _column_description_draft_evidence(
+    session: AsyncSession, review: GovernanceReview
+) -> ProposalEvidence:
+    """Evidence for a column draft -- unless a model wrote it.
+
+    An evidence draft's score measures catalog facts, so agreeing with it is at
+    least a check against something. A model draft's score is the model's
+    capped confidence in its own guess; an agent agreeing with that adds nothing
+    a person has not been asked to supply. So the agent abstains on every
+    MODEL_INFERRED draft, edited or not, whatever `reviewer_agent_approve_confidence`
+    says -- the cap already sits below the default, and this does not rely on it.
+    """
+    try:
+        subject_id = UUID(review.object_id)
+    except (ValueError, AttributeError, TypeError):
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    row = await session.scalar(
+        select(ColumnDescriptionDraft).where(
+            ColumnDescriptionDraft.id == subject_id,
+            ColumnDescriptionDraft.organization_id == review.organization_id,
+        )
+    )
+    if row is None:
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    origin = str((row.evidence or {}).get("origin") or "")
+    if origin.startswith(ORIGIN_MODEL_INFERRED):
+        return ProposalEvidence(
+            resolved=False,
+            reason=EVIDENCE_MODEL_INFERRED,
+            source="column_description_draft.evidence.origin",
+            details={"origin": origin},
+        )
+    # R11-MP19: fail closed. The abstention above used to rest on one optional
+    # dict key: a draft with no origin fell through to its score and could be
+    # approved. Only an origin this module recognises as metadata-derived (with
+    # or without human edits) reaches the score now; anything else -- absent,
+    # empty, or a value a future producer invents -- is a person's decision.
+    if not origin.startswith(ORIGIN_METADATA):
+        return ProposalEvidence(
+            resolved=False,
+            reason=EVIDENCE_ORIGIN_UNKNOWN,
+            source="column_description_draft.evidence.origin",
+            details={"origin": origin or None},
+        )
+    return _confidence_evidence(row, ColumnDescriptionDraft, "overall_score")
+
+
+#: `semantic_inference.enrich_with_optional_model` marks a proposal the model
+#: wrote with this engine type; the rules engine's are `RULES`.
+_MODEL_ENRICHMENT_ENGINE = "LLM_ASSISTED"
+
+
+async def _metadata_enrichment_evidence(
+    session: AsyncSession, review: GovernanceReview
+) -> ProposalEvidence:
+    """Evidence for an enrichment proposal -- unless a model inferred it.
+
+    The rule `_column_description_draft_evidence` applies to a model-written
+    column draft, for the same reason. On the rules path `confidence` is a fixed
+    function of the table's structure (0.82 with a primary key and a domain
+    keyword, else 0.66). On the model path it is what the model said about its
+    own answer, bounded to [0, 1] and checked by nothing: the false-approval
+    benchmark's model twin filed a customer table under Payments, claimed 0.95,
+    and was approved (AR-03).
+    """
+    try:
+        subject_id = UUID(review.object_id)
+    except (ValueError, AttributeError, TypeError):
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    row = await session.scalar(
+        select(MetadataEnrichmentProposal).where(
+            MetadataEnrichmentProposal.id == subject_id,
+            MetadataEnrichmentProposal.organization_id == review.organization_id,
+        )
+    )
+    if row is None:
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    if row.engine_type == _MODEL_ENRICHMENT_ENGINE:
+        return ProposalEvidence(
+            resolved=False,
+            reason=EVIDENCE_MODEL_INFERRED,
+            source="metadata_enrichment_proposal.engine_type",
+            details={"engine_type": row.engine_type},
+        )
+    return _confidence_evidence(row, MetadataEnrichmentProposal, "confidence")
+
+
 #: Object type -> the resolver that produces positive evidence for it.
 #:
 #: A type absent from this table is one the agent has no object-specific way
@@ -361,12 +455,48 @@ async def _bulk_size_evidence(
 #: `ASSET_DOCUMENTATION_VERSION` are deliberately absent: both are human
 #: steward assertions with no computed score, and an agent agreeing with a
 #: human's unscored assertion adds no independent check.
+#:
+#: `DOCUMENT_CLAIM` is absent for a related reason. Its `confidence` is the
+#: certainty of the structural *name match* -- 1.0 for any data-dictionary row
+#: whose table and column names matched -- which says the claim is about the
+#: right column and nothing about whether its description is true. Nothing in
+#: the platform scores that. Read as evidence, it approved every matched row of
+#: any uploaded dictionary, wrong descriptions included (AR-03).
+#:
+#: `GLOSSARY_LINK_PROPOSAL` is absent for the same reason. Its producer emits
+#: exactly two confidences -- 1.0 when an annotation's business name equals a
+#: term's display name, 0.92 for any other label pair -- and both clear the
+#: approve threshold, so the number cannot separate a right link from a wrong
+#: one: a staging table whose name stem is "revenue" links to the Revenue term
+#: at 1.0. `tests/test_ar03_false_approval_benchmark.py` measures both.
+#:
+#: **`ROUTINE_DESCRIPTION_DRAFT` (R11-FP08) is deliberately absent, so the agent
+#: abstains on every routine description.** This was a choice, not an omission,
+#: and it is the opposite of the choice made for `ASSET_DESCRIPTION_DRAFT`
+#: above, so it needs its reason stated. A table draft can rest on an *authored
+#: statement of meaning* -- a dbt description someone wrote, an approved business
+#: annotation a steward wrote -- and `score_routine_evidence` has no such signal
+#: to read. Its four dimensions are computed almost entirely from *presence*:
+#: a signature exists, parameters exist, the body's state is known, some
+#: person-approved lineage edges exist. Those separate a well-catalogued routine
+#: from a poorly-catalogued one; none of them is evidence that the prose about
+#: what the routine is *for* is true. The one authored signal a routine carries
+#: is `source_description`, which is the source system's own comment -- evidence,
+#: explicitly never authority (`MetadataObjectDescription`'s docstring), and the
+#: precise shape of misleading source text the AR-03 corpus already shows the
+#: control cannot see through for tables and columns. Adding a resolver here
+#: would therefore add a number that clears the 0.8 threshold on well-catalogued
+#: routines and says nothing about their descriptions: a third false-approval
+#: route, measurably no better than the two the benchmark already records.
+#: The abstention is also the cheaper thing to reverse: a resolver can be added
+#: the day there is a routine signal that measures truth, and
+#: `tests/test_ar03_false_approval_benchmark.py` carries a routine pair that
+#: demonstrates the abstention rather than asserting it in prose.
 _EVIDENCE_RESOLVERS: dict[str, Any] = {
     "ASSET_DESCRIPTION_DRAFT": _by_object_id(AssetDescriptionDraft, "overall_score"),
-    "METADATA_ENRICHMENT_PROPOSAL": _by_object_id(MetadataEnrichmentProposal, "confidence"),
-    "GLOSSARY_LINK_PROPOSAL": _by_object_id(GlossaryLinkProposal, "confidence"),
+    "COLUMN_DESCRIPTION_DRAFT": _column_description_draft_evidence,
+    "METADATA_ENRICHMENT_PROPOSAL": _metadata_enrichment_evidence,
     "QUERY_HISTORY_METRIC_CANDIDATE": _by_object_id(QueryHistoryMetricCandidate, "confidence"),
-    "DOCUMENT_CLAIM": _by_review_link(DocumentClaim, "confidence"),
     "BULK_STEWARDSHIP_OPERATION": _bulk_size_evidence,
     "MODEL_IMPORT_BATCH": _bulk_size_evidence,
 }
@@ -416,6 +546,35 @@ async def _authoritative_change_count(
     return None
 
 
+async def _reverses_operation_id(
+    session: AsyncSession, review: GovernanceReview
+) -> UUID | None:
+    """The applied change this review's bulk item undoes, if it undoes one.
+
+    A bulk operation's `reverses_operation_id` or, since R11-C8, a workbook
+    import's `reverses_batch_id`. Read from the row rather than from the
+    review's payload for the same reason `_authoritative_change_count` is
+    (AR-02): the tier must be recomputed from authoritative evidence at
+    decision time, and a flag that decides whether an agent may act on an item
+    is exactly the flag a caller must not be able to supply.
+    """
+    if review.object_type == "MODEL_IMPORT_BATCH":
+        return await session.scalar(
+            select(ModelImportBatch.reverses_batch_id).where(
+                ModelImportBatch.governance_review_id == review.id,
+                ModelImportBatch.organization_id == review.organization_id,
+            )
+        )
+    if review.object_type != "BULK_STEWARDSHIP_OPERATION":
+        return None
+    return await session.scalar(
+        select(BulkStewardshipOperation.reverses_operation_id).where(
+            BulkStewardshipOperation.governance_review_id == review.id,
+            BulkStewardshipOperation.organization_id == review.organization_id,
+        )
+    )
+
+
 async def _sized_risk_tier(
     session: AsyncSession, review: GovernanceReview, *, governance_threshold: int
 ) -> tuple[str, dict[str, Any]]:
@@ -432,15 +591,33 @@ async def _sized_risk_tier(
     count = await _authoritative_change_count(session, review)
     if count is None:
         return TIER_T2, {"size_evidence": EVIDENCE_SIZE_UNRESOLVED}
+    # AR-11: a bulk operation raised to undo an applied one is T2 whatever its
+    # size, so the flag has to reach `risk_tier_for` alongside the count --
+    # otherwise a three-table reversal tiers as T1 on size alone and lands
+    # back inside the agent's ceiling.
+    reverses = await _reverses_operation_id(session, review)
     tier = risk_tier_for(
         review.object_type,
-        {"item_count": count, "governance_threshold": governance_threshold},
+        {
+            "item_count": count,
+            "governance_threshold": governance_threshold,
+            # The one flag `risk_tier_for` reads, for both bulk types.
+            "reverses_operation_id": reverses,
+        },
     )
-    return tier, {
+    evidence: dict[str, Any] = {
         "size_evidence": EVIDENCE_OK,
         "change_count": count,
         "governance_threshold": governance_threshold,
     }
+    if reverses is not None:
+        key = (
+            "reverses_batch_id"
+            if review.object_type == "MODEL_IMPORT_BATCH"
+            else "reverses_operation_id"
+        )
+        evidence[key] = str(reverses)
+    return tier, evidence
 
 
 def _recommendation(
@@ -608,6 +785,46 @@ async def pre_review_pending(
     return outcomes
 
 
+def _correction_pending() -> Any:
+    """A reversal raised from this sample that nobody has decided yet (R11-C8).
+
+    A sample resolved as DISAGREED is not finished while its reversal waits:
+    the human said the agent was wrong, and the change they disputed still
+    stands until someone decides the correction. Correlated on the enclosing
+    `ReviewAuditSample`, so it can sit inside either counter's WHERE clause.
+    """
+    reversal = (
+        select(BulkStewardshipOperation.id)
+        .where(
+            BulkStewardshipOperation.review_audit_sample_id == ReviewAuditSample.id,
+            BulkStewardshipOperation.reverses_operation_id.is_not(None),
+            BulkStewardshipOperation.status == "REVIEW_REQUIRED",
+        )
+        .exists()
+    )
+    # The correction for a disputed enrichment proposal or description draft is
+    # a withdrawal of the version the agent's decision published.
+    withdrawal = (
+        select(DescriptionWithdrawal.id)
+        .where(
+            DescriptionWithdrawal.review_audit_sample_id == ReviewAuditSample.id,
+            DescriptionWithdrawal.status == "PENDING_REVIEW",
+        )
+        .exists()
+    )
+    # The correction for a disputed workbook import is a reversal batch.
+    import_reversal = (
+        select(ModelImportBatch.id)
+        .where(
+            ModelImportBatch.review_audit_sample_id == ReviewAuditSample.id,
+            ModelImportBatch.reverses_batch_id.is_not(None),
+            ModelImportBatch.status == "PENDING_REVIEW",
+        )
+        .exists()
+    )
+    return or_(reversal, withdrawal, import_reversal)
+
+
 async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID) -> int:
     """How many of this agent's decisions are sampled and still unread (AR-11).
 
@@ -617,21 +834,247 @@ async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID)
     while the agent kept deciding, and the safety case would degrade with no
     signal. This is the number that makes the degradation visible, and
     `auto_decide_tier0_tier1` refuses on it.
+
+    R11-C8: a disputed sample whose reversal is still undecided counts too.
+    Until 2026-09-13 a correction nobody ever decided read as resolved, so the
+    original change could stand indefinitely behind a sample marked done.
     """
     count = await session.scalar(
         select(func.count())
         .select_from(ReviewAuditSample)
         .where(
             ReviewAuditSample.organization_id == organization_id,
-            ReviewAuditSample.human_outcome == "PENDING",
+            or_(ReviewAuditSample.human_outcome == "PENDING", _correction_pending()),
         )
     )
     return int(count or 0)
 
 
+async def oldest_unresolved_sample_age_hours(
+    session: AsyncSession, organization_id: UUID, *, now: datetime
+) -> float | None:
+    """How long the longest-unread sample has been waiting, or `None` (AR-11).
+
+    The companion to `unresolved_audit_samples`, and not derivable from it:
+    the count answers "how much is outstanding", this answers "for how long",
+    and only the second one notices a small queue that never drains. Forty-nine
+    samples untouched since February sit inside the default count bound
+    indefinitely while ADR-0027 condition (b)'s claim that humans read the
+    sample has been false for months.
+
+    `reviewer_agent_metrics` already reports this number as
+    `oldest_pending_hours`; this is the same quantity asked as a precondition
+    rather than a statistic. Computed in Python from `min(sampled_at)` rather
+    than as a SQL interval because SQLite and PostgreSQL disagree about
+    date arithmetic, and because the stored value comes back naive on SQLite
+    -- the same `.replace(tzinfo=UTC)` normalisation the metrics module does.
+    """
+    oldest_unread = await session.scalar(
+        select(func.min(ReviewAuditSample.sampled_at)).where(
+            ReviewAuditSample.organization_id == organization_id,
+            ReviewAuditSample.human_outcome == "PENDING",
+        )
+    )
+    # R11-C8: a waiting correction is measured from when it was filed -- the
+    # human read the sample then, and the clock since is the correction's.
+    oldest_correction = await session.scalar(
+        select(func.min(BulkStewardshipOperation.created_at)).where(
+            BulkStewardshipOperation.organization_id == organization_id,
+            BulkStewardshipOperation.review_audit_sample_id.is_not(None),
+            BulkStewardshipOperation.reverses_operation_id.is_not(None),
+            BulkStewardshipOperation.status == "REVIEW_REQUIRED",
+        )
+    )
+    oldest_withdrawal = await session.scalar(
+        select(func.min(DescriptionWithdrawal.created_at)).where(
+            DescriptionWithdrawal.organization_id == organization_id,
+            DescriptionWithdrawal.review_audit_sample_id.is_not(None),
+            DescriptionWithdrawal.status == "PENDING_REVIEW",
+        )
+    )
+    oldest_import_reversal = await session.scalar(
+        select(func.min(ModelImportBatch.created_at)).where(
+            ModelImportBatch.organization_id == organization_id,
+            ModelImportBatch.review_audit_sample_id.is_not(None),
+            ModelImportBatch.reverses_batch_id.is_not(None),
+            ModelImportBatch.status == "PENDING_REVIEW",
+        )
+    )
+    waiting = [
+        value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        for value in (
+            oldest_unread,
+            oldest_correction,
+            oldest_withdrawal,
+            oldest_import_reversal,
+        )
+        if value is not None
+    ]
+    if not waiting:
+        return None
+    return round((now - min(waiting)).total_seconds() / 3600, 2)
+
+
+def record_audit_backlog_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    context: SecurityContext,
+    unresolved: int,
+    limit: int,
+) -> None:
+    """Make the backlog refusal an event, not only a 409 (AR-11).
+
+    `auto_decide_tier0_tier1` raises before it writes anything and its caller
+    rolls back, so the agent stopping for want of human attention used to
+    leave no trace but a response code. The caller records it after the
+    rollback: an audit row naming who asked, and an outbox event that a
+    notification or a dashboard can act on.
+    """
+    details = {"unresolved_samples": unresolved, "max_unresolved_samples": limit}
+    _record_oversight_denial(
+        session, organization_id, context=context, reason=REASON_AUDIT_BACKLOG, details=details
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="reviewer_agent_state",
+        aggregate_id=str(organization_id),
+        event_type="reviewer_agent.audit_backlog_exceeded.v1",
+        payload=details,
+    )
+
+
+async def transaction_isolation_level(session: AsyncSession) -> str | None:
+    """This transaction's isolation level, upper-cased, or `None` off PostgreSQL.
+
+    `SHOW transaction_isolation` reports the level actually in force for the
+    current transaction, which is what matters: the level can come from the
+    engine, from the connection, or from a `SET TRANSACTION` the caller issued,
+    and reading configuration back would only re-state what was asked for
+    rather than what was granted.
+
+    Returns `None` on any other dialect. The question is about PostgreSQL's
+    MVCC snapshots; SQLite, where the rest of the suite runs, has no
+    equivalent and serialises writers outright.
+    """
+    connection = await session.connection()
+    if connection.dialect.name != "postgresql":
+        return None
+    level = await session.scalar(text("SHOW transaction_isolation"))
+    return str(level).strip().upper() if level is not None else None
+
+
+async def refuse_unsupported_isolation(session: AsyncSession) -> None:
+    """AR-04: enforce the isolation level the stop bound depends on.
+
+    The per-item suspension re-read in `auto_decide_tier0_tier1` bounds the
+    stop at one item per worker *only* at READ COMMITTED, where a statement
+    sees rows committed since the transaction began. Under REPEATABLE READ or
+    SERIALIZABLE the re-read is served from the batch's own snapshot, the
+    suspension stays invisible for the life of the transaction, and the batch
+    runs to its `limit` -- the kill switch does not bind.
+
+    Until 2026-09-12 that was a comment in Guard 0 saying the code should be
+    run at READ COMMITTED. Nothing checked, so a deployment that set a
+    stricter default -- the direction an operator reaches for when they want
+    *more* safety -- silently bought an unbounded agent. The precondition is
+    now a refusal: the agent declines to run rather than run without its stop
+    bound, with a named reason code the API surfaces as a 409.
+
+    Why enforcement rather than making the bound hold at REPEATABLE READ:
+    no check *inside* the batch's transaction can defeat its snapshot. The
+    two mechanisms that could are both worse than refusing. Re-reading the
+    state on a separate connection turns one batch transaction into 1+N, and
+    the agent is handed a session rather than an engine. A locking re-read
+    (`SELECT ... FOR SHARE`/`FOR UPDATE`) makes every worker hold a lock on
+    the state row that the suspending `UPDATE` must then wait for -- the kill
+    switch would queue behind the batches it exists to stop, and with a
+    `lock_timeout` set it would fail outright. A kill switch delayed by its
+    own target is the wrong trade.
+    """
+    level = await transaction_isolation_level(session)
+    if level is None or level == SUPPORTED_ISOLATION_LEVEL:
+        return
+    _log.error(
+        "reviewer_agent_unsupported_isolation",
+        reason=REASON_UNSUPPORTED_ISOLATION,
+        isolation_level=level,
+        supported_isolation_level=SUPPORTED_ISOLATION_LEVEL,
+    )
+    raise ReviewerAgentUnavailable(REASON_UNSUPPORTED_ISOLATION)
+def record_sample_age_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    context: SecurityContext,
+    oldest_hours: float,
+    limit_hours: int,
+) -> None:
+    """The age half of the same refusal (AR-11).
+
+    Deliberately a *different* outbox event from the count bound rather than
+    the same event carrying a reason field. A consumer's correct response
+    differs: a count breach says samples arrive faster than they are read and
+    wants more reviewers on the queue, an age breach says one item has been
+    skipped and wants someone to open that item. Collapsing them would make
+    the two indistinguishable to exactly the dashboard that has to tell them
+    apart.
+    """
+    details = {"oldest_pending_hours": oldest_hours, "max_sample_age_hours": limit_hours}
+    _record_oversight_denial(
+        session, organization_id, context=context, reason=REASON_SAMPLE_AGE, details=details
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="reviewer_agent_state",
+        aggregate_id=str(organization_id),
+        event_type="reviewer_agent.sample_age_exceeded.v1",
+        payload=details,
+    )
+
+
+def _record_oversight_denial(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    context: SecurityContext,
+    reason: str,
+    details: dict[str, Any],
+) -> None:
+    """The DENIED audit row shared by both oversight bounds.
+
+    One funnel deliberately: both refusals are the same governance fact --
+    the agent's licence to decide lapsed because condition (b)'s oversight
+    stopped happening -- so an auditor reconstructing why the agent went
+    quiet finds them under one `action` and one `resource_type`, with
+    `details["reason"]` naming which bound tripped.
+
+    The *outbox* call stays at each caller with its event name written as a
+    literal, rather than being folded in here too. `tests/
+    test_event_catalog_gate.py` resolves `event_type=` statically, and an
+    event handed in as a parameter is invisible to it -- the catalog row
+    would stop being checked against a real emitter, which is the one thing
+    that gate exists to prevent.
+    """
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action="reviewer_agent.run",
+        resource_type="reviewer_agent_state",
+        resource_id=str(organization_id),
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={"reason": reason, **details},
+    )
+
+
 async def organization_suspended(session: AsyncSession, organization_id: UUID) -> bool:
     state = await session.scalar(
-        select(ReviewerAgentState).where(ReviewerAgentState.organization_id == organization_id)
+        select(ReviewerAgentState)
+        .where(ReviewerAgentState.organization_id == organization_id)
+        .execution_options(populate_existing=True)
     )
     return bool(state and state.suspended)
 
@@ -706,6 +1149,12 @@ async def auto_decide_tier0_tier1(
         raise ReviewerAgentUnavailable(REASON_DISABLED)
     if settings.reviewer_agent_suspended or await organization_suspended(session, organization_id):
         raise ReviewerAgentUnavailable(REASON_SUSPENDED)
+    # AR-04: refuse to run at all at an isolation level where Guard 0 below
+    # cannot see the kill switch being thrown. Checked after the suspension
+    # checks so an agent that is *already* suspended reports that, which is
+    # the more useful answer and is correct at every isolation level -- the
+    # snapshot a transaction opens with already contains an earlier commit.
+    await refuse_unsupported_isolation(session)
     # AR-11: the agent's licence to decide is contingent on humans keeping up
     # with the sample of what it already decided. A backlog past the configured
     # bound stops new decisions rather than adding to it -- the alternative is
@@ -715,6 +1164,19 @@ async def auto_decide_tier0_tier1(
         raise ReviewerAgentUnavailable(REASON_AUDIT_BACKLOG)
 
     moment = now or datetime.now(UTC)
+    # AR-11: and the sample must be read *in time*. The count bound above is
+    # necessary but not sufficient -- a queue that stays just under it while
+    # nobody opens the oldest item passes it forever, which is the shape
+    # unattended oversight actually decays into. Checked after `moment` is
+    # fixed so the age is measured against the same clock the run uses.
+    age_limit = settings.reviewer_agent_max_sample_age_hours
+    if age_limit:
+        oldest_hours = await oldest_unresolved_sample_age_hours(
+            session, organization_id, now=moment
+        )
+        if oldest_hours is not None and oldest_hours >= age_limit:
+            raise ReviewerAgentUnavailable(REASON_SAMPLE_AGE)
+
     # AR-01: the configured value is clamped before anything derives from it,
     # so a T2/T3 ceiling narrows nothing and widens nothing.
     ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)
@@ -740,13 +1202,22 @@ async def auto_decide_tier0_tier1(
     outcomes: list[AutoDecisionOutcome] = []
     for review in rows:
         # Guard 0 (AR-04): a suspension raised while this batch is running
-        # stops the batch it was raised during, not merely the next one. Bound
-        # on the stop: one item, and only under an isolation level where a
-        # statement sees rows committed since the transaction began -- READ
-        # COMMITTED, which is this platform's default. Under REPEATABLE READ
-        # the re-read returns the snapshot and the batch runs to its limit;
-        # that is a property of the isolation level, not something a check
-        # here can defeat.
+        # stops the batch it was raised during, not merely the next one.
+        #
+        # Bound on the stop: one item per worker, and therefore N items for N
+        # workers drawing on one organization's queue -- each worker can be
+        # inside `decide_review` when the suspension commits, and none can
+        # begin a second item after it. The bound is per worker because
+        # workers share no transaction; it does not degrade with queue depth
+        # or with how many of them lose the claim race for a given row.
+        #
+        # It holds because the re-read below sees rows committed since this
+        # transaction began, which is true at READ COMMITTED and false at
+        # REPEATABLE READ and SERIALIZABLE. That is a property of the
+        # isolation level rather than of this check, so it is a precondition
+        # enforced at entry (`refuse_unsupported_isolation`) rather than a
+        # hope recorded here. Measured on real PostgreSQL, at both levels, by
+        # `tests/test_reviewer_agent_postgres_suspension.py`.
         if await organization_suspended(session, organization_id):
             raise ReviewerAgentUnavailable(REASON_SUSPENDED)
         # Guard 1 (AR-04): stale evidence is not evidence. An item pre-reviewed
@@ -776,11 +1247,28 @@ async def auto_decide_tier0_tier1(
         # clamped ceiling, so an object type classified T2/T3 is refused
         # whatever configuration claimed.
         if review.object_type not in allowlist or not tier_at_or_below(tier, ceiling):
+            # Named, not silent: an operator asking why the agent passed over an
+            # item gets the same vocabulary the refusal paths above raise, rather
+            # than an absence they have to reconstruct from the tier table.
+            _log.info(
+                "reviewer_agent_item_skipped",
+                reason=REASON_TIER_EXCEEDED,
+                review_id=str(review.id),
+                object_type=review.object_type,
+                risk_tier=tier,
+                ceiling=ceiling,
+            )
             continue
         # Guard 4: never decide our own proposal. The shared decision path
         # enforces this too; re-checking here means a misconfigured
         # principal fails as a skip rather than as a 409 mid-batch.
         if review.requested_by == agent_principal:
+            _log.info(
+                "reviewer_agent_item_skipped",
+                reason=REASON_SELF_PROPOSED,
+                review_id=str(review.id),
+                object_type=review.object_type,
+            )
             continue
 
         # The *verdict* ("APPROVE"/"REJECT") is what the decision service
@@ -816,22 +1304,16 @@ async def auto_decide_tier0_tier1(
             # did not pass). Same treatment: this item's writes are rolled
             # back with its savepoint and the batch continues.
             continue
+        # The audit sample is written by `agent_decision_oversight`, inside
+        # `decide_review`, so that an externally-supplied agent is sampled too
+        # and not only this loop. Recomputed rather than returned because
+        # `sampled_for_audit` is pure and deterministic on the review id: the
+        # two answers agree by construction, and the alternative -- a second
+        # `ReviewAuditSample` row -- collides on
+        # `uq_review_audit_sample_review`.
         is_sampled = decision == "APPROVED" and sampled_for_audit(
             review.id, settings.reviewer_agent_sampling_rate
         )
-        if is_sampled:
-            session.add(
-                ReviewAuditSample(
-                    organization_id=organization_id,
-                    governance_review_id=review.id,
-                    agent_principal_id=agent_principal,
-                    object_type=review.object_type,
-                    risk_tier=tier,
-                    decision=decision,
-                    sampled_at=moment,
-                    human_outcome="PENDING",
-                )
-            )
         record_decision_audit(
             session,
             review,
@@ -928,3 +1410,104 @@ class ReviewerAgentUnavailable(RuntimeError):
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+
+
+async def agent_decision_oversight(
+    session: AsyncSession,
+    *,
+    review: GovernanceReview,
+    decision: str,
+    context: SecurityContext,
+) -> AgentOversightOutcome:
+    """ADR-0027 for **every** non-human decider, not only this module's loop.
+
+    `auto_decide_tier0_tier1` applies this regime before it decides anything,
+    and for a long time that was the only place it was applied. An
+    externally-supplied agent identity holding the `Reviewer` role reached the
+    decision endpoints directly and passed only the two checks
+    `check_decision_permitted` makes -- organization and maker != checker. It
+    got no tier ceiling, no audit sample, and an operator's suspension did not
+    stop it. That last one is the serious half: suspension is the control an
+    operator reaches for when something is going wrong, and it was believed to
+    have stopped automated review when it had stopped one implementation of
+    it.
+
+    Registered into `governance_decision_service` so it runs at the single
+    point every decision passes through, rather than on each surface that can
+    decide. The four holes R11-C6 found were all one surface that had been
+    missed; a control placed per-surface is a control with a list of surfaces
+    to keep up to date, and that list is what went stale.
+
+    The checks are the loop's own, in the loop's own order, minus the two that
+    are meaningless for a caller that is not a batch: the `enabled` flag,
+    because a *third-party* agent's licence does not come from the flag that
+    runs the platform's own sweep, and the isolation-level refusal, which
+    guards a read-modify-write this single decision does not perform.
+
+    On a pass it returns the audit sample, because sampling is part of the
+    regime rather than a separate concern, and this is now the one place every
+    agent decision goes through. It *returns* rather than writes it: the row
+    may only be inserted once the claim is won, or every loser of a contended
+    race inserts it too and dies on `uq_review_audit_sample_review` (see
+    `AgentOversightOutcome`). `auto_decide_tier0_tier1` therefore no longer
+    adds its own row and recomputes the same answer from `sampled_for_audit`,
+    which is pure and deterministic on the review id, so the two agree by
+    construction rather than by coordination.
+    """
+    settings = get_settings()
+    organization_id = review.organization_id
+    if settings.reviewer_agent_suspended or await organization_suspended(
+        session, organization_id
+    ):
+        return AgentOversightOutcome(reason=REASON_SUSPENDED)
+
+    backlog_limit = settings.reviewer_agent_max_unresolved_samples
+    if backlog_limit and await unresolved_audit_samples(session, organization_id) >= backlog_limit:
+        return AgentOversightOutcome(reason=REASON_AUDIT_BACKLOG)
+
+    moment = datetime.now(UTC)
+    age_limit = settings.reviewer_agent_max_sample_age_hours
+    if age_limit:
+        oldest_hours = await oldest_unresolved_sample_age_hours(
+            session, organization_id, now=moment
+        )
+        if oldest_hours is not None and oldest_hours >= age_limit:
+            return AgentOversightOutcome(reason=REASON_SAMPLE_AGE)
+
+    ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)
+    tier = risk_tier_for(review.object_type)
+    if review.object_type not in agent_decidable_object_types(ceiling) or not tier_at_or_below(
+        tier, ceiling
+    ):
+        return AgentOversightOutcome(reason=REASON_TIER_EXCEEDED)
+
+    # Only an approval is sampled -- ADR-0027 condition (b) is about what the
+    # agent let through. An unnormalizable verdict is *not* refused here: this
+    # regime is about the decider, and `claim_review` downstream already
+    # rejects an unsupported verdict with the right reason. Answering for it
+    # would report a supervision failure for what is a malformed request.
+    try:
+        verdict = normalize_verdict(decision)
+    except ValueError:
+        return AgentOversightOutcome()
+    if verdict != "APPROVE" or not sampled_for_audit(
+        review.id, settings.reviewer_agent_sampling_rate
+    ):
+        return AgentOversightOutcome()
+    return AgentOversightOutcome(
+        sample=ReviewAuditSample(
+            organization_id=organization_id,
+            governance_review_id=review.id,
+            agent_principal_id=context.principal_id,
+            object_type=review.object_type,
+            risk_tier=tier,
+            # The sample ledger stores the terminal form, which is what its
+            # own CHECK constraint allows.
+            decision=TERMINAL_STATUS[verdict],
+            sampled_at=moment,
+            human_outcome="PENDING",
+        )
+    )
+
+
+register_agent_decision_guard(agent_decision_oversight)

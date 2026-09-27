@@ -1,4 +1,5 @@
-FROM python:3.13-slim AS runtime
+# R11-MP20: pinned by digest; Dependabot proposes the next one.
+FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -38,6 +39,15 @@ COPY sdk ./sdk
 # contract ci.yml's env block documents for every CI job. --no-dev: the runtime
 # image excludes lint/test/dev-only extras.
 RUN uv sync --frozen --no-dev
+
+# R11-D17: the commit this image was built from, published by /health/ready as
+# `build.commit`. It is a label for people, not what parity compares: the image is built
+# from the working tree, so it can hold uncommitted changes. The parity check compares
+# `build.source_digest` (src/aida/source_identity.py, a hash of the files the COPY lines
+# above ship) and uses this only to say how far behind a drifted image is. Declared after
+# `uv sync` so a new commit does not rebuild the dependency layer.
+ARG ATLAS_BUILD_COMMIT=unknown
+ENV ATLAS_BUILD_COMMIT=${ATLAS_BUILD_COMMIT}
 
 USER aida
 EXPOSE 8000

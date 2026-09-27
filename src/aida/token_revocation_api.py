@@ -24,9 +24,9 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit
 from aida.models import RevokedToken
-from aida.oidc import OidcVerificationError, OidcVerifier, context_from_claims, token_identifier
+from aida.oidc import OidcVerificationError, context_from_claims, token_identifier
 from aida.schemas import ApiModel
-from aida.security import SecurityContext, get_security_context
+from aida.security import SecurityContext, get_security_context, shared_oidc_verifier
 
 router = APIRouter(prefix="/v1", tags=["identity"])
 
@@ -65,7 +65,13 @@ async def revoke_token(
             detail="token revocation requires the OIDC identity provider",
         )
     try:
-        claims = await OidcVerifier(settings).verify(body.token)
+        # The process's shared verifier, the one `get_security_context` authenticated this very
+        # request with (R11-AUD10). This used to build a new `OidcVerifier` per call: an empty key
+        # cache, so a JWKS fetch on every revocation, and no memory of the unknown-`kid` cooldown
+        # or of a provider that is down, so none of the limits that protect the provider applied
+        # here. The route is authenticated, so that was never an unauthenticated amplifier, but a
+        # fetch per call is a fetch per call.
+        claims = await shared_oidc_verifier(settings).verify(body.token)
         target = context_from_claims(claims, settings)
     except OidcVerificationError as exc:
         raise HTTPException(

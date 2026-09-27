@@ -59,6 +59,7 @@ from aida.projection_metrics import (
     PROJECTION_TENANT_YIELDS,
 )
 from aida.unified_lineage_api import build_unified_lineage_graph_payload
+from aida.worker_metrics import serve_worker_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -661,6 +662,13 @@ async def drain_fairly(driver: AsyncDriver, queue: TenantFairQueue) -> int:
 async def run_projector() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
+    # R11-FP17: every `aida_graph_projection_*` series is published into *this*
+    # process's registry, which `aida.main`'s `/metrics` cannot see. Started
+    # before the Neo4j and Kafka connections below on purpose: a projector that
+    # cannot reach its broker is exactly when an operator wants the lag and
+    # backlog gauges, and those two awaits can block for a long time. A no-op
+    # unless `worker_metrics_port` is set -- see `aida.worker_metrics`.
+    serve_worker_metrics(settings, process="graph-projector")
     state = ProjectorState()
     budget = TenantBudget.from_env()
     queue = TenantFairQueue(budget=budget)

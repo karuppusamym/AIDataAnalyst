@@ -14,6 +14,7 @@ from aida.connector_health import (
 )
 from aida.models import AgentRun, AnalysisRun, DataSource, Organization, ScanPolicy
 from aida.tool_first_rate import DEFAULT_WINDOW_DAYS, ToolFirstRate, compute_tool_first_rate
+from aida.usage_quotas import QuotaRefused, UsageDimension, consume_quota
 
 ACTIVE_ANALYSIS_STATUSES = frozenset({"QUEUED", "RUNNING", "PROFILING", "CANCELLATION_REQUESTED"})
 
@@ -37,10 +38,18 @@ async def reserve_analysis_run(
     priority: int = 50,
     resumed_from_run_id: UUID | None = None,
 ) -> AnalysisRun:
-    """Atomically enforce organization/source quotas and reserve a workflow run.
+    """Atomically enforce admission concurrency and daily quotas, then reserve a run.
 
     Organization and datasource rows are locked in a stable order so separate API and
     scheduler replicas cannot collectively over-admit work.
+
+    Two different limits, and the distinction was worth making explicit (R11-FP17):
+    `max_active_runs_per_organization` and `max_active_runs_per_datasource` are
+    *concurrency* -- how much may be in flight at once, enforced by counting active
+    runs under the locks taken above. The `analysis_run_daily_quota_per_*` settings
+    are *quotas* -- how much may be consumed in a UTC day, enforced through
+    `aida.usage_quotas`' accumulated windows. This function previously had only the
+    first, with the per-source figure a hard-coded `1`.
     """
     datasource_snapshot = await session.get(DataSource, datasource_id)
     if datasource_snapshot is None:
@@ -79,8 +88,40 @@ async def reserve_analysis_run(
             AnalysisRun.status.in_(ACTIVE_ANALYSIS_STATUSES),
         )
     )
-    if (datasource_active or 0) >= 1:
+    if (datasource_active or 0) >= settings.max_active_runs_per_datasource:
         raise RunAdmissionRejected("datasource already has an active analysis run")
+
+    # R11-FP17: the two checks above are *concurrency*, which is all this
+    # function had. They bound how much work is in flight and say nothing about
+    # how much work a tenant or a source may consume in a day -- a source
+    # admitted one run at a time, a thousand times, is a thousand runs. The
+    # daily quota is the missing half, and it is enforced through
+    # `aida.usage_quotas` so there is one accounting mechanism in the platform
+    # rather than two: the same conditional-UPDATE-carrying-its-own-cap shape
+    # `aida.agent_budget` already uses for an agent contract's token cap.
+    #
+    # With no quota declared (the shipped default) this issues no statement at
+    # all, so admission is byte-for-byte what it was.
+    try:
+        await consume_quota(
+            session,
+            settings,
+            datasource_id=datasource.id,
+            organization_id=datasource.organization_id,
+            dimension=UsageDimension.ANALYSIS_RUNS,
+            amount=1,
+        )
+    except QuotaRefused as refused:
+        # Translated into this module's own rejection type rather than allowed
+        # to escape: every caller of `reserve_analysis_run` already handles
+        # `RunAdmissionRejected`, and a second exception type from the same
+        # call would be an unhandled 500 on the two API paths and an unlogged
+        # crash in the scheduler loop. The reason code survives the
+        # translation, so the refusal is still attributable to which window
+        # refused.
+        raise RunAdmissionRejected(
+            f"analysis-run quota is exhausted ({refused.reason_code})"
+        ) from refused
 
     run_id = uuid4()
     run = AnalysisRun(

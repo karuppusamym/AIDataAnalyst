@@ -16,18 +16,15 @@ Two layers, tested separately:
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import aida.policy_native_sync_api as api_module
-from aida.config import Settings
 from aida.db import Base
 from aida.models import (
     AuditEvent,
@@ -39,22 +36,18 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     Organization,
-    PolicyNativeSyncRequest,
     Project,
 )
 from aida.policy_engine import PolicyRecord
 from aida.policy_native_sync import (
     NativeColumnPolicy,
     NativeRowPolicy,
-    NativeSyncPlan,
     PolicyNativeSyncError,
-    apply_native_sync_plan,
     build_native_sync_plan,
     postgres_row_policy_statements,
     resolve_native_table_policies,
     sqlserver_column_mask_statements,
 )
-from aida.schemas import Page
 from aida.security import SecurityContext
 
 # No module-level `pytestmark = pytest.mark.asyncio`: `asyncio_mode = "auto"`
@@ -504,202 +497,7 @@ def test_build_plan_empty_when_no_obligations_apply() -> None:
 
 
 # ---------------------------------------------------------------------------
-# apply_native_sync_plan -- against an injected fake connection (never a real DB)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _FakeTransaction:
-    entered: bool = False
-
-    async def __aenter__(self) -> _FakeTransaction:
-        self.entered = True
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        return None
-
-
-@dataclass
-class _FakePostgresConnection:
-    executed: list[str] = field(default_factory=list)
-    closed: bool = False
-
-    async def execute(self, sql: str) -> str:
-        self.executed.append(sql)
-        return "OK"
-
-    async def close(self) -> None:
-        self.closed = True
-
-    def transaction(self) -> _FakeTransaction:
-        return _FakeTransaction()
-
-
-async def test_apply_postgres_executes_every_statement_in_order_and_closes() -> None:
-    connection = _FakePostgresConnection()
-
-    async def fake_connect(dsn: str, *, timeout_seconds: float) -> _FakePostgresConnection:
-        assert dsn == "postgres://u:p@host/db"
-        return connection
-
-    plan = NativeSyncPlan(
-        datasource_id=uuid4(),
-        connector_type="postgres",
-        schema_name="public",
-        table_name="t",
-        row_policies=(),
-        column_policies=(),
-        statements=(
-            postgres_row_policy_statements(
-                NativeRowPolicy(
-                    schema_name="public",
-                    table_name="t",
-                    policy_code="p",
-                    policy_version=1,
-                    row_filter="1=1",
-                )
-            )
-        ),
-    )
-    await apply_native_sync_plan(
-        plan, dsn="postgres://u:p@host/db", postgres_connect=fake_connect
-    )
-    assert connection.executed == [s.sql for s in plan.statements]
-    assert connection.closed is True
-
-
-async def test_apply_is_a_noop_for_an_empty_plan() -> None:
-    calls = []
-
-    async def fake_connect(dsn: str, *, timeout_seconds: float) -> _FakePostgresConnection:
-        calls.append(dsn)
-        return _FakePostgresConnection()
-
-    plan = NativeSyncPlan(
-        datasource_id=uuid4(),
-        connector_type="postgres",
-        schema_name="public",
-        table_name="t",
-        row_policies=(),
-        column_policies=(),
-        statements=(),
-    )
-    await apply_native_sync_plan(plan, dsn="postgres://u:p@host/db", postgres_connect=fake_connect)
-    assert calls == []
-
-
-async def test_apply_sqlserver_executes_every_statement_and_commits() -> None:
-    executed: list[str] = []
-    committed = {"value": False}
-    closed = {"value": False}
-
-    class _FakeCursor:
-        def execute(self, sql: str) -> None:
-            executed.append(sql)
-
-        def close(self) -> None:
-            pass
-
-    class _FakeSqlServerConnection:
-        def cursor(self) -> _FakeCursor:
-            return _FakeCursor()
-
-        def commit(self) -> None:
-            committed["value"] = True
-
-        def rollback(self) -> None:  # pragma: no cover - not exercised on success
-            pass
-
-        def close(self) -> None:
-            closed["value"] = True
-
-    def fake_connect(params: Any, *, timeout_seconds: float) -> _FakeSqlServerConnection:
-        assert params.host == "host"
-        assert params.database == "db"
-        return _FakeSqlServerConnection()
-
-    plan = NativeSyncPlan(
-        datasource_id=uuid4(),
-        connector_type="sqlserver",
-        schema_name="dbo",
-        table_name="t",
-        row_policies=(),
-        column_policies=(),
-        statements=sqlserver_column_mask_statements(
-            NativeColumnPolicy(
-                schema_name="dbo",
-                table_name="t",
-                column_name="ssn",
-                classification="PII",
-                policy_code="p",
-                policy_version=1,
-                masking_profile="DEFAULT",
-            )
-        ),
-    )
-    await apply_native_sync_plan(
-        plan, dsn="mssql://u:p@host:1433/db", sqlserver_connect=fake_connect
-    )
-    assert executed == [s.sql for s in plan.statements]
-    assert committed["value"] is True
-    assert closed["value"] is True
-
-
-async def test_apply_sqlserver_rolls_back_and_propagates_on_failure() -> None:
-    rolled_back = {"value": False}
-
-    class _FailingCursor:
-        def execute(self, sql: str) -> None:
-            raise RuntimeError("boom")
-
-        def close(self) -> None:
-            pass
-
-    class _FakeSqlServerConnection:
-        def cursor(self) -> _FailingCursor:
-            return _FailingCursor()
-
-        def commit(self) -> None:  # pragma: no cover - not reached on failure
-            pass
-
-        def rollback(self) -> None:
-            rolled_back["value"] = True
-
-        def close(self) -> None:
-            pass
-
-    def fake_connect(params: Any, *, timeout_seconds: float) -> _FakeSqlServerConnection:
-        return _FakeSqlServerConnection()
-
-    plan = NativeSyncPlan(
-        datasource_id=uuid4(),
-        connector_type="sqlserver",
-        schema_name="dbo",
-        table_name="t",
-        row_policies=(),
-        column_policies=(),
-        statements=sqlserver_column_mask_statements(
-            NativeColumnPolicy(
-                schema_name="dbo",
-                table_name="t",
-                column_name="ssn",
-                classification="PII",
-                policy_code="p",
-                policy_version=1,
-                masking_profile="DEFAULT",
-            )
-        ),
-    )
-    with pytest.raises(RuntimeError, match="boom"):
-        await apply_native_sync_plan(
-            plan, dsn="mssql://u:p@host:1433/db", sqlserver_connect=fake_connect
-        )
-    assert rolled_back["value"] is True
-
-
-# ---------------------------------------------------------------------------
-# HTTP surface -- maker-checker, audit evidence
+# HTTP surface -- preview only (D1 removed the request/decision/apply trio)
 # ---------------------------------------------------------------------------
 
 _audit_event_ids = itertools.count(1)
@@ -805,223 +603,3 @@ async def test_preview_returns_a_plan_without_persisting_a_request(session, monk
     )
     assert plan.row_policy_count == 1
     assert any(s.kind == "CREATE_ROW_POLICY" for s in plan.statements)
-    remaining = (await session.execute(PolicyNativeSyncRequest.__table__.select())).all()
-    assert remaining == []
-
-
-async def test_request_endpoint_rejects_a_table_with_no_obligations(session, monkeypatch) -> None:
-    org = Organization(id=uuid4(), name="Bank", slug=f"bank-{uuid4().hex[:8]}")
-    lob = LineOfBusiness(
-        id=uuid4(), organization_id=org.id, name="Retail", code=f"RTL{uuid4().hex[:6]}"
-    )
-    domain = DataDomain(
-        id=uuid4(), organization_id=org.id, line_of_business_id=lob.id,
-        name="Ungoverned", code=f"UNG{uuid4().hex[:6]}",
-    )
-    project = Project(
-        id=uuid4(), organization_id=org.id, line_of_business_id=lob.id,
-        data_domain_id=domain.id, name="Warehouse", slug=f"wh-{uuid4().hex[:8]}",
-    )
-    monkeypatch.setenv("QG2_TEST_DSN_EMPTY", "postgres://u:p@host/db")
-    datasource = DataSource(
-        id=uuid4(), organization_id=org.id, line_of_business_id=lob.id,
-        data_domain_id=domain.id, project_id=project.id, name="primary",
-        connector_type="postgres", dialect="postgres", environment="PROD",
-        network_zone="default", credential_reference="env://QG2_TEST_DSN_EMPTY",
-        capabilities={}, status="ACTIVE",
-    )
-    catalog = MetadataCatalog(
-        id=uuid4(), organization_id=org.id, datasource_id=datasource.id,
-        name="db", fingerprint="f",
-    )
-    schema = MetadataSchema(
-        id=uuid4(), organization_id=org.id, catalog_id=catalog.id, name="public", fingerprint="f",
-    )
-    table = MetadataTable(
-        id=uuid4(), organization_id=org.id, datasource_id=datasource.id, schema_id=schema.id,
-        name="orders", object_type="TABLE", fingerprint="f",
-    )
-    session.add_all([org, lob, domain, project, datasource, catalog, schema, table])
-    await session.commit()
-
-    with pytest.raises(HTTPException) as excinfo:
-        await api_module.request_native_policy_sync(
-            datasource.id,
-            api_module.PolicyNativeSyncRequestCreate(
-                schema_name="public", table_name="orders", reason="testing"
-            ),
-            context=_context(datasource.organization_id),
-            session=session,
-        )
-    assert excinfo.value.status_code == 422
-
-
-async def test_request_then_decide_maker_checker_and_apply(session, monkeypatch) -> None:
-    datasource, schema_name, table_name = await _seed_table_with_policy(session, monkeypatch)
-    request = await api_module.request_native_policy_sync(
-        datasource.id,
-        api_module.PolicyNativeSyncRequestCreate(
-            schema_name=schema_name, table_name=table_name, reason="sync tenant RLS"
-        ),
-        context=_context(datasource.organization_id, principal_id="alice"),
-        session=session,
-    )
-    assert request.status == "PENDING"
-    assert request.row_policy_count == 1
-
-    # Self-approval is refused.
-    with pytest.raises(HTTPException) as excinfo:
-        await api_module.decide_native_policy_sync_request(
-            request.id,
-            api_module.NativePolicySyncDecisionRequest(decision="APPROVE"),
-            context=_context(
-                datasource.organization_id, principal_id="alice", roles=("DataSteward",)
-            ),
-            session=session,
-            settings=Settings(),
-        )
-    assert excinfo.value.status_code == 409
-
-    applied_plans: list[Any] = []
-
-    async def fake_apply(plan, *, dsn, timeout_seconds):
-        applied_plans.append((plan, dsn))
-
-    monkeypatch.setattr(api_module, "apply_native_sync_plan", fake_apply)
-
-    decided = await api_module.decide_native_policy_sync_request(
-        request.id,
-        api_module.NativePolicySyncDecisionRequest(decision="APPROVE"),
-        context=_context(datasource.organization_id, principal_id="bob", roles=("DataSteward",)),
-        session=session,
-        settings=Settings(),
-    )
-    assert decided.status == "APPLIED"
-    assert decided.decided_by == "bob"
-    assert decided.applied_at is not None
-    assert len(applied_plans) == 1
-    applied_plan, dsn = applied_plans[0]
-    assert dsn == "postgres://u:p@host/db"
-    stored_request = await session.get(PolicyNativeSyncRequest, request.id)
-    assert stored_request is not None
-    assert [s.sql for s in applied_plan.statements] == [
-        item["sql"] for item in stored_request.statements
-    ]
-
-    # Deciding an already-decided request is refused.
-    with pytest.raises(HTTPException) as excinfo:
-        await api_module.decide_native_policy_sync_request(
-            request.id,
-            api_module.NativePolicySyncDecisionRequest(decision="APPROVE"),
-            context=_context(
-                datasource.organization_id, principal_id="carol", roles=("DataSteward",)
-            ),
-            session=session,
-            settings=Settings(),
-        )
-    assert excinfo.value.status_code == 409
-
-    audit_rows = (await session.execute(AuditEvent.__table__.select())).all()
-    audit_actions = {row.action for row in audit_rows}
-    assert "policy_native_sync.request" in audit_actions
-    assert "policy_native_sync.decide" in audit_actions
-    assert "policy_native_sync.apply" in audit_actions
-    apply_audit = next(row for row in audit_rows if row.action == "policy_native_sync.apply")
-    assert apply_audit.outcome == "SUCCESS"
-    assert "statements_hash" in apply_audit.details
-    assert apply_audit.details["statements_hash"]
-
-
-async def test_reject_never_attempts_apply(session, monkeypatch) -> None:
-    datasource, schema_name, table_name = await _seed_table_with_policy(session, monkeypatch)
-    request = await api_module.request_native_policy_sync(
-        datasource.id,
-        api_module.PolicyNativeSyncRequestCreate(
-            schema_name=schema_name, table_name=table_name, reason="sync tenant RLS"
-        ),
-        context=_context(datasource.organization_id, principal_id="alice"),
-        session=session,
-    )
-
-    def explode(*args: object, **kwargs: object) -> None:
-        raise AssertionError("apply must never be attempted on a REJECT decision")
-
-    monkeypatch.setattr(api_module, "apply_native_sync_plan", explode)
-
-    decided = await api_module.decide_native_policy_sync_request(
-        request.id,
-        api_module.NativePolicySyncDecisionRequest(decision="REJECT", reason="not ready"),
-        context=_context(datasource.organization_id, principal_id="bob", roles=("DataSteward",)),
-        session=session,
-        settings=Settings(),
-    )
-    assert decided.status == "REJECTED"
-    assert decided.applied_at is None
-
-
-async def test_a_failed_apply_is_recorded_durably_and_does_not_raise(session, monkeypatch) -> None:
-    datasource, schema_name, table_name = await _seed_table_with_policy(session, monkeypatch)
-    request = await api_module.request_native_policy_sync(
-        datasource.id,
-        api_module.PolicyNativeSyncRequestCreate(
-            schema_name=schema_name, table_name=table_name, reason="sync tenant RLS"
-        ),
-        context=_context(datasource.organization_id, principal_id="alice"),
-        session=session,
-    )
-
-    async def failing_apply(plan, *, dsn, timeout_seconds):
-        raise ConnectionRefusedError("could not reach the source")
-
-    monkeypatch.setattr(api_module, "apply_native_sync_plan", failing_apply)
-
-    decided = await api_module.decide_native_policy_sync_request(
-        request.id,
-        api_module.NativePolicySyncDecisionRequest(decision="APPROVE"),
-        context=_context(datasource.organization_id, principal_id="bob", roles=("DataSteward",)),
-        session=session,
-        settings=Settings(),
-    )
-    assert decided.status == "APPLY_FAILED"
-    assert decided.apply_error == "ConnectionRefusedError"
-    assert decided.applied_at is None
-
-    audit_rows = (await session.execute(AuditEvent.__table__.select())).all()
-    apply_audit = next(row for row in audit_rows if row.action == "policy_native_sync.apply")
-    assert apply_audit.outcome == "FAILURE"
-    assert apply_audit.details["error_class"] == "ConnectionRefusedError"
-    # INV-6: never the raw driver error text, which could carry source-side values.
-    assert "could not reach the source" not in str(apply_audit.details)
-
-
-async def test_list_requests_filters_by_status(session, monkeypatch) -> None:
-    datasource, schema_name, table_name = await _seed_table_with_policy(session, monkeypatch)
-    await api_module.request_native_policy_sync(
-        datasource.id,
-        api_module.PolicyNativeSyncRequestCreate(
-            schema_name=schema_name, table_name=table_name, reason="first"
-        ),
-        context=_context(datasource.organization_id, principal_id="alice"),
-        session=session,
-    )
-    page = await api_module.list_native_policy_sync_requests(
-        datasource.id,
-        request_status="PENDING",
-        limit=100,
-        offset=0,
-        context=_context(datasource.organization_id, roles=("Viewer",)),
-        session=session,
-    )
-    assert isinstance(page, Page)
-    assert page.total == 1
-    assert page.items[0].status == "PENDING"
-
-    page_approved = await api_module.list_native_policy_sync_requests(
-        datasource.id,
-        request_status="APPROVED",
-        limit=100,
-        offset=0,
-        context=_context(datasource.organization_id, roles=("Viewer",)),
-        session=session,
-    )
-    assert page_approved.total == 0

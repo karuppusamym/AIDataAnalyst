@@ -17,6 +17,7 @@ server, rather than patching an HTTP client. The commit-lifecycle half of F12
 has its own section at the end.
 """
 
+import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from uuid import uuid4
@@ -206,7 +207,10 @@ async def test_both_channels_are_delivered_when_both_are_configured(
 
         assert len(channel.received) == 1
         assert len(teams.received) == 1
-        assert teams.received[0]["@type"] == "MessageCard"
+        # The shipped Teams body. Asserted by shape here and in detail in the
+        # Teams section below; a MessageCard arriving instead would mean the
+        # default had silently reverted to the retired connector format.
+        assert teams.received[0]["type"] == "message"
 
 
 @pytest.mark.asyncio
@@ -318,13 +322,227 @@ def test_render_only_emits_known_fields() -> None:
     assert SENTINEL not in body["text"]
 
 
-def test_teams_gets_a_message_card_with_no_actions() -> None:
-    """A notification must never be an action surface."""
+def test_the_legacy_message_card_still_has_no_actions() -> None:
+    """A notification must never be an action surface -- in either format."""
     body = render_message(
-        _settings(), "KILL_SWITCH_ENGAGED", {"object_type": "AGENT"}, channel="TEAMS"
+        _settings(teams_card_format="MESSAGE_CARD"),
+        "KILL_SWITCH_ENGAGED",
+        {"object_type": "AGENT"},
+        channel="TEAMS",
     )
     assert body["@type"] == "MessageCard"
     assert "potentialAction" not in body
+
+
+# ---------------------------------------------------------------------------
+# Teams: the format that works on a current tenant
+#
+# Microsoft disabled Office 365 connectors inside Teams between 2026-05-18 and
+# 2026-05-22 (the retirement notice, last updated 2026-04-14). The legacy
+# `MessageCard` body is a connector payload, so on a current tenant it has no
+# live mechanism to arrive through; the supported one is a Workflows (Power
+# Automate) webhook taking an Adaptive Card. These tests fix the default at
+# the format that works, keep the legacy one reachable, and keep both of them
+# free of anything a person could act on.
+#
+# What they cannot show is that a real Teams tenant accepts these bytes -- the
+# destination here is a `ThreadingHTTPServer` on 127.0.0.1. See
+# `Docs/40-engineering/12-notification-delivery-runbook.md` §3.2 for the
+# procedure that closes that, which needs a tenant.
+# ---------------------------------------------------------------------------
+
+
+def _walk_card(node: object) -> Iterator[dict[str, Any]]:
+    """Every dict anywhere in a card, so an assertion cannot miss a nested one."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk_card(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_card(item)
+
+
+def _adaptive_content(body: dict[str, Any]) -> dict[str, Any]:
+    """The card out of the message envelope, asserting the envelope on the way.
+
+    The envelope is the part the Workflows trigger dispatches on: `type:
+    message` with one attachment whose `contentType` is the Adaptive Card
+    media type. Getting it wrong is the failure mode that looks like success
+    on our side, so it is checked wherever a card is read.
+    """
+    assert body["type"] == "message"
+    attachments = body["attachments"]
+    assert len(attachments) == 1
+    assert attachments[0]["contentType"] == "application/vnd.microsoft.card.adaptive"
+    content = attachments[0]["content"]
+    assert content["type"] == "AdaptiveCard"
+    assert content["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
+    assert isinstance(content["version"], str)
+    return dict(content)
+
+
+def test_the_shipped_teams_format_is_the_adaptive_card() -> None:
+    """The default has to be the format a current tenant can receive. A
+    deployment that upgrades and changes nothing must stop posting connector
+    payloads at a mechanism Microsoft switched off in May 2026."""
+    assert Settings(_env_file=None, environment="test").teams_card_format == "ADAPTIVE_CARD"
+
+
+@pytest.mark.asyncio
+async def test_teams_receives_an_adaptive_card_from_the_real_entry_point(
+    session: AsyncSession,
+) -> None:
+    """End to end, over a socket: `notify_governance_event` queues, the
+    scheduler's worker delivers, and what arrives is the Workflows envelope.
+
+    Driven through the entry point rather than by calling the builder, because
+    the builder returning the right dict is not evidence that the right bytes
+    leave the process -- that was the substance of F12.
+    """
+    org = await _seed_org(session)
+    object_id = str(uuid4())
+    with WebhookStub() as teams:
+        settings = _settings(slack_webhook_url=None, teams_webhook_url=teams.url)
+
+        outcomes = await notify_governance_event(
+            session,
+            org.id,
+            "REVIEW_REQUESTED",
+            {"object_type": "GLOSSARY_TERM", "object_id": object_id, "risk_tier": "T1"},
+            settings=settings,
+        )
+        await session.flush()
+        assert [o.status for o in outcomes if o.channel == "TEAMS"] == [STATUS_QUEUED]
+        assert teams.received == [], "nothing is sent from the business transaction"
+
+        await _deliver(session, settings)
+
+        assert len(teams.received) == 1
+        content = _adaptive_content(teams.received[0])
+
+        # The information a person needs, and the link -- nothing to act on.
+        rendered = json.dumps(content)
+        assert "Approval requested" in rendered
+        assert object_id in rendered
+        assert "T1" in rendered
+        assert f"https://atlas.example/#/governance?focus={object_id}" in rendered
+
+        # And the bytes on the wire are the bytes we think they are, not a
+        # dict the stub happened to decode leniently.
+        assert b'"application/vnd.microsoft.card.adaptive"' in teams.raw[0]
+        assert b"MessageCard" not in teams.raw[0]
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_message_card_is_still_selectable_end_to_end(
+    session: AsyncSession,
+) -> None:
+    """Some tenants still have a connector URL alive, or a Workflow built on an
+    action that accepts a MessageCard. Deleting the format would break a
+    channel that works today, so it stays reachable by configuration."""
+    org = await _seed_org(session)
+    with WebhookStub() as teams:
+        settings = _settings(
+            slack_webhook_url=None,
+            teams_webhook_url=teams.url,
+            teams_card_format="MESSAGE_CARD",
+        )
+        await notify_governance_event(
+            session,
+            org.id,
+            "KILL_SWITCH_ENGAGED",
+            {"object_type": "AGENT_CONTRACT", "object_id": str(uuid4())},
+            settings=settings,
+        )
+        await session.flush()
+        await _deliver(session, settings)
+
+        assert len(teams.received) == 1
+        body = teams.received[0]
+        assert body["@type"] == "MessageCard"
+        assert body["@context"] == "https://schema.org/extensions"
+        assert "AI kill switch ENGAGED" in body["text"]
+        assert "potentialAction" not in body
+
+
+@pytest.mark.parametrize("kind", EVENT_KINDS)
+def test_no_adaptive_card_carries_anything_to_act_on(kind: str) -> None:
+    """The constraint the original comment recorded, carried across the format
+    change: *a notification here must never be an action*. That is a
+    governance property, not a rendering one -- this platform's approvals are
+    authorized in the portal, against the portal's own authentication, and a
+    card that could approve, publish or grant from a chat client would be a
+    second control surface with none of those checks.
+
+    Checked over the whole card tree rather than the top level, so a nested
+    `ActionSet` or a `selectAction` on a container could not slip in.
+    """
+    body = render_message(
+        _settings(),
+        kind,
+        {"object_type": "TABLE", "object_id": "abc", "risk_tier": "T1"},
+        channel="TEAMS",
+    )
+    content = _adaptive_content(body)
+
+    assert "actions" not in content
+    for node in _walk_card(content):
+        assert "selectAction" not in node
+        node_type = node.get("type", "")
+        assert not node_type.startswith("Action."), f"{kind} card carries {node_type}"
+        assert not node_type.startswith("Input."), f"{kind} card carries {node_type}"
+        assert node_type != "ActionSet", f"{kind} card carries an ActionSet"
+
+
+@pytest.mark.asyncio
+async def test_an_adaptive_card_carries_no_source_value(session: AsyncSession) -> None:
+    """INV-6 again, against the new format and over the socket. The renderer is
+    an allowlist, so a caller mistakenly passing a value must not reach the
+    wire in *any* part of the card -- not the headline, not a fact, not the
+    link."""
+    org = await _seed_org(session)
+    with WebhookStub() as teams:
+        settings = _settings(slack_webhook_url=None, teams_webhook_url=teams.url)
+        await notify_governance_event(
+            session,
+            org.id,
+            "QUALITY_INCIDENT_OPENED",
+            {
+                "object_type": "TABLE",
+                "object_id": str(uuid4()),
+                "severity": "HIGH",
+                "sample_row": SENTINEL,
+                "sql": f"SELECT * FROM customers WHERE name = '{SENTINEL}'",  # noqa: S608
+            },
+            settings=settings,
+        )
+        await session.flush()
+        await _deliver(session, settings)
+
+        # Asserted as an Adaptive Card, so this cannot pass for the wrong
+        # format and quietly stop covering the one that ships.
+        _adaptive_content(teams.received[0])
+        assert SENTINEL.encode() not in teams.raw[0]
+        assert b"SELECT" not in teams.raw[0]
+        # Present, so the assertions above are not passing on an empty card.
+        assert b"Data quality incident opened" in teams.raw[0]
+
+
+def test_a_teams_card_without_a_portal_url_still_says_what_happened() -> None:
+    """An unset `portal_base_url` degrades the message rather than suppressing
+    it, and must not leave a link element with nothing in it."""
+    content = _adaptive_content(
+        render_message(
+            _settings(portal_base_url=None),
+            "REVIEW_REQUESTED",
+            {"object_type": "TABLE"},
+            channel="TEAMS",
+        )
+    )
+    rendered = json.dumps(content)
+    assert "Approval requested" in rendered
+    assert "Open in Atlas" not in rendered
 
 
 # ---------------------------------------------------------------------------

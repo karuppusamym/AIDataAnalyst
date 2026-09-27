@@ -111,7 +111,7 @@ describe("DescriptionDraftsScreen", () => {
     expect(screen.getByText(/Generate drafts from the Catalog screen/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Go to Catalog" }));
-    expect(location.hash).toBe("#/catalog");
+    expect(location.hash).toBe("#/analyst/catalog");
   });
 
   it("renders drafts and sorts by overall_score desc by default", async () => {

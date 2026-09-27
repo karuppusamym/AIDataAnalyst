@@ -1,6 +1,8 @@
 # Review 2026-09-05 — remediation points tracker
 
-Live status of every point raised in [REVIEW.md](REVIEW.md), [UX-AND-JOURNEYS.md](UX-AND-JOURNEYS.md) and [ROADMAP.md](ROADMAP.md).
+> **Scope reconciled 2026-09-11.** [Tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](../60-delivery/23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
+Historical remediation status of every point raised in [REVIEW.md](REVIEW.md), [UX-AND-JOURNEYS.md](UX-AND-JOURNEYS.md) and [ROADMAP.md](ROADMAP.md).
 
 Remediation started: 5 September 2026. Branch: `feature/agent-os-v2`. Base revision: `03bedc1`.
 **Last updated: 6 September 2026**, after the implementation pass described below.

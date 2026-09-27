@@ -440,6 +440,21 @@ class _ContextProductRetiredReadSession:
     async def scalar(self, _statement: object) -> object:
         return self._scalar_queue.pop(0)
 
+    async def scalars(self, _statement: object) -> object:
+        """No agent contract for this caller. AR-06 resolves the caller's
+        contract on this path now (`load_contract_for_principal`), and these
+        retirement-signal cases are all human/service consumers, which have
+        none -- the empty result is what `None` (uncontracted, unrestricted by
+        an envelope) is built from. Kept separate from the `scalar` queue so
+        the "never even attempted" assertions above still mean what they say.
+        """
+
+        class _Scalars:
+            def all(self_inner) -> list[object]:
+                return []
+
+        return _Scalars()
+
     def add(self, value: object) -> None:
         self.added.append(value)
 
@@ -673,6 +688,20 @@ class _RestRetiredVersionReadSession:
 
     async def get(self, _model: type[object], _identity: object) -> object:
         return self._get_queue.pop(0)
+
+    async def scalars(self, _statement: object) -> object:
+        """R11-C6: `_enforce_capability_envelope` resolves the caller's agent
+        contract on this path now. Both callers below are `USER` principals,
+        which hold no contract -- an empty result is what the real
+        organization-scoped query returns for them, and the envelope check
+        then passes through to the retirement branch these tests are about.
+        """
+
+        class _Scalars:
+            def all(self_inner) -> list[object]:
+                return []
+
+        return _Scalars()
 
     async def scalar(self, _statement: object) -> object:
         return self._scalar_queue.pop(0)

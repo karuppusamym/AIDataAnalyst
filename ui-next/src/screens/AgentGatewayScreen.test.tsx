@@ -29,6 +29,8 @@ const fetchAgentContractRequests = vi.fn<
   (orgId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<AgentContractRequestRead>>
 >();
 const submitAgentContractRequest = vi.fn();
+/* R11-FP12: the project's count of what moved under each product since publication. */
+const fetchContextProductChangesSummary = vi.fn();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -42,6 +44,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchAgentContractRequests: (orgId: string, query: unknown, signal?: AbortSignal) =>
       fetchAgentContractRequests(orgId, query, signal),
     submitAgentContractRequest: (...args: unknown[]) => submitAgentContractRequest(...args),
+    fetchContextProductChangesSummary: (...args: unknown[]) => fetchContextProductChangesSummary(...args),
   };
 });
 
@@ -101,6 +104,10 @@ beforeEach(() => {
   fetchTools.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   fetchConsumptionRecords.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   fetchAgentContractRequests.mockResolvedValue({ items: [], limit: 100, offset: 0, total: 0 });
+  fetchContextProductChangesSummary.mockReset();
+  fetchContextProductChangesSummary.mockResolvedValue({
+    project_id: "proj_core", generated_at: "2026-09-22T00:00:00Z", truncated: false, items: [],
+  });
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -153,6 +160,35 @@ describe("AgentGatewayScreen", () => {
     // The draft is counted and explained, never listed as visible.
     expect(screen.queryByText("atlas__context__consumer-risk-context__v1")).not.toBeInTheDocument();
     expect(screen.getByText(/1 draft or retired version is not exposed/)).toBeInTheDocument();
+  });
+
+  it("flags an exposed version whose coverage moved since it was published (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({
+      items: [product("PUBLISHED", 2)],
+      limit: 200, offset: 0, total: 1,
+    });
+    fetchContextProductChangesSummary.mockResolvedValue({
+      project_id: "proj_core", generated_at: "2026-09-22T00:00:00Z", truncated: false,
+      items: [
+        {
+          product_id: "cp_PUBLISHED", version_id: "cpv_PUBLISHED", version: 2,
+          status: "PUBLISHED", changed_subjects: 2,
+        },
+      ],
+    });
+    const AgentGatewayScreen = await loadScreen();
+    render(<AgentGatewayScreen />);
+
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    fireEvent.click(screen.getByRole("button", { name: "What agents see" }));
+
+    // An agent is served exactly this version, so the row says what moved under it.
+    expect(await screen.findByText("2 changes since published")).toBeInTheDocument();
+    expect(fetchContextProductChangesSummary).toHaveBeenCalledWith(
+      "proj_core",
+      { productId: undefined },
+      expect.any(AbortSignal),
+    );
   });
 
   it("shows refused consumption rather than filtering it out", async () => {

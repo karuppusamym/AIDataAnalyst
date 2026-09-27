@@ -1,25 +1,33 @@
-import json
-from datetime import datetime
+# noqa: I001 is on the first import because the re-export groups below keep one import
+# statement per relocated bounded context (`X as X` aliases), which the isort rules would
+# split into one statement per name; with nothing between the blocks since R03, the whole
+# import section is one block and the suppression has to sit on its first line.
+from datetime import datetime  # noqa: I001
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
-
-
-class ApiModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True, extra="forbid")
+from aida.relationship_validation import public_relationship_evidence
+# The shared pydantic base lives in `atlas.platform.schemas`, so neither this module nor the
+# bounded contexts' schema modules import the other for it (review 2026-09-05 R03, completed
+# 2026-09-21); it is re-exported here for every existing `from aida.schemas import ApiModel`.
+# An import, not an assignment: mypy's pydantic plugin only recognises a model whose base it
+# can resolve to the class itself.
+from atlas.platform.schemas import ApiModel as ApiModel
 
 
 # Re-exported for backward compatibility -- tracker ST-05 moved the classes
 # below to `atlas.modules.identity_tenancy.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import OrganizationCreate` (etc.) caller keeps working
-# unchanged. This import must come after `ApiModel` is defined above: the
-# moved module imports `ApiModel` back from this file, so `aida.schemas`
-# must already have it bound in its namespace before that circular import
-# resolves -- see the docstring in `atlas.modules.identity_tenancy.schemas`.
+# unchanged. Both paths share the independent `atlas.platform.schemas` base.
 from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
     BusinessAssignmentCreate as BusinessAssignmentCreate,
     BusinessAssignmentRead as BusinessAssignmentRead,
@@ -48,6 +56,7 @@ from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
     WorkspaceCreate as WorkspaceCreate,
     WorkspaceEntitlementRead as WorkspaceEntitlementRead,
     WorkspaceMembershipCreate as WorkspaceMembershipCreate,
+    WorkspaceMembershipProposalRead as WorkspaceMembershipProposalRead,
     WorkspaceMembershipRead as WorkspaceMembershipRead,
     WorkspaceRead as WorkspaceRead,
 )
@@ -56,8 +65,7 @@ from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.connectivity.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import DataSourceCreate` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# unchanged.
 from atlas.modules.connectivity.schemas import (  # noqa: E402, I001
     DATASOURCE_BULK_ONBOARD_MAX_ITEMS as DATASOURCE_BULK_ONBOARD_MAX_ITEMS,
     ConnectorCapabilityRead as ConnectorCapabilityRead,
@@ -75,8 +83,7 @@ from atlas.modules.connectivity.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.ingestion.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import MetadataIngestionCreate` (etc.) caller keeps
-# working unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# working unchanged.
 from atlas.modules.ingestion.schemas import (  # noqa: E402, I001
     MetadataAttribute as MetadataAttribute,
     MetadataCatalogEnvelope as MetadataCatalogEnvelope,
@@ -100,8 +107,7 @@ from atlas.modules.ingestion.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.catalog.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import MetadataTableRead` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# unchanged.
 from atlas.modules.catalog.schemas import (  # noqa: E402, I001
     MetadataColumnRead as MetadataColumnRead,
     MetadataConstraintRead as MetadataConstraintRead,
@@ -114,15 +120,11 @@ from atlas.modules.catalog.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.observability_audit.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import AuditEventRead` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# unchanged.
 from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
     ArchiveStatusRead as ArchiveStatusRead,
     AuditEventRead as AuditEventRead,
     OutboxEventRead as OutboxEventRead,
-    SloBudgetRead as SloBudgetRead,
-    SloDefinitionCreate as SloDefinitionCreate,
-    SloDefinitionRead as SloDefinitionRead,
 )
 
 # Re-exported for backward compatibility -- review-2026-09-05 point R04
@@ -130,8 +132,7 @@ from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
 # the classes below to `atlas.modules.profiling.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`, tracker ST-05). Every existing
 # `from aida.schemas import AnalysisRunRead` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the four shims
-# above. The procedure is
+# unchanged. The procedure is
 # `Docs/40-engineering/10-bounded-context-relocation-procedure.md`.
 from atlas.modules.profiling.schemas import (  # noqa: E402, I001
     AnalysisRunCreate as AnalysisRunCreate,
@@ -142,6 +143,7 @@ from atlas.modules.profiling.schemas import (  # noqa: E402, I001
     ClassificationFeedIngestResponse as ClassificationFeedIngestResponse,
     ClassificationFeedRecord as ClassificationFeedRecord,
     ColumnProfileRead as ColumnProfileRead,
+    ProfileFacetStatusRead as ProfileFacetStatusRead,
     ProfilingExceptionDecisionRequest as ProfilingExceptionDecisionRequest,
     ProfilingExceptionPolicyCreate as ProfilingExceptionPolicyCreate,
     ProfilingExceptionPolicyRead as ProfilingExceptionPolicyRead,
@@ -418,6 +420,11 @@ class GovernedToolVersionRead(ApiModel):
     approved_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # R11-FP16: the routine a procedure tool's SQL was extracted from; a change to it holds
+    # this version until a version generated from the new definition is approved.
+    source_routine_id: UUID | None = None
+    # The view a view tool's SQL was generated from, bound the same way.
+    source_view_table_id: UUID | None = None
     # TL-4: completed-execution count for this tool (all versions, bounded
     # lookback window) -- the usage signal `list_tools` and MCP `tools/list`
     # rank by. Always 0 for a brand-new draft; never populated by
@@ -449,6 +456,14 @@ class QueryExecutionRequest(ApiModel):
     sql: str = Field(min_length=1, max_length=200_000)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
     semantic_version: str | None = Field(default=None, max_length=100)
+    #: F01: submit this statement through a published context product, so it is
+    #: held to the tables that product names. Optional, and omitting it is the
+    #: pre-F01 behaviour exactly -- but until it existed, the same principal who
+    #: was product-scoped through Ask could submit the same SQL here with no
+    #: product at all, which made the boundary a property of the surface rather
+    #: than of the request. Same field name and meaning as
+    #: `AgentAnalysisRequest.context_product_key`.
+    context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
     # Which workspace is asking (ADR-0018). Optional while the estate migrates: a
     # datasource with exactly one live binding resolves without it. It stops being
     # optional when `unresolved_workspace_posture` flips to DENY, and the request
@@ -491,6 +506,12 @@ class QueryLineageRead(ApiModel):
     column_lineage: list[dict[str, Any]]
     semantic_version: str | None
     policy_version: str
+    #: R11-UX16: what a past run executed, so its Query view can show it after the response
+    #: that carried it is gone. The gateway stores the statement's shape with its literals
+    #: already replaced (`SqlValidationReport.normalized_sql`), so this carries no value.
+    normalized_sql: str | None = None
+    row_count: int | None = None
+    elapsed_ms: int | None = None
 
 
 class ToolExecutionResponse(ApiModel):
@@ -512,12 +533,22 @@ class AgentAnalysisRequest(ApiModel):
     preferred_tool_version_id: UUID | None = None
     tool_parameters: dict[str, Any] = Field(default_factory=dict)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
+    #: Ask through a published context product: the answer may then stand only on the tables it
+    #: names and the tool versions it declares eligible (R11-FP12), as MCP's `contextProductUri`
+    #: already scopes an agent's tool list.
+    context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
+    #: R11-MP26: continue this conversation (the caller's own, on this datasource).
+    #: Absent, the question starts a new one.
+    conversation_id: UUID | None = None
 
 
 class AgentAnalysisResponse(ApiModel):
     agent_run_id: UUID
     status: str
     generation_source: str
+    #: R11-MP26: the conversation this answer is a turn of, and which turn.
+    conversation_id: UUID | None = None
+    conversation_turn: int | None = None
     semantic_version: str | None
     policy_version: str
     step_trace: list[dict[str, Any]]
@@ -686,6 +717,13 @@ class RelationshipCandidateRead(ApiModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: the recorded validation is served by its own gated read, not here."""
+        return public_relationship_evidence(evidence)
+
 
 class RelationshipCandidateDecision(ApiModel):
     decision: Literal["APPROVE", "REJECT"]
@@ -696,6 +734,76 @@ class RelationshipCandidateDecision(ApiModel):
         if self.decision == "REJECT" and not self.reason:
             raise ValueError("a reason is required when rejecting a relationship")
         return self
+
+
+class RelationshipEvidenceClassRead(ApiModel):
+    name: str
+    corroborating: bool
+    detail: str
+    sample_bounded: bool
+
+
+class RelationshipSideUniquenessRead(ApiModel):
+    unique: bool
+    basis: (
+        Literal["DECLARED_KEY", "UNIQUE_INDEX", "DECLARED_FOREIGN_KEY", "APPROVED_KEY", "PROFILED"]
+        | None
+    )
+    sample_bounded: bool
+
+
+class RelationshipObservationBoundsRead(ApiModel):
+    table_profile_id: UUID
+    profiled_at: datetime
+    sampled_row_count: int
+    row_count_estimate: int | None
+    scope: Literal["FULL", "SAMPLE", "UNKNOWN"]
+
+
+class RelationshipOptionalityColumnRead(ApiModel):
+    column_name: str
+    declared_nullable: bool
+    observed_null_count: int | None
+    observed_non_null_count: int | None
+
+
+class RelationshipValidationRead(ApiModel):
+    """R11-FP06: what supports a proposed join, derived from the catalog as it is now.
+
+    ``recorded_*`` and ``drift`` compare it with the validation stored when the join was
+    approved, so a key that has since gone, or nulls that have since appeared, show.
+    """
+
+    subject_type: Literal["RELATIONSHIP_CANDIDATE", "COMPOSITE_RELATIONSHIP_CANDIDATE"]
+    subject_id: UUID
+    status: str
+    validation_version: str
+    outcome: Literal["CORROBORATED", "NAME_MATCH_ONLY"]
+    approvable: bool
+    evidence_classes: list[RelationshipEvidenceClassRead]
+    source_key_columns: list[str]
+    target_key_columns: list[str]
+    join_condition: str
+    cardinality: Literal["ONE_TO_ONE", "MANY_TO_ONE", "ONE_TO_MANY", "UNKNOWN"]
+    direction: Literal[
+        "SOURCE_REFERENCES_TARGET", "TARGET_REFERENCES_SOURCE", "EITHER", "UNDETERMINED"
+    ]
+    source_uniqueness: RelationshipSideUniquenessRead
+    target_uniqueness: RelationshipSideUniquenessRead
+    referencing_side: Literal["SOURCE", "TARGET"]
+    optionality: Literal["MANDATORY", "OPTIONAL", "NULLABLE_NONE_OBSERVED", "UNKNOWN"]
+    optionality_columns: list[RelationshipOptionalityColumnRead]
+    source_observation: RelationshipObservationBoundsRead | None
+    target_observation: RelationshipObservationBoundsRead | None
+    inclusion_check_status: Literal["NOT_RUN"]
+    inclusion_check_reason: str
+    grain_warnings: list[str]
+    source_queries_executed: int
+    values_inspected: bool
+    fingerprint: str
+    recorded_fingerprint: str | None
+    recorded_at: datetime | None
+    drift: Literal["NOT_RECORDED", "UNCHANGED", "CHANGED", "CORROBORATION_LOST"]
 
 
 class TableRef(ApiModel):
@@ -777,9 +885,13 @@ class CompositeKeyCandidateRead(ApiModel):
     organization_id: UUID
     datasource_id: UUID
     table_id: UUID
+    table_profile_id: UUID | None
     column_ids: list[UUID]
+    column_names: list[str]
+    column_count: int
     detection_rule: str
     confidence: float
+    estimated_distinctness_ratio: float
     evidence: dict[str, Any]
     status: str
     created_by: str
@@ -830,98 +942,6 @@ class CrossSourceResolutionCandidateRead(ApiModel):
     reviewed_by: str | None
     review_reason: str | None
     reviewed_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-
-# ---------------------------------------------------------------------------
-# KG-5: saved Knowledge Graph / Graph Explorer perspectives
-# ---------------------------------------------------------------------------
-
-#: Same order of magnitude as ``openlineage.MAX_OPENLINEAGE_EVENT_BYTES`` (1 MiB) for a single
-#: caller-supplied JSON blob, but a Graph Explorer view-state snapshot (a center node, a depth,
-#: a handful of edge-kind filters, layout/pan/zoom) is far smaller than an OpenLineage run event
-#: with its nested datasets/facets, so 256 KiB is a comfortably generous bound rather than a
-#: tight one.
-GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES = 256 * 1024
-
-
-def _validate_view_state_size(value: dict[str, Any]) -> dict[str, Any]:
-    encoded_length = len(json.dumps(value).encode("utf-8"))
-    if encoded_length > GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES:
-        raise ValueError(
-            "view_state exceeds the "
-            f"{GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES}-byte limit "
-            f"({encoded_length} bytes)"
-        )
-    return value
-
-
-class GraphPerspectiveCreate(ApiModel):
-    """Opaque frontend Graph Explorer state, plus queryable metadata.
-
-    ``view_state`` is never interpreted server-side -- only validated as a
-    JSON object bounded in size. See ``models.GraphPerspective`` for an
-    example shape and the sharing model.
-    """
-
-    datasource_id: UUID | None = None
-    name: str = Field(min_length=2, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    allowed_viewer_roles: list[str] = Field(default_factory=list, max_length=100)
-    view_state: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("view_state")
-    @classmethod
-    def validate_view_state_size(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return _validate_view_state_size(value)
-
-    @field_validator("allowed_viewer_roles")
-    @classmethod
-    def validate_allowed_viewer_roles(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("allowed_viewer_roles must be unique")
-        if any(not role or len(role) > 100 for role in value):
-            raise ValueError("allowed_viewer_roles entries must be non-empty and <= 100 chars")
-        return value
-
-
-class GraphPerspectiveUpdate(ApiModel):
-    """All fields optional: only owner-supplied fields are applied (owner-only, see the API)."""
-
-    name: str | None = Field(default=None, min_length=2, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    allowed_viewer_roles: list[str] | None = Field(default=None, max_length=100)
-    view_state: dict[str, Any] | None = None
-
-    @field_validator("view_state")
-    @classmethod
-    def validate_view_state_size(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        return _validate_view_state_size(value)
-
-    @field_validator("allowed_viewer_roles")
-    @classmethod
-    def validate_allowed_viewer_roles(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        if len(value) != len(set(value)):
-            raise ValueError("allowed_viewer_roles must be unique")
-        if any(not role or len(role) > 100 for role in value):
-            raise ValueError("allowed_viewer_roles entries must be non-empty and <= 100 chars")
-        return value
-
-
-class GraphPerspectiveRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID | None
-    name: str
-    description: str | None
-    owner_principal: str
-    allowed_viewer_roles: list[str]
-    view_state: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
@@ -1070,6 +1090,13 @@ class CompositeRelationshipCandidateRead(ApiModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: the recorded validation is served by its own gated read, not here."""
+        return public_relationship_evidence(evidence)
+
 
 class GraphNodeRead(ApiModel):
     id: UUID
@@ -1098,6 +1125,13 @@ class GraphEdgeRead(ApiModel):
     confidence: float
     evidence: dict[str, Any]
     candidate_id: UUID | None = None
+
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: an approved join's recorded validation is not graph-edge evidence."""
+        return public_relationship_evidence(evidence)
 
 
 class KnowledgeGraphRead(ApiModel):
@@ -1128,7 +1162,23 @@ class GraphSearchRead(ApiModel):
 
 
 UnifiedLineageNodeKind = Literal[
-    "TABLE", "DBT_MODEL", "DBT_SOURCE", "DBT_SEED", "DBT_SNAPSHOT", "UNRESOLVED_DATASET"
+    "TABLE",
+    "DBT_MODEL",
+    "DBT_SOURCE",
+    "DBT_SEED",
+    "DBT_SNAPSHOT",
+    "UNRESOLVED_DATASET",
+    # R11-B13: the consumption end of the warehouse. One member per
+    # `BiReportNode.report_type` the LN-4 parsers actually emit -- Tableau's
+    # WORKBOOK/DASHBOARD/SHEET and Power BI's REPORT/PAGE -- mirroring how the
+    # dbt resource types each got their own member rather than collapsing into
+    # one "DBT" kind. A caller that renders a dashboard differently from a
+    # worksheet can; one that does not can match on the `BI_` prefix.
+    "BI_WORKBOOK",
+    "BI_DASHBOARD",
+    "BI_SHEET",
+    "BI_REPORT",
+    "BI_PAGE",
 ]
 UnifiedLineageEdgeSource = Literal[
     "FOREIGN_KEY",
@@ -1137,6 +1187,15 @@ UnifiedLineageEdgeSource = Literal[
     "OPENLINEAGE_ETL",
     "VIEW_DEFINITION",
     "PROCEDURE_DEFINITION",
+    # R11-B13. Adding a member to a response enum is a widening, not a break
+    # (`scripts/openapi_diff.py` classifies it as informational), and it is the
+    # precedent LN-7 set when VIEW_DEFINITION/PROCEDURE_DEFINITION landed.
+    "BI_LINEAGE",
+    # R11-FP01: a path a trigger creates -- the firing table feeding what the
+    # trigger writes. Its own member, not folded into PROCEDURE_DEFINITION,
+    # because it fires on every write to a table rather than when someone calls
+    # it, and an impact reader has to be able to tell the two apart.
+    "TRIGGER_DEFINITION",
 ]
 
 
@@ -1172,6 +1231,13 @@ class UnifiedLineageEdgeRead(ApiModel):
     source_columns: list[str] = Field(default_factory=list)
     target_columns: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: an approved join's recorded validation is not graph-edge evidence."""
+        return public_relationship_evidence(evidence)
 
 
 class UnifiedLineageGraphRead(ApiModel):
@@ -1222,6 +1288,9 @@ class DomainLineageGraphRead(ApiModel):
     truncated: bool = False
     truncation_reasons: list[str] = Field(default_factory=list)
     withheld_cross_boundary_domain_ids: list[UUID] = Field(default_factory=list)
+    # R11-D28: datasources of this domain the caller's workspace gate refused. They
+    # contribute nothing to the graph and are counted, never named.
+    withheld_datasource_count: int = 0
 
 
 class UnifiedLineageImpactNodeRead(ApiModel):
@@ -1620,6 +1689,18 @@ class BulkStewardshipOperationRead(ApiModel):
     applied_by: str | None
     applied_at: datetime | None
     applied_count: int
+    #: AR-11: exactly which subjects the operation changed, as opposed to
+    #: which it was given. Always a subset of `subject_ids`; empty on rows
+    #: applied before the ledger existed, which is why an empty list here
+    #: means "not recorded" rather than "changed nothing".
+    applied_subject_ids: list[str]
+    #: AR-11: set when this operation exists to undo another one. Such an
+    #: operation is pinned to T2, so a person decides it and never the agent.
+    reverses_operation_id: UUID | None
+    #: AR-11: the sampled agent decision whose disputed verdict prompted this
+    #: correction, when it was raised that way. The edge that makes a
+    #: correction traceable to the decision it corrects.
+    review_audit_sample_id: UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -1740,6 +1821,355 @@ class AssetDescriptionDraftRead(ApiModel):
     updated_at: datetime
 
 
+class ColumnDescriptionDraftGenerate(ApiModel):
+    """Draft descriptions for the columns of up to 50 tables at once."""
+
+    table_ids: list[UUID] = Field(min_length=1, max_length=50)
+    #: Also draft for columns that already carry an approved description, or
+    #: had one retired through review. Off by default: generation is for gaps,
+    #: and a draft over a reviewed (or deliberately retired) description is a
+    #: proposed *replacement*, which a steward should ask for on purpose rather
+    #: than receive as a side effect.
+    include_described: bool = False
+    #: Draft the columns whose catalog evidence is too thin with the governed model
+    #: gateway instead (`aida.column_description_model`), replacing thin evidence
+    #: drafts nobody has touched. At most five tables per request, and refused
+    #: with the reason when no route is approved for it.
+    model_assist: bool = False
+
+    @model_validator(mode="after")
+    def validate_table_ids(self) -> "ColumnDescriptionDraftGenerate":
+        if len(set(self.table_ids)) != len(self.table_ids):
+            raise ValueError("table_ids must be unique")
+        return self
+
+
+class ColumnDescriptionDraftRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    table_name: str
+    column_id: UUID
+    column_name: str
+    drafted_text: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    #: Whether `overall_score` clears the bar a draft must reach to be
+    #: submitted for review. Computed server-side so no client mirrors the
+    #: threshold constant and drifts from it.
+    reviewable: bool
+    evidence: dict[str, Any]
+    status: str
+    #: The column's description version when this draft was composed (null
+    #: when it had none). Approval refuses if it has moved since.
+    base_description_version: int | None
+    governance_review_id: UUID | None
+    published_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ColumnDescriptionDraftGenerateResult(ApiModel):
+    """What a generation call did, and each thing it deliberately did not do."""
+
+    drafts: list[ColumnDescriptionDraftRead]
+    created: int
+    #: A draft for the column is already open (DRAFT or PENDING_APPROVAL); a
+    #: second would split one column's review in two.
+    skipped_open: int
+    #: The column already has an approved description, or had one retired
+    #: through review, and `include_described` was false.
+    skipped_described: int
+    #: The would-be draft is identical to one a reviewer already rejected.
+    skipped_duplicate_rejected: int
+    #: Created, but on too little catalog evidence to be submitted for review.
+    below_review_threshold: int
+    #: Requested tables that do not exist, are not ACTIVE, belong to another
+    #: organization, or are not readable by the caller. Counted together on
+    #: purpose: telling "unreadable" apart from "absent" would disclose which
+    #: ids exist.
+    tables_skipped: int
+    #: Drafts the model wrote. Each is labelled MODEL_INFERRED and capped.
+    model_drafted: int = 0
+    #: Thin columns the model was asked about that got an evidence-only draft
+    #: instead -- screened, omitted, or in a call that failed.
+    model_fallbacks: int = 0
+    #: Columns withheld from the model, plus answers quarantined from it, by
+    #: injection screening.
+    model_withheld: int = 0
+    #: Untouched thin evidence drafts superseded by a model draft.
+    replaced_thin_drafts: int = 0
+    #: The first reason a model call did not complete, when one did not.
+    model_note: str | None = None
+
+
+class ColumnDescriptionDraftEdit(ApiModel):
+    drafted_text: str = Field(min_length=10, max_length=20_000)
+    #: The text the editor started from. A mismatch means someone else edited
+    #: or submitted the draft in the meantime, and the edit is refused rather
+    #: than silently overwriting theirs.
+    expected_text: str = Field(max_length=20_000)
+
+
+class ColumnDescriptionDraftBulkSubmitResult(ApiModel):
+    submitted_review_ids: list[UUID]
+    #: DRAFT drafts left as they were because their evidence is below the
+    #: review bar. Editing does not change that -- the score is computed from
+    #: catalog evidence, not prose -- so a human-written description for such
+    #: a column goes through the model workbook instead.
+    skipped_below_threshold: int
+
+
+# --- R11-FP08: routine description drafts ----------------------------------
+#
+# The third member of the description family, in the shape the two above
+# already have so one client can render all three. Declared here beside them
+# rather than in `routine_description_api` for the reason every other draft DTO
+# is here: `scripts/generate_ui_types.py` reads `aida.schemas` to emit
+# `ui-next/src/lib/types.ts`, and a DTO declared in a router is a type the UI
+# has to hand-write.
+
+
+class RoutineDescriptionDraftGenerate(ApiModel):
+    """Draft descriptions for up to 100 routines at once.
+
+    Named `routine_ids`, not `schema_ids`: a routine is the unit a description
+    is about, and a schema-wide request would silently include the packages this
+    path refuses (`routine_description_service.ensure_routine_is_describable`).
+    """
+
+    routine_ids: list[UUID] = Field(min_length=1, max_length=100)
+    #: Also draft for routines that already carry an approved description, or
+    #: had one retired through review. Off by default, for the reason the column
+    #: flag carries: generation is for gaps, and a draft over a reviewed (or
+    #: deliberately retired) description is a proposed *replacement* a steward
+    #: should ask for on purpose rather than receive as a side effect.
+    include_described: bool = False
+
+    @model_validator(mode="after")
+    def validate_routine_ids(self) -> "RoutineDescriptionDraftGenerate":
+        if len(set(self.routine_ids)) != len(self.routine_ids):
+            raise ValueError("routine_ids must be unique")
+        return self
+
+
+class RoutineDescriptionDraftRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    routine_id: UUID
+    #: `catalog.schema.routine`, so a reviewer can tell two same-named
+    #: procedures apart without a second read.
+    routine_qualified_name: str
+    routine_type: str
+    drafted_text: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    #: Whether `overall_score` clears the bar a draft must reach to be
+    #: submitted for review. Computed server-side so no client mirrors the
+    #: threshold constant and drifts from it.
+    reviewable: bool
+    evidence: dict[str, Any]
+    status: str
+    #: The routine's description version when this draft was composed (null
+    #: when it had none). Approval refuses if it has moved since.
+    base_description_version: int | None
+    governance_review_id: UUID | None
+    published_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RoutineDescriptionDraftGenerateResult(ApiModel):
+    """What a generation call did, and each thing it deliberately did not do."""
+
+    drafts: list[RoutineDescriptionDraftRead]
+    created: int
+    #: A draft for the routine is already open (DRAFT or PENDING_APPROVAL).
+    skipped_open: int
+    #: The routine already has an approved description, or had one retired
+    #: through review, and `include_described` was false.
+    skipped_described: int
+    #: The would-be draft is identical to one a reviewer already rejected, or
+    #: to text that was approved once and then withdrawn.
+    skipped_duplicate_rejected: int
+    #: Created, but on too little catalog evidence to be submitted for review.
+    below_review_threshold: int
+    #: Requested routines that do not exist, are not ACTIVE, belong to another
+    #: organization, or are not readable by the caller. Counted together on
+    #: purpose: telling "unreadable" apart from "absent" would disclose which
+    #: ids exist.
+    routines_skipped: int
+
+
+class RoutineDescriptionDraftEdit(ApiModel):
+    drafted_text: str = Field(min_length=10, max_length=20_000)
+    #: The text the editor started from. A mismatch means someone else edited
+    #: or submitted the draft in the meantime, and the edit is refused rather
+    #: than silently overwriting theirs.
+    expected_text: str = Field(max_length=20_000)
+
+
+class RoutineDescriptionRead(ApiModel):
+    """A routine detail read's one description field, and where it came from.
+
+    The precedence chain
+    (`routine_description_service.resolve_routine_description`) collapses an
+    approved version, a pending draft and the source system's own comment into
+    one field, exactly as the catalog row does for a table. The flags are what
+    keep that collapse honest: without them a reader cannot tell prose this
+    platform asserts from a proposal nobody has approved.
+    """
+
+    routine_id: UUID
+    routine_qualified_name: str
+    description: str | None
+    #: True when `description` is a draft awaiting review. Never presented as
+    #: something the platform asserts.
+    description_is_proposed: bool
+    #: True when an approved description was retired through review, so a reader
+    #: can be told "described once, retired" rather than shown a blank.
+    documentation_withdrawn: bool
+    #: True when `description` is the source system's own comment rather than
+    #: authored Atlas content. It deliberately still shows after a withdrawal:
+    #: withdrawal returns the routine to the state it was in before anyone here
+    #: described it, and Atlas has no authority over observed source metadata.
+    description_is_source_comment: bool
+
+
+class RoutineDefinitionVersionRead(ApiModel):
+    """R11-FP03: one captured definition of a routine, described without its text.
+
+    `metadata_routine_definition_version` appends a row per first capture and
+    per moved definition. This is that row as a reader may see it -- and the
+    body is **not** in it, under any state, for any role. A routine body is the
+    largest indirect-injection surface in the estate, so the stored text is
+    released only through the screening gate, and this read does not release it
+    even when the gate would allow it: what the gate decides here is whether the
+    digest and the derived footprint below may be reported at all.
+
+    The fields exist because a steward's real question is "what changed", and
+    each one is a piece of that answer that costs no source text.
+    """
+
+    version_id: UUID
+    #: 1 for the first capture, ascending. Carried explicitly so the order is
+    #: never inferred from position in a page.
+    version_number: int
+    captured_at: datetime
+    #: The discovery run that captured it, when one is still recorded.
+    analysis_run_id: UUID | None
+    availability: str
+    #: What the source said when it would not give the body. Free text from the
+    #: connector, as `mcp_server`'s transformation detail already reports it.
+    unavailable_reason: str | None
+    truncated: bool
+    #: `LITERAL_ONLY` (only literals moved, so the stored value-free text did
+    #: not), `STRUCTURAL` (anything else), or null for the first capture, which
+    #: changed nothing because there was nothing to change.
+    change_class: str | None
+    redaction_status: str
+    screening_status: str
+    #: SHA-256 of the *stored, value-free* text -- never of the literal-bearing
+    #: original. Null only when no value-free text was stored: a *quarantined*
+    #: version still reports one, exactly as R11-FP12's coverage reports a
+    #: digest beside a false `definition_available`. Screening keeps prompt-risky
+    #: text out of a model's context, and a digest is not text; withholding it
+    #: would also withhold the one fact a steward can act on, that the
+    #: definition moved.
+    definition_digest: str | None
+    #: The preceding version's digest, when this page has one. Reported as the
+    #: pair rather than as a "changed" flag so the reader can check the change
+    #: class against it: LITERAL_ONLY with two different digests is a
+    #: contradiction, and a flag would have hidden it.
+    previous_definition_digest: str | None
+    #: Always false. Present so that "the body was not served" is a stated fact
+    #: in the payload rather than something a client infers from an absent key.
+    body_released: bool
+    #: `column_description_model.WITHHELD`, when the stored text may not be
+    #: read. The row is never dropped: omitting it would let a reader infer
+    #: something about the data from a fact about their own entitlement.
+    withheld_marker: str | None
+    #: Which refusal, in `routine_lineage_edges.RoutineNotEligibleError`'s
+    #: vocabulary -- the same gate's own codes. "The source refused the body"
+    #: and "screening quarantined it" are different things to do next.
+    withheld_reason_code: str | None
+    #: How the two table sets below were arrived at for *this* version:
+    #: COMPUTED, COMPUTED_NO_BASELINE, UNCHANGED_LITERALS_ONLY, WITHHELD,
+    #: UNAVAILABLE or NOT_COMPUTED. Said rather than left to be inferred from
+    #: empty lists, because "reads nothing" and "was not derived" are different
+    #: answers to "should I ask again".
+    footprint_state: str
+    #: Whether the parse of this version's text accounted for every statement.
+    #: Null when no footprint was derived -- never false, which would read as
+    #: "we looked and it did not parse".
+    parse_completed: bool | None
+    #: The distinct `procedure_lineage.UnparsedReason` prefixes only. The
+    #: per-statement suffixes are withheld: they can carry a callee name or a
+    #: parse-error message quoting a value (INV-6).
+    unparsed_reason_codes: list[str]
+    #: What this version's own statements read and write: resolved table names,
+    #: no routine-local or result-set placeholders, and no descent into called
+    #: routines.
+    reads_table_names: list[str]
+    writes_table_names: list[str]
+    #: The diff against the preceding version -- the answer the surface exists
+    #: for. "This procedure started writing a second table on 12 September" is
+    #: `writes_added` on the version captured that day.
+    reads_added: list[str]
+    reads_removed: list[str]
+    writes_added: list[str]
+    writes_removed: list[str]
+
+
+class RoutineDefinitionHistoryRead(ApiModel):
+    """R11-FP03: one routine's captured definitions, newest first.
+
+    An empty `versions` with a nonzero `total` means the page is past the end;
+    an empty `versions` with `total` zero means this routine has no captured
+    definition at all -- an Oracle package member, whose body belongs to its
+    package, is the ordinary case. Neither is ever answered with an invented
+    version 1.
+    """
+
+    routine_id: UUID
+    routine_qualified_name: str
+    routine_type: str
+    signature: str
+    status: str
+    #: The dialect each version's stored text was parsed as, which is the
+    #: source's, not the version's: a footprint derived for one dialect is not
+    #: evidence about another.
+    dialect: str
+    #: How the per-version footprints were arrived at, as a code the client
+    #: renders into a sentence (the `observation_scope` rule: the server states
+    #: the fact, the reader's surface writes the words).
+    #: `REPARSED_STORED_DEFINITION` -- derived on read from each version's own
+    #: stored value-free text, written nowhere, and **not** the reviewed
+    #: `deep_procedure_lineage_edge` set, which is a measurement of the body as
+    #: last read rather than a history.
+    footprint_basis: str
+    #: Distinct stored texts one request will parse. A version past it reads
+    #: `NOT_COMPUTED`; narrowing the window brings it back.
+    footprint_parse_budget: int
+    versions: list[RoutineDefinitionVersionRead]
+    limit: int
+    offset: int
+    total: int
+
+
 class CoverageDimensionRead(ApiModel):
     covered: int
     total: int
@@ -1846,15 +2276,17 @@ class ModelRouteConfigurationCreate(ApiModel):
         "GOOGLE_VERTEX",
         "OPENAI_COMPATIBLE_PRIVATE",
         "ON_PREM",
+        "ANTHROPIC",
+        "OPENROUTER",
     ]
     model_id: str = Field(min_length=2, max_length=255)
     endpoint_alias: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{2,254}$")
     credential_reference: str | None = Field(default=None, max_length=1000)
     data_residency: str = Field(min_length=2, max_length=100)
     retention_policy: Literal["ZERO_RETENTION", "BANK_MANAGED", "PROVIDER_CONTRACT"]
-    capabilities: list[Literal["SQL_GENERATION", "EXPLANATION", "EMBEDDINGS", "CLASSIFICATION"]] = (
-        Field(min_length=1, max_length=4)
-    )
+    capabilities: list[
+        Literal["SQL_GENERATION", "EXPLANATION", "EMBEDDINGS", "CLASSIFICATION", "DECISION"]
+    ] = Field(min_length=1, max_length=5)
     max_input_tokens: int = Field(default=8000, ge=100, le=1_000_000)
     max_output_tokens: int = Field(default=2000, ge=100, le=100_000)
     timeout_seconds: int = Field(default=30, ge=1, le=300)
@@ -1886,6 +2318,34 @@ class ModelRouteConfigurationRead(ApiModel):
     activation_status: str
     created_at: datetime
     updated_at: datetime
+
+
+class ModelRouteOutcomeRead(ApiModel):
+    """R11-MP11: one route's record over a window of Ask runs."""
+
+    route_key: str
+    runs: int
+    completed: int
+    rejected: int
+    failed: int
+    fallback_runs: int
+    circuit_skips: int
+    repairs_attempted: int
+    repairs_valid: int
+    candidates_compared: int
+    candidates_identical: int
+    candidates_same_sources: int
+    candidates_different: int
+    stated_cost_usd: float | None
+    cached_input_tokens: int
+
+
+class ModelRouteOutcomesRead(ApiModel):
+    organization_id: UUID
+    since: datetime
+    runs_considered: int
+    truncated: bool
+    routes: list[ModelRouteOutcomeRead]
 
 
 class KillSwitchEngageRequest(ApiModel):
@@ -2273,7 +2733,11 @@ class DataQualitySummaryRead(ApiModel):
     last_observed_at: datetime | None
     metadata_scan_age_minutes: float | None
     metadata_scan_status: str
-    source_freshness_status: Literal["NOT_CONFIGURED"]
+    # The four states `freshness.worst_freshness_state` can roll up to. This was
+    # `Literal["NOT_CONFIGURED"]`, which is why every table reported that
+    # forever: not merely unconfigured, but a response type that could not
+    # express any other answer, so even a working evaluation had nowhere to go.
+    source_freshness_status: Literal["FRESH", "STALE", "AWAITING_APPROVAL", "NOT_CONFIGURED"]
 
 
 class QualityRulePackUpsert(ApiModel):
@@ -2336,6 +2800,12 @@ class ContextProductDefinition(ApiModel):
     semantic_model_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
     glossary_term_version_ids: list[UUID] = Field(default_factory=list, max_length=500)
     eligible_tool_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    #: R11-FP12: stored procedures and functions the product names directly. Views need no list
+    #: of their own -- a view is a table id, and its coverage is derived from `table_ids`.
+    routine_ids: list[UUID] = Field(default_factory=list, max_length=500)
+    #: R11-FP09: approved ontology versions whose meaning the product is bound to -- pinned by
+    #: version id, so a later publication never changes what an existing product says.
+    ontology_version_ids: list[UUID] = Field(default_factory=list, max_length=50)
     allowed_consumer_roles: list[str] = Field(min_length=1, max_length=50)
     lineage_depth: int = Field(default=2, ge=0, le=4)
     quality_requirements: ContextProductQualityRequirements = Field(
@@ -2355,6 +2825,8 @@ class ContextProductDefinition(ApiModel):
             self.semantic_model_version_ids,
             self.glossary_term_version_ids,
             self.eligible_tool_version_ids,
+            self.routine_ids,
+            self.ontology_version_ids,
         )
         if not any(reference_groups):
             raise ValueError("a context product must include at least one governed reference")
@@ -2401,6 +2873,18 @@ class ContextProductVersionRead(ContextProductDefinition):
     superseded_by_version_id: UUID | None = None
 
 
+class ContextProductRoutineOptionRead(ApiModel):
+    """R11-FP12: one routine a context product draft in this project may name."""
+
+    id: UUID
+    datasource_id: UUID
+    datasource_name: str
+    schema_name: str
+    name: str
+    routine_type: str
+    signature: str
+
+
 class ContextProductRead(ApiModel):
     id: UUID
     organization_id: UUID
@@ -2411,6 +2895,37 @@ class ContextProductRead(ApiModel):
     latest_version: ContextProductVersionRead
     created_at: datetime
     updated_at: datetime
+
+
+class ContextProductChangesSummaryRead(ApiModel):
+    """R11-FP12: how much of one version's coverage has moved since it was published.
+
+    `changed_subjects` counts the entries the per-version coverage reading lists
+    (`load_coverage_changes`): a covered view's or routine's definition move, and a covered
+    table's, view's, column's or routine's retired description. `null` means the version was
+    never published, so there is no baseline to be stale against -- not that nothing moved.
+
+    `meaning_moved` counts the meaning versions it pins (ontology, semantic model, glossary term)
+    that no longer stand -- the `current: false` entries of `load_pinned_meaning` -- whether or
+    not the version was ever published.
+    """
+
+    product_id: UUID
+    version_id: UUID
+    version: int
+    status: str
+    changed_subjects: int | None
+    meaning_moved: int
+
+
+class ContextProductChangesSummaryListRead(ApiModel):
+    """The same reading for every product in a project, so a list can carry it without a click."""
+
+    project_id: UUID
+    generated_at: datetime
+    #: More products than `limit`: the rows not returned carry no reading either way.
+    truncated: bool
+    items: list[ContextProductChangesSummaryRead]
 
 
 class ContextProductScopeRead(ApiModel):
@@ -2454,72 +2969,6 @@ class ContextProductConsumerBindingRead(ApiModel):
     updated_at: datetime
 
 
-class LineageEdgeRead(ApiModel):
-    """One column-level lineage edge extracted from SQL."""
-
-    source_table: str
-    source_column: str
-    target_table: str
-    target_column: str
-    transformation_type: str
-    confidence: str
-    dialect: str
-
-
-class ViewLineageParseRequest(ApiModel):
-    sql: str = Field(min_length=1, max_length=500_000)
-    dialect: str = Field(default="postgres", pattern=r"^[a-z][a-z0-9_-]{1,49}$")
-
-
-class ViewLineageParseResponse(ApiModel):
-    edges: list[LineageEdgeRead]
-    confidence: str
-    dialect: str
-    sql_hash: str
-    errors: list[str] = Field(default_factory=list)
-    persisted_edge_count: int = 0
-
-
-class ViewLineageEdgeRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    source_table: str
-    source_column: str
-    target_table: str
-    target_column: str
-    source_table_id: UUID | None
-    source_column_id: UUID | None
-    target_table_id: UUID | None
-    target_column_id: UUID | None
-    transformation_type: str
-    confidence: str
-    dialect: str
-    sql_hash: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class ProcedureLineageEdgeRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    source_table: str
-    source_column: str
-    target_table: str
-    target_column: str
-    source_table_id: UUID | None
-    source_column_id: UUID | None
-    target_table_id: UUID | None
-    target_column_id: UUID | None
-    transformation_type: str
-    confidence: str
-    dialect: str
-    sql_hash: str
-    created_at: datetime
-    updated_at: datetime
-
-
 # ---------------------------------------------------------------------------
 # Group I addition (Atlas Wave-2, tracker N3/N12): API schemas for
 # `procedure_lineage_api.py`'s routine-identity-aware, procedure-aware
@@ -2528,9 +2977,33 @@ class ProcedureLineageEdgeRead(ApiModel):
 # ---------------------------------------------------------------------------
 
 
+class StatementRangeRead(ApiModel):
+    """R11-FP07: a statement's span in the stored body. Half-open code-point
+    offsets; 1-based lines and columns, the end being the statement's last
+    character. Positions only -- never an excerpt."""
+
+    start_offset: int
+    end_offset: int
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+
+
+class TokenRangeRead(ApiModel):
+    """R11-FP07 token grain: where, inside its statement, one end of an edge is
+    named -- `COLUMN` (a column reference, or the name a target column is given)
+    or `TABLE` (a table reference, without its alias). Half-open code-point
+    offsets into the same stored body as the statement range. Positions only."""
+
+    kind: str
+    start_offset: int
+    end_offset: int
+
+
 class DeepProcedureLineageEdgeRead(ApiModel):
-    """One edge from the procedure-aware parser (N3) -- richer than
-    `LineageEdgeRead`/`ProcedureLineageEdgeRead`: carries the statement it
+    """One edge from the procedure-aware parser (N3) -- richer than a flat
+    `view_lineage_edge`/`procedure_lineage_edge` row: carries the statement it
     came from, whether that statement was a write, whether either side is an
     intermediate (temp table/variable) local to the procedure body, and,
     for a construct the parser could not resolve, the named reason why
@@ -2551,6 +3024,34 @@ class DeepProcedureLineageEdgeRead(ApiModel):
     control_flow_context: str | None = None
     unparsed_reason: str | None = None
     via_temp_table: str | None = None
+    #: R11-FP07: the called routine this edge was read from, if any.
+    via_routine: str | None = None
+    #: R11-FP03: `via_routine`'s own captured routine id -- never the caller's.
+    #: Unresolved (null) for a cross-package member call this datasource's catalog
+    #: does not yet disambiguate to one routine.
+    via_routine_id: UUID | None = None
+    #: The stored row's ADR-0026 review state, on a listed edge. A parse
+    #: response reports what the parser found, and leaves it unset.
+    review_status: str | None = None
+    #: R11-FP07: where this edge's statement is in the stored body -- null when not
+    #: located, never a zero range -- what the range is the range of, and the
+    #: SHA-256 of the stored body the offsets index (compare it with the routine's
+    #: current stored body before trusting a range).
+    statement_range: StatementRangeRead | None = None
+    statement_range_status: str | None = None
+    statement_text_digest: str | None = None
+    #: R11-FP07 token grain: the token inside that statement naming the edge's
+    #: source and its target; null where it is not exactly one token (the same
+    #: table named twice, a column read twice in one expression, a transitive
+    #: edge's source, anything read from a called routine or never parsed).
+    source_token_range: TokenRangeRead | None = None
+    target_token_range: TokenRangeRead | None = None
+    #: R11-FP03: for an Oracle package, the member subprogram this edge belongs to,
+    #: the grain it is attributed at, and the captured member routine when exactly
+    #: one matches.
+    package_member: str | None = None
+    member_attribution: str | None = None
+    member_routine_id: UUID | None = None
 
 
 class DeepProcedureLineageParseResponse(ApiModel):
@@ -2568,6 +3069,12 @@ class DeepProcedureLineageParseResponse(ApiModel):
     # DELETE/MERGE/CREATE -- proven read-only, not merely "no write found".
     is_read_only: bool
     persisted_edge_count: int = 0
+    #: R11-FP07: SHA-256 of the stored body every located edge's range indexes.
+    statement_text_digest: str | None = None
+    #: R11-FP03: MEMBER / PACKAGE_FALLBACK for an Oracle package, with the
+    #: fallback's reason code; null for anything else.
+    member_attribution: str | None = None
+    member_fallback_reason: str | None = None
 
 
 class ProcedureCapabilityConstructRead(ApiModel):
@@ -2650,12 +3157,6 @@ class StudioConflict(ApiModel):
     current_value: Any
 
 
-class StudioDiffEntry(ApiModel):
-    field: str
-    before: Any
-    after: Any
-
-
 class StudioDiffRead(ApiModel):
     change_set_id: UUID
     items: list[dict[str, Any]]
@@ -2681,14 +3182,11 @@ class StudioParameterContractValidateResult(ApiModel):
 
 
 class StudioTestResultRead(ApiModel):
-    id: UUID
     change_set_id: UUID
     started_at: datetime
     completed_at: datetime | None
     passed: bool
     evidence: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
 
 
 class StudioEvalQuestionRead(ApiModel):
@@ -2867,6 +3365,20 @@ class AccessPolicyRead(ApiModel):
     updated_at: datetime
 
 
+class AccessPolicyProposalRead(AccessPolicyRead):
+    """R11-AUD02: what `POST /v1/organizations/{id}/access-policies` answers.
+
+    An `AccessPolicyRead` plus the review the create opened. A create is a proposal: the
+    policy is `DRAFT` and enforces nothing until a second principal approves the
+    `ACCESS_POLICY` review named here. A separate type rather than a field on
+    `AccessPolicyRead`, because the list route returns that type too, and a policy read
+    back from a list has no such review to name -- an always-null field there would read
+    as "no review" for a policy that is in fact waiting on one.
+    """
+
+    governance_review_id: UUID
+
+
 class AccessPolicyCreate(ApiModel):
     code: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,79}$")
     name: str = Field(min_length=2, max_length=200)
@@ -2879,7 +3391,12 @@ class AccessPolicyCreate(ApiModel):
     transform: dict[str, Any] = Field(default_factory=dict)
     condition: dict[str, Any] = Field(default_factory=dict)
     # A new policy starts DRAFT so that writing one can never silently change who
-    # can reach what; activation is a separate, auditable step.
+    # can reach what; activation is a separate, auditable step. That step is now a
+    # governance review a second principal decides (R11-AUD02), so `ACTIVE` is refused
+    # by the route with a 422 that says why. It stays in the enum rather than being
+    # removed from it: narrowing a request enum is a breaking OpenAPI change the diff gate
+    # would demand a version bump for, and a client that sends it deserves to be told why
+    # it is refused, not to be told its value does not exist.
     status: Literal["DRAFT", "ACTIVE"] = "DRAFT"
 
 
@@ -2978,6 +3495,62 @@ class AuthorizationSimulationRead(ApiModel):
     decisions: list[SimulatedDecision]
 
 
+# --- R11-D9: enforcement readiness -------------------------------------------
+#
+# Two different kinds of evidence, kept as separate fields rather than folded
+# into one score. `workspaces` is what traffic *showed* (recorded shadow
+# divergences); `unresolved_datasources` is what the *inventory* implies
+# regardless of traffic. A deployment can be clean on the first and unsafe on
+# the second -- that is the normal case for an estate whose datasources were
+# migrated without bindings -- so a single readiness number would hide exactly
+# the blocker an operator is looking for.
+
+
+class ReasonCodeCount(ApiModel):
+    reason_code: str
+    count: int
+
+
+class WorkspaceReadinessRead(ApiModel):
+    workspace_id: UUID
+    name: str
+    authorization_mode: str
+    would_be_denials: int
+    distinct_principals_affected: int
+    top_reason_codes: list[ReasonCodeCount]
+    #: No recorded would-be denial in the window. A prompt to look, not an
+    #: approval: a workspace nobody used this week is also "ready" by this test.
+    ready: bool
+
+
+class UnresolvedDatasourceRead(ApiModel):
+    datasource_id: UUID
+    name: str
+    reason_code: str
+    live_bindings: int
+
+
+class EnforcementReadinessRead(ApiModel):
+    organization_id: UUID
+    window_days: int
+    declared_posture: str
+    unresolved_scope_outcome: str
+    workspaces_total: int
+    workspaces_enforcing: int
+    workspaces_observing: int
+    datasources_total: int
+    datasources_resolvable: int
+    datasources_unbound: int
+    datasources_ambiguous: int
+    unresolved_datasources: list[UnresolvedDatasourceRead]
+    unresolved_datasources_truncated: bool
+    workspaces: list[WorkspaceReadinessRead]
+    #: Plain sentences, each naming one thing that must change before the
+    #: rollout step it blocks. Empty exactly when `ready` is true.
+    blockers: list[str]
+    ready: bool
+
+
 # --- DQ-1: Notification and Escalation Routing --------------------------------
 
 
@@ -3022,8 +3595,12 @@ class NotificationRuleRead(ApiModel):
 class NotificationEventRead(ApiModel):
     id: UUID
     organization_id: UUID
-    incident_id: UUID
-    rule_id: UUID
+    # NT-1 (2026-09-04) made both columns nullable: a governance notification -- an approval
+    # request, a kill switch, a certification about to lapse -- has neither. This model still
+    # demanded both, so `GET /v1/notifications` and its acknowledge action answered 500 the
+    # moment one such row existed (R11-D33).
+    incident_id: UUID | None
+    rule_id: UUID | None
     channel: str
     recipients: list[str]
     status: str
@@ -3689,13 +4266,13 @@ class StudioContextProductMaterializationRead(ApiModel):
 # ---------------------------------------------------------------------------
 
 
-PARSED_LINEAGE_EDGE_TYPES = (
-    "VIEW",
-    "PROCEDURE",
-    "DBT",
-    "OPENLINEAGE_TABLE",
-    "OPENLINEAGE_COLUMN",
-)
+#: `ROUTINE` is the routine-aware procedure table (`DeepProcedureLineageEdge`),
+#: under review since 2026-09-11; `PROCEDURE` is the raw-SQL one. `TRIGGER` is
+#: `TriggerLineageEdge` (R11-FP01), decidable since 2026-09-17. Mirrors
+#: `parsed_lineage_review_service.EDGE_TYPES` exactly.
+ParsedLineageEdgeType = Literal[
+    "VIEW", "PROCEDURE", "ROUTINE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN", "TRIGGER"
+]
 PARSED_LINEAGE_BULK_DECISION_MAX_ITEMS = 100
 
 
@@ -3708,7 +4285,7 @@ class ParsedLineageEdgeReviewQueueItemRead(ApiModel):
     the reviewer's UI dereferences on demand)."""
 
     edge_id: UUID
-    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
+    edge_type: ParsedLineageEdgeType
     organization_id: UUID
     created_at: datetime
     created_by: str | None
@@ -3729,7 +4306,7 @@ class ParsedLineageEdgeReviewQueueRead(ApiModel):
 class ParsedLineageEdgeDecisionRequest(ApiModel):
     """Decision on one PROPOSED parsed-lineage edge."""
 
-    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
+    edge_type: ParsedLineageEdgeType
     decision: Literal["APPROVED", "REJECTED"]
     reason: str = Field(min_length=1, max_length=2000)
 
@@ -3745,7 +4322,7 @@ class ParsedLineageEdgeDecisionRead(ApiModel):
 
 class ParsedLineageEdgeBulkDecisionItem(ApiModel):
     edge_id: UUID
-    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
+    edge_type: ParsedLineageEdgeType
 
 
 class ParsedLineageEdgeBulkDecisionRequest(ApiModel):
@@ -3769,3 +4346,419 @@ class ParsedLineageEdgeBulkDecisionResultRead(ApiModel):
     succeeded_count: int
     failed_count: int
     results: list[ParsedLineageEdgeBulkDecisionItemRead]
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-16 §5: the engine x native-object-kind x facet capability
+# matrix, served live by `GET /v1/engines/capability-matrix`. Every field is
+# derived at request time by `aida.engine_capability_matrix`, from the same
+# code `scripts/generate_engine_capability_matrix.py` publishes
+# `Docs/90-reference/engine-capability-matrix.md` from -- so the published
+# page is backed by a live, callable source rather than only a script.
+# ---------------------------------------------------------------------------
+
+
+class EngineCapabilityFacetRead(ApiModel):
+    """One (engine, native object kind, facet) answer.
+
+    `state` is one of `aida.capability_states.CapabilityState`; `reason` is a
+    code from that module's closed vocabulary, or empty where the state needs
+    none. Both are plain strings rather than enums so that adding a state or a
+    reason code stays a backward-compatible widening for every existing
+    consumer.
+    """
+
+    facet: str
+    state: str
+    reason: str
+    evidence: str
+
+
+class EngineCapabilityObjectKindRead(ApiModel):
+    """One native object kind on one engine, with its six facet answers.
+
+    Keyed by the **native** kind, never by the graph category it collapses
+    into: an Oracle PACKAGE, a PostgreSQL materialized view and a SQL Server
+    indexed view each keep their own row even where `graph_category` is shared.
+    """
+
+    engine: str
+    native_object_kind: str
+    graph_category: str
+    native_concept: bool
+    note: str
+    facets: list[EngineCapabilityFacetRead]
+
+
+class EngineCapabilityEngineRead(ApiModel):
+    """What the connector registry says about one engine, and how far it is proven.
+
+    `live_validation` is deliberately separate from every facet state: a state
+    says a code path exists, and that is not the same fact as the adapter
+    having been exercised against a live instance of the engine.
+    """
+
+    engine: str
+    display_name: str
+    dialect: str
+    adapter_version: str
+    implementation_status: str
+    maturity: str
+    parser_dialect_supported: bool
+    live_validation: str
+    flags: dict[str, str]
+    overridden_methods: list[str]
+    notes: str
+
+
+class EngineSourceMappingRead(ApiModel):
+    """How precisely a parsed fact can be located in its source text."""
+
+    granularity: str
+    state: str
+    reason: str
+    evidence: str
+    rationale: str
+
+
+class EngineDbtCoverageRead(ApiModel):
+    """Bounded coverage reporting for one dbt aspect (macros, hooks)."""
+
+    aspect: str
+    state: str
+    reason: str
+    evidence: str
+
+
+class EngineCapabilityMatrixRead(ApiModel):
+    matrix_key: list[str]
+    facets: list[str]
+    states: list[str]
+    generated_at: str
+    engines: list[EngineCapabilityEngineRead]
+    rows: list[EngineCapabilityObjectKindRead]
+    source_mapping: EngineSourceMappingRead
+    dbt_coverage: list[EngineDbtCoverageRead]
+    parser_degradation_reasons: list[str]
+    declared_gaps: list[str]
+
+
+class RoutineParseCoverageRead(ApiModel):
+    """R11-FP07 / finding F06.4: how completely one routine body was understood.
+
+    Persisted per object rather than re-derived by hunting for `UNPARSED`
+    edges, so "was this routine fully understood?" is a stored answer.
+    `state` is the reporting-boundary rendering of `parse_completed` and
+    `statement_count`; the booleans stay the stored truth.
+    """
+
+    routine_id: UUID
+    state: str
+    parse_completed: bool
+    is_read_only: bool
+    statement_count: int
+    unparsed_statement_count: int
+    unparsed_reason_codes: list[str]
+    dialect: str
+    confidence: str
+    source_mapping_granularity: str
+    parsed_at: datetime
+    #: R11-FP03: for an Oracle package, MEMBER or PACKAGE_FALLBACK and the
+    #: fallback's reason code; null for anything else.
+    member_attribution: str | None = None
+    member_fallback_reason: str | None = None
+
+
+class TriggerParseCoverageRead(ApiModel):
+    """R11-FP01: how completely one trigger's body was understood, as last measured.
+
+    The trigger axis of `RoutineParseCoverageRead`. `routine_id` is the routine the body was
+    actually read from -- a PostgreSQL trigger's function; null on an engine whose trigger
+    carries its own body -- so "which text was parsed" is part of the answer.
+    """
+
+    trigger_id: UUID
+    routine_id: UUID | None
+    state: str
+    parse_completed: bool
+    is_read_only: bool
+    statement_count: int
+    unparsed_statement_count: int
+    unparsed_reason_codes: list[str]
+    dialect: str
+    confidence: str
+    source_mapping_granularity: str
+    parsed_at: datetime
+
+
+class OkfBundleFileRead(ApiModel):
+    """One document in an OKF bundle: where it sits, its digest and its size.
+
+    R11-OKF01. The index a caller can read without downloading the archive, so a client can
+    compare digests for drift, or fetch only what changed, without moving bytes.
+    """
+
+    path: str
+    sha256: str
+    bytes: int
+
+
+class OkfChangeSummaryRead(ApiModel):
+    """What one stored publication changed against the publication before it (R11-OKF02).
+
+    Paths are the bundle's own opaque paths, never object names. `changed_subjects` counts the
+    identity keys whose frozen facts moved; `marked_subjects` counts the catalog subjects whose
+    change marks (FP15 signals, approvals, reviewed lineage) triggered the rebuild.
+    """
+
+    added: list[str]
+    changed: list[str]
+    removed: list[str]
+    changed_subjects: int
+    marked_subjects: int
+    full_render: bool
+
+
+class OkfPublicationRead(ApiModel):
+    """One stored, immutable OKF publication in the reader's own lineage (R11-OKF02).
+
+    `publication_id` is the snapshot identity a caller pins: the manifest it inspected and the
+    archive it later downloads are the same bytes when both name it. `rendered_count` documents
+    were rendered by this publication; `carried_count` kept the prior publication's stored bytes
+    without being rendered at all.
+    """
+
+    publication_id: UUID
+    sequence: int
+    trigger: str
+    captured_at: datetime
+    is_current: bool
+    bundle_content_digest: str
+    content_snapshot_digest: str
+    document_count: int
+    rendered_count: int
+    carried_count: int
+    valid: bool
+    changes: OkfChangeSummaryRead
+
+
+class OkfBundleRead(ApiModel):
+    """An OKF bundle's Atlas manifest plus its file index -- never the documents themselves.
+
+    R11-OKF01. Deliberately a separate contract from `ContextCompilationRead` rather than a new
+    `ContextCompilerTarget`: the design's instruction is to "keep single-file compile responses
+    compatible: use a separate bundle job/download contract if necessary rather than putting a
+    ZIP into a text-content field". Existing compiler responses are untouched, and an archive
+    is fetched from the download route beside this one.
+
+    `manifest` is the Atlas extension described in `Docs/90-reference/okf-export-profile.md`.
+    It is typed as a free-form mapping on purpose: it records compiler/profile version, selected
+    product version, file hashes, source-object versions, policy partition and scope digest, and
+    pinning each of those into the OpenAPI surface would make every manifest field an API
+    compatibility promise before the format has been through a second consumer.
+    """
+
+    okf_version: str
+    spec_revision: str
+    spec_conformance: str
+    profile: str
+    content_snapshot_digest: str
+    bundle_content_digest: str
+    scope_digest: str
+    document_count: int
+    valid: bool
+    findings: list[str]
+    files: list[OkfBundleFileRead]
+    manifest: dict[str, Any]
+    #: R11-OKF02: the stored publication this manifest describes, and when the reader's lineage
+    #: was last confirmed current -- which may be later than the publication, because a no-op
+    #: revalidation confirms without publishing.
+    publication: OkfPublicationRead
+    validated_at: datetime
+
+
+class OkfDocumentRead(ApiModel):
+    """One document of one stored OKF publication, with its exact bytes (R11-OKF02).
+
+    `content` is the Markdown a reader of the downloaded archive would find at `path`; the
+    `sha256` is of those bytes. `rendered_in_sequence` names the publication that first rendered
+    them -- earlier than `publication_sequence` when a rebuild carried the document unchanged.
+    """
+
+    publication_id: UUID
+    publication_sequence: int
+    path: str
+    sha256: str
+    bytes: int
+    rendered_in_sequence: int
+    subject_key: str | None
+    content: str
+
+
+class OkfPublicationHistoryRead(ApiModel):
+    """The reader's own lineage of stored publications for one version, newest first."""
+
+    context_product_version_id: UUID
+    items: list[OkfPublicationRead]
+
+
+class OkfObjectKnowledgeItemRead(ApiModel):
+    """One catalog object's document, as one context product's stored bundle holds it."""
+
+    context_product_version_id: UUID
+    product_key: str
+    product_version: int
+    product_name: str
+    publication: OkfPublicationRead
+    document: OkfDocumentRead
+    #: The manifest's value-free `source_objects` entry for this object: definition digest and
+    #: capture version, description state and version.
+    coverage: dict[str, Any]
+
+
+class OkfObjectSourceRead(ApiModel):
+    """What a datasource's own stored OKF bundle says about one catalog object (R11-OKF02).
+
+    Offered only when no product bundle the caller may read holds the object. `state` is one of
+    three answers, and each carries only what it may:
+
+    * `DOCUMENT` -- the object's document from the caller's own publication of the source
+      bundle: the datasource, the publication it came from, the document and the manifest's
+      value-free `coverage` row, exactly as a product's entry carries them.
+    * `NOT_IN_BUNDLE` -- the bundle the caller may read holds no document for this object. An
+      object never discovered, one no longer ACTIVE and one in a schema this caller's workspace
+      refuses all read alike, and nothing about the bundle (its size, its publication) is
+      counted, so the answer cannot be used to probe what was left out.
+    * `REFUSED` -- the datasource's read decision refused this caller. `reason` is the bare
+      reason code the datasource's own routes answer 403 with, and nothing else is carried: a
+      refusal names no bundle. It is a refusal and not an absence.
+
+    A bundle that could not be built or read (a capture racing a change, a source over the
+    limits) is an HTTP error, never a state. The fields a state does not carry are null, and
+    a value that does not match its state is refused at construction.
+    """
+
+    state: Literal["DOCUMENT", "NOT_IN_BUNDLE", "REFUSED"]
+    reason: str | None = None
+    datasource_id: UUID | None = None
+    datasource_name: str | None = None
+    publication: OkfPublicationRead | None = None
+    document: OkfDocumentRead | None = None
+    coverage: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_state_fields(self) -> "OkfObjectSourceRead":
+        carried = {
+            name
+            for name in (
+                "reason",
+                "datasource_id",
+                "datasource_name",
+                "publication",
+                "document",
+                "coverage",
+            )
+            if getattr(self, name) is not None
+        }
+        allowed = {
+            "DOCUMENT": {"datasource_id", "datasource_name", "publication", "document", "coverage"},
+            "NOT_IN_BUNDLE": {"datasource_id", "datasource_name"},
+            "REFUSED": {"reason"},
+        }[self.state]
+        if carried != allowed:
+            raise ValueError(
+                f"{self.state} carries exactly {sorted(allowed)}, not {sorted(carried)}"
+            )
+        return self
+
+
+class OkfObjectKnowledgeRead(ApiModel):
+    """One catalog object's stored knowledge: product bundles, else its source's (R11-OKF02).
+
+    `items` is the object's document from every authorized product bundle. `source` is null
+    whenever `items` is not empty: a product bundle is the reading a steward asked for, so it
+    wins and the source bundle is not even consulted. When `items` is empty, `source` says what
+    the object's own datasource bundle holds -- see `OkfObjectSourceRead`.
+    """
+
+    table_id: UUID
+    items: list[OkfObjectKnowledgeItemRead]
+    source: OkfObjectSourceRead | None = None
+
+
+class OkfContextRequest(ApiModel):
+    """A question to select knowledge for, from one product version's stored OKF bundle.
+
+    A body rather than a query string: a question is free text a person typed, and a URL is
+    what access logs and browser history keep.
+    """
+
+    question: str = Field(min_length=1, max_length=2000)
+    #: Characters of section text to return, at most 48,000 (about 12k tokens). Omitted, the
+    #: deployment's `okf_context_default_max_chars` applies (16,000 unless configured).
+    max_chars: int | None = Field(default=None, ge=1_000, le=48_000)
+    #: Select from this stored publication of the caller's own lineage instead of the current.
+    publication_id: UUID | None = None
+
+
+class OkfContextSectionRead(ApiModel):
+    """One section of one document, cut at a top-level heading (`anchor` is its slug)."""
+
+    anchor: str
+    heading: str
+    text: str
+    #: Set when a long schema table was cut to the rows the question names.
+    rows_shown: int | None = None
+    rows_total: int | None = None
+
+
+class OkfContextDocumentRead(ApiModel):
+    """A document the question matched (`hop` 0) or one linked from such a document (`hop` 1)."""
+
+    citation: str
+    path: str
+    sha256: str
+    type: str
+    title: str
+    status: str | None
+    description: str | None
+    hop: int
+    score: float
+    matched_terms: list[str]
+    linked_from: str | None
+    approved_statements: list[str]
+    derived_statements: list[str]
+    sections: list[OkfContextSectionRead]
+
+
+class OkfContextOmissionRead(ApiModel):
+    """A section the budget or the row filter left out, so nothing is dropped silently."""
+
+    path: str
+    anchor: str
+    reason: str
+    chars: int
+
+
+class OkfContextRead(ApiModel):
+    """Question-specific context from a stored OKF publication, with exact receipts (OKF-E).
+
+    `status` is `MATCHED` or `NO_MATCH`. `ambiguous` names documents the question matched
+    equally, for a caller to ask which was meant. `markdown` is the same selection as one text,
+    citation ids inline, for handing straight to a model.
+    """
+
+    context_product_version_id: UUID
+    product_key: str
+    product_version: int
+    publication: OkfPublicationRead
+    status: str
+    question_terms: list[str]
+    documents: list[OkfContextDocumentRead]
+    omitted: list[OkfContextOmissionRead]
+    omitted_count: int
+    ambiguous: list[str]
+    max_chars: int
+    used_chars: int
+    guidance: str
+    markdown: str

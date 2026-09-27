@@ -24,9 +24,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import (
+    REASON_WIDENING_NEEDS_REVIEW,
     AgentContractDefinition,
     AgentContractValidationError,
     CapabilityEnvelope,
+    contract_widening,
     load_agent_asset_version,
     load_agent_contract,
     parse_capability_envelope,
@@ -34,28 +36,49 @@ from aida.agent_contracts import (
 )
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
+from aida.correction_impact import downstream_impact
 from aida.db import get_session
+from aida.description_withdrawal import (
+    current_description_version,
+    request_description_withdrawal,
+)
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.events import record_audit, record_outbox
 from aida.governance_notifications import notify_safely
+from aida.model_import import request_model_import_reversal
 from aida.models import (
     AGENT_SAMPLING_RATE_FLOOR,
+    AgentBudgetWindow,
     AgentContract,
     AgentRun,
     AgentTask,
     AiAsset,
     AiAssetVersion,
+    AssetDescriptionDraft,
+    AuditEvent,
+    BulkStewardshipOperation,
+    ColumnDescriptionDraft,
     GovernanceReview,
+    MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
+    ModelImportBatch,
     Organization,
     ReviewAuditSample,
 )
 from aida.review_risk_tiers import effective_agent_ceiling, risk_tier_for
 from aida.reviewer_agent import (
+    REASON_AUDIT_BACKLOG,
+    REASON_SAMPLE_AGE,
     ReviewerAgentUnavailable,
     auto_decide_tier0_tier1,
+    oldest_unresolved_sample_age_hours,
     organization_suspended,
     pre_review_pending,
+    record_audit_backlog_refusal,
+    record_sample_age_refusal,
     resolve_audit_sample,
     set_suspended,
+    unresolved_audit_samples,
 )
 from aida.reviewer_agent_metrics import (
     REVISIT_TRIGGER_WINDOW_DAYS,
@@ -63,18 +86,32 @@ from aida.reviewer_agent_metrics import (
 )
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.stewardship_service import request_bulk_operation_reversal
+from aida.task_agent_registry import task_agent_for_principal
 
 router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 
 #: Who may author or change an agent's contract. Deliberately narrow: a
 #: contract is the agent's authority, so editing one is a T3-shaped action
 #: even though the contract itself is not routed through review.
-CONTRACT_AUTHORS = ("PlatformAdmin", "AgentDeveloper", "ModelRiskManager")
+#:
+#: R11-C6: holding one of these roles is necessary and no longer sufficient.
+#: The role says "you work on agents"; it never said *which* agents, so any
+#: `AgentDeveloper` could rewrite any other developer's agent inside the
+#: organization. `_require_agent_steward` binds a direct write to the agent
+#: version's registered owner, and `contract_widening` sends every widening
+#: edit to the reviewed path instead. See `_require_agent_steward`.
+CONTRACT_AUTHORS = ("PlatformAdmin", "AgentDeveloper")
+
+#: The break-glass role for the two controls below, and the only role that
+#: may act on an agent it does not own. Deliberately *not* the whole of
+#: `CONTRACT_AUTHORS`: `AgentDeveloper` is the role the controls exist to
+#: bound, so letting it break its own glass would leave nothing.
+CONTRACT_BREAK_GLASS = "PlatformAdmin"
 CONTRACT_READERS = (*CONTRACT_AUTHORS, "Reviewer", "Auditor", "DataSteward", "Operations")
 INBOX_READERS = (
     "PlatformAdmin",
     "AgentDeveloper",
-    "ModelRiskManager",
     "Reviewer",
     "MetadataReviewer",
     "Auditor",
@@ -99,6 +136,7 @@ class CapabilityEnvelopeModel(ApiModel):
     tool_slugs: list[str] = Field(default_factory=list)
     context_product_ids: list[str] = Field(default_factory=list)
     write_lanes: list[str] = Field(default_factory=list)
+    native_tools: list[str] = Field(default_factory=list)
 
 
 class AgentContractWrite(ApiModel):
@@ -157,11 +195,16 @@ class AgentTaskRead(ApiModel):
 
 class InboxBudget(ApiModel):
     daily_token_cap: int | None
-    #: Estimated, not provider-reported -- the same 4-bytes-per-token figure
-    #: the gateway enforces `daily_token_cap` against, which is what makes the
-    #: two numbers comparable at all. `None` means no run in the last 24h
-    #: reached a model call, which is not the same as zero consumption.
+    #: The sum of the last 24 hours' per-run estimates, by the same
+    #: 4-bytes-per-token figure the caps are checked against before each call.
+    #: `None` means no run in that time reached a model call, which is not the
+    #: same as zero consumption.
     daily_tokens_estimated: int | None
+    #: What today's (UTC) budget window holds: the figure `daily_token_cap` is
+    #: enforced against. Runs reconcile it to the tokens the provider reported
+    #: it billed, where it reported them, and runs still in flight hold a
+    #: reservation in it. `None` when no run reserved against a cap today.
+    daily_tokens_charged: int | None = None
 
 
 class InboxAgent(ApiModel):
@@ -257,6 +300,63 @@ class ReviewAuditSampleRead(ApiModel):
 class ResolveSampleRequest(ApiModel):
     human_outcome: Literal["AGREED", "DISAGREED"]
     rationale: str = Field(min_length=1, max_length=4000)
+    #: AR-11: also raise a governed reversal of what the disputed decision
+    #: did, linked to this sample. Only meaningful with DISAGREED, and only
+    #: for a sampled `BULK_STEWARDSHIP_OPERATION` whose type has a
+    #: compensating action -- `stewardship_service.request_bulk_operation_
+    #: reversal` refuses the rest by name rather than half-undoing them.
+    #: Opt-in rather than automatic: disagreeing with a decision and undoing
+    #: what it did are two judgements, and a reviewer who thinks the agent
+    #: was wrong may still think the change should stand while a human
+    #: authors a better one.
+    reverse_applied_changes: bool = False
+
+
+class ImpactSubjectRead(ApiModel):
+    object_type: str
+    object_id: str
+    annotation_version_id: str | None = None
+
+
+class AffectedRunRead(ApiModel):
+    agent_run_id: UUID
+    created_at: datetime
+    datasource_id: UUID
+    principal_id: str
+    status: str
+    #: `EXACT_VERSION` (the run cited the very annotation version the decision
+    #: published) and/or `ASSET_IN_CONTEXT` (it retrieved, or hydrated into
+    #: model context, an asset the decision changed).
+    bases: list[str]
+    matched_object_ids: list[str]
+
+
+class CorrectionStateRead(ApiModel):
+    #: BULK_REVERSAL, DESCRIPTION_WITHDRAWAL or IMPORT_REVERSAL.
+    kind: str
+    correction_id: UUID
+    #: PENDING, APPLIED or REJECTED.
+    status: str
+    effective_at: datetime | None
+
+
+class SampleDownstreamImpactRead(ApiModel):
+    """R11-C8: the answers that relied on a sampled decision while it stood."""
+
+    sample_id: UUID
+    object_type: str
+    human_outcome: str
+    window_start: datetime
+    #: `None` while the change still stands.
+    window_end: datetime | None
+    correction: CorrectionStateRead | None
+    #: False when nothing the decision changed can reach an answer (ownership).
+    reaches_answers: bool
+    subjects: list[ImpactSubjectRead]
+    scanned_runs: int
+    #: True when the window held more runs than one read scans.
+    truncated: bool
+    affected_runs: list[AffectedRunRead]
 
 
 class ReviewerAgentStateRead(ApiModel):
@@ -275,6 +375,22 @@ class ReviewerAgentStateRead(ApiModel):
     sampling_rate: float
     agent_principal_id: str
     evidence_max_age_minutes: int
+    #: AR-11: sampled decisions no human has read, the bound at which the agent
+    #: stops deciding, and whether it is stopped by it now. The licence to
+    #: decide is contingent on this backlog, so the state an operator sees
+    #: includes it.
+    unresolved_samples: int
+    max_unresolved_samples: int
+    audit_backlog_exceeded: bool
+    #: AR-11: the same licence, bounded in time rather than in count. The age
+    #: of the oldest unread sample (`None` when nothing is pending), the
+    #: deadline it is measured against, and whether that deadline is what is
+    #: stopping the agent now. Reported next to the count bound because an
+    #: operator seeing "12 unresolved, bound 50" needs to know the oldest of
+    #: the twelve arrived in February before concluding oversight is healthy.
+    oldest_pending_sample_hours: float | None
+    max_sample_age_hours: int
+    sample_age_exceeded: bool
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +431,7 @@ def _definition_from(body: AgentContractWrite) -> AgentContractDefinition:
             tool_slugs=envelope.tool_slugs,
             context_product_ids=envelope.context_product_ids,
             write_lanes=envelope.write_lanes,
+            native_tools=envelope.native_tools,
         ),
         autonomy_tier=body.autonomy_tier,
         supervisor_persona=body.supervisor_persona,
@@ -343,6 +460,134 @@ async def _require_agent_version(
 # ---------------------------------------------------------------------------
 # Contract CRUD
 # ---------------------------------------------------------------------------
+
+
+async def _refuse(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    organization_id: UUID,
+    ai_asset_version_id: UUID,
+    action: str,
+    reason: str,
+    status_code: int,
+    detail: str,
+    evidence: dict[str, Any] | None = None,
+) -> HTTPException:
+    """Record a DENIED row for one refused contract control and return the
+    exception to raise. Refusals here are evidence, not just answers: an
+    operator needs to see that someone reached for another team's agent.
+    """
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action=action,
+        resource_type="agent_contract",
+        resource_id=str(ai_asset_version_id),
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={"reason": reason, **(evidence or {})},
+    )
+    await session.commit()
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+async def _require_agent_steward(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    organization_id: UUID,
+    ai_asset_version_id: UUID,
+    version: AiAssetVersion,
+    action: str,
+) -> None:
+    """R11-C6: bind a direct contract control to *this* agent's registered owner.
+
+    `put_agent_contract` and the kill-switch endpoints gated on a role plus
+    an organization, and nothing else. `validate_contract_definition` blocks
+    naming *yourself* as the agent principal (INV-8), which stops the
+    single-developer self-supervision case -- but two developers editing each
+    other's agents defeats it trivially, and the plainer problem needed no
+    collusion at all: any one `AgentDeveloper` could widen any other agent's
+    envelope, or release its kill switch, anywhere in the organization.
+
+    The binding is `AiAssetVersion.owner_principal` -- the accountable human
+    already recorded against the agent version, non-nullable, and already the
+    identity `validate_contract_definition` refuses to let a contract name as
+    its agent. Using it here needs no new column and no new role: the
+    platform already knew who owns this agent, and simply never asked.
+
+    `PlatformAdmin` is the break-glass, audited like everything else. It is
+    not a hole in the control: a PlatformAdmin's *widening* edits are still
+    refused by `contract_widening` below, and their kill-switch release is
+    still held to maker != checker. Ownership decides who may touch an agent
+    at all; those two decide what may be done to it unilaterally.
+    """
+    if context.principal_id == version.owner_principal:
+        return
+    if CONTRACT_BREAK_GLASS in context.roles:
+        record_audit(
+            session,
+            replace(context, organization_id=organization_id),
+            action=f"{action}.break_glass",
+            resource_type="agent_contract",
+            resource_id=str(ai_asset_version_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "owner_principal": version.owner_principal,
+                "reason": "platform_admin_break_glass",
+            },
+        )
+        return
+    raise await _refuse(
+        session,
+        context,
+        organization_id=organization_id,
+        ai_asset_version_id=ai_asset_version_id,
+        action=action,
+        reason="agent_contract_not_steward",
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "only this agent version's registered owner may change its contract "
+            "directly; submit an agent contract request for review instead"
+        ),
+        evidence={"owner_principal": version.owner_principal},
+    )
+
+
+async def _kill_switch_engaged_by(
+    session: AsyncSession, *, organization_id: UUID, ai_asset_version_id: UUID
+) -> str | None:
+    """The principal who engaged the switch currently in force, or `None`.
+
+    `AgentContract` stores only the current-state flag; its own docstring
+    names `AuditEvent` as where "the immutable engage/release history lives",
+    so this reads the designed authority rather than adding a column that
+    would duplicate it. The most recent successful `agent_contract.kill` row
+    for this version is the engagement in force -- a release writes
+    `agent_contract.release`, so it cannot be mistaken for one.
+
+    `None` means the evidence is not there (an engagement older than the
+    audit retention window, or a flag set outside this API). That degrades
+    the maker != checker half of the release control, and deliberately does
+    not brick the switch: a kill switch nobody can ever release is its own
+    outage. The ownership half still applies, and the release audit records
+    `engaged_by: null` so the weaker decision is visible as such.
+    """
+    engaged_by: str | None = await session.scalar(
+        select(AuditEvent.principal_id)
+        .where(
+            AuditEvent.organization_id == organization_id,
+            AuditEvent.resource_type == "agent_contract",
+            AuditEvent.resource_id == str(ai_asset_version_id),
+            AuditEvent.action == "agent_contract.kill",
+            AuditEvent.outcome == "SUCCESS",
+        )
+        .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+        .limit(1)
+    )
+    return engaged_by
 
 
 @router.get(
@@ -380,9 +625,44 @@ async def put_agent_contract(
 
     Idempotent by (organization, version): a second PUT edits the same row
     rather than creating a rival authority for the same agent.
+
+    R11-C6 narrowed this path to what its own siblings always said it was
+    for -- *corrections*. Two controls bound it now:
+
+    1. the caller must be the agent version's registered owner, or break the
+       `PlatformAdmin` glass (`_require_agent_steward`);
+    2. an edit that **widens** the contract's authority is refused outright,
+       whoever asks, and pointed at the reviewed path
+       (`POST .../agent-contract-requests` -> `GovernanceReview`
+       `AGENT_CONTRACT_REQUEST`, maker != checker, plus a live AT-8/N17
+       evaluation gate at decision time). `contract_widening` says which
+       dimensions count and why.
+
+    The asymmetry is the design: tightening an agent's leash stays a one-
+    principal action, because an operator who has to convene a committee to
+    reduce an agent's blast radius will leave it wide instead. Handing an
+    agent *more* -- a tool slug, a context product, a higher tier, a looser
+    cap, a narrower kill scope -- is a grant of T3 authority
+    (`review_risk_tiers`: `AGENT_CONTRACT` sits with model routes and access
+    policies), and this platform does not let one principal make a T3 grant
+    alone anywhere else either.
+
+    Creating a *first* contract is not a widening: there is no prior
+    authority to widen, and the reviewed path already exists precisely for
+    onboarding an agent. It is still bound to the registered owner by (1),
+    and the granted dimensions are written into the audit row so the grant
+    is legible as one.
     """
     enforce_organization(context, organization_id)
     asset, version = await _require_agent_version(session, organization_id, ai_asset_version_id)
+    await _require_agent_steward(
+        session,
+        context,
+        organization_id=organization_id,
+        ai_asset_version_id=ai_asset_version_id,
+        version=version,
+        action="agent_contract.update",
+    )
     definition = _definition_from(body)
     try:
         validate_contract_definition(
@@ -399,6 +679,24 @@ async def put_agent_contract(
         session, organization_id=organization_id, ai_asset_version_id=ai_asset_version_id
     )
     created = contract is None
+    widened = () if contract is None else contract_widening(contract, definition)
+    if widened:
+        raise await _refuse(
+            session,
+            context,
+            organization_id=organization_id,
+            ai_asset_version_id=ai_asset_version_id,
+            action="agent_contract.update",
+            reason=REASON_WIDENING_NEEDS_REVIEW,
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "this change widens the agent's authority and cannot be applied "
+                "directly; submit it as an agent contract request so a second "
+                "principal decides it and the evaluation gate is checked "
+                f"({', '.join(widened)})"
+            ),
+            evidence={"widened": list(widened)},
+        )
     if contract is None:
         contract = AgentContract(
             organization_id=organization_id,
@@ -433,6 +731,30 @@ async def put_agent_contract(
             "kill_scope": contract.kill_scope,
             "sampling_rate": contract.sampling_rate,
             "tool_slug_count": len(definition.capability_envelope.tool_slugs),
+            # R11-C6: a first contract is a grant with nothing to compare
+            # against, so the dimensions it hands the agent are written out
+            # here rather than inferred later from a diff that has no
+            # left-hand side.
+            "granted_on_create": (
+                sorted(
+                    {
+                        *(
+                            f"capability_envelope.{field}"
+                            for field in (
+                                "tool_slugs",
+                                "context_product_ids",
+                                "write_lanes",
+                                "native_tools",
+                            )
+                            if getattr(definition.capability_envelope, field)
+                        ),
+                        "autonomy_tier",
+                        "kill_scope",
+                    }
+                )
+                if created
+                else []
+            ),
         },
     )
     record_outbox(
@@ -470,6 +792,53 @@ async def _set_kill(
     )
     if contract is None:
         raise HTTPException(status_code=404, detail="this agent version has no contract")
+    engaged_by: str | None = None
+    if not engaged:
+        # R11-C6: *releasing* is the controlled direction. Engaging stays open
+        # to every `CONTRACT_AUTHORS` principal on purpose -- an emergency
+        # brake that only the accountable owner can pull is a brake that is
+        # not there at 3am -- but disengaging one had exactly the same gate,
+        # so any `AgentDeveloper` could quietly undo any operator's stop.
+        #
+        # Two conditions, and the pair is what makes this "at least as
+        # controlled as approving a model route": ownership decides who may
+        # act on this agent at all, and maker != checker (the same INV-8 rule
+        # `governance_decision_service.check_decision_permitted` applies to
+        # every review in this codebase, delegation included) stops the
+        # principal who engaged the switch from being the one who lifts it.
+        _, release_version = await _require_agent_version(
+            session, organization_id, ai_asset_version_id
+        )
+        await _require_agent_steward(
+            session,
+            context,
+            organization_id=organization_id,
+            ai_asset_version_id=ai_asset_version_id,
+            version=release_version,
+            action="agent_contract.release",
+        )
+        engaged_by = await _kill_switch_engaged_by(
+            session,
+            organization_id=organization_id,
+            ai_asset_version_id=ai_asset_version_id,
+        )
+        if engaged_by is not None and (
+            engaged_by == context.principal_id
+            or engaged_by == context.active_delegator_principal_id
+        ):
+            raise await _refuse(
+                session,
+                context,
+                organization_id=organization_id,
+                ai_asset_version_id=ai_asset_version_id,
+                action="agent_contract.release",
+                reason="agent_kill_switch_self_release",
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "maker-checker separation is required: the principal who "
+                    "engaged this kill switch may not release it"
+                ),
+            )
     contract.kill_engaged = engaged
     record_audit(
         session,
@@ -483,6 +852,11 @@ async def _set_kill(
             "kill_engaged": engaged,
             "kill_scope": contract.kill_scope,
             "reason": reason,
+            # R11-C6: on a release, who the maker-checker check was made
+            # against. `null` says the engagement's audit evidence was not
+            # available and the check therefore only enforced ownership --
+            # the weaker decision, recorded as such rather than hidden.
+            **({} if engaged else {"engaged_by": engaged_by}),
         },
     )
     record_outbox(
@@ -698,6 +1072,55 @@ async def get_agent_inbox(
                 run_counts[version_id] = (int(total or 0), int(completed or 0))
                 tokens_today[version_id] = int(tokens or 0)
 
+    # What each version's daily window holds today (UTC): reconciled charges,
+    # billed where the provider reported them, plus reservations for runs still
+    # in flight. The daily cap is enforced against this, so it is the figure the
+    # inbox draws against the cap. One statement, like the counts above.
+    charged_today: dict[UUID, int] = {}
+    if version_ids:
+        for version_id, reserved in (
+            await session.execute(
+                select(
+                    AgentBudgetWindow.ai_asset_version_id, AgentBudgetWindow.reserved_tokens
+                ).where(
+                    AgentBudgetWindow.organization_id == organization_id,
+                    AgentBudgetWindow.ai_asset_version_id.in_(version_ids),
+                    AgentBudgetWindow.window_date == now.date(),
+                )
+            )
+        ).all():
+            charged_today[version_id] = int(reserved or 0)
+
+    # ADR-0029: a task agent writes no `AgentRun`. Every run it makes, completed
+    # or refused, leaves one `<key>_agent.run` audit row against its version, so
+    # its runs are counted from those -- one more grouped statement.
+    task_agent_runs = {
+        contract.ai_asset_version_id: agent.spec.run_action
+        for contract in contracts
+        if (agent := task_agent_for_principal(settings, contract.agent_principal_id))
+        is not None
+    }
+    if task_agent_runs:
+        for resource_id, audit_outcome, count in (
+            await session.execute(
+                select(AuditEvent.resource_id, AuditEvent.outcome, func.count())
+                .where(
+                    AuditEvent.organization_id == organization_id,
+                    AuditEvent.action.in_(set(task_agent_runs.values())),
+                    AuditEvent.resource_type == "agent_contract",
+                    AuditEvent.resource_id.in_([str(v) for v in task_agent_runs]),
+                    AuditEvent.occurred_at >= since,
+                )
+                .group_by(AuditEvent.resource_id, AuditEvent.outcome)
+            )
+        ).all():
+            version_id = UUID(str(resource_id))
+            total, completed = run_counts.get(version_id, (0, 0))
+            run_counts[version_id] = (
+                total + int(count),
+                completed + (int(count) if audit_outcome == "SUCCESS" else 0),
+            )
+
     agents: list[InboxAgent] = []
     for contract in contracts:
         version = versions_by_id.get(contract.ai_asset_version_id)
@@ -721,6 +1144,7 @@ async def get_agent_inbox(
                         contract.ai_asset_version_id
                     )
                     or None,
+                    daily_tokens_charged=charged_today.get(contract.ai_asset_version_id),
                 ),
                 kill_scope=contract.kill_scope,
                 kill_engaged=contract.kill_engaged,
@@ -869,6 +1293,425 @@ async def get_agent_inbox(
 # ---------------------------------------------------------------------------
 
 
+async def _reviewer_agent_state(
+    session: AsyncSession, organization_id: UUID, settings: Settings, *, suspended: bool
+) -> ReviewerAgentStateRead:
+    ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)
+    unresolved = await unresolved_audit_samples(session, organization_id)
+    limit = settings.reviewer_agent_max_unresolved_samples
+    age_limit = settings.reviewer_agent_max_sample_age_hours
+    oldest_hours = await oldest_unresolved_sample_age_hours(
+        session, organization_id, now=datetime.now(UTC)
+    )
+    return ReviewerAgentStateRead(
+        organization_id=organization_id,
+        enabled=settings.reviewer_agent_enabled,
+        suspended=suspended,
+        max_tier=ceiling,
+        configured_max_tier=settings.reviewer_agent_max_tier,
+        max_tier_clamped=ceiling != settings.reviewer_agent_max_tier,
+        sampling_rate=settings.reviewer_agent_sampling_rate,
+        agent_principal_id=settings.reviewer_agent_principal_id,
+        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
+        unresolved_samples=unresolved,
+        max_unresolved_samples=limit,
+        # A zero bound disables the check, as it does in `auto_decide_tier0_tier1`.
+        audit_backlog_exceeded=bool(limit) and unresolved >= limit,
+        oldest_pending_sample_hours=oldest_hours,
+        max_sample_age_hours=age_limit,
+        sample_age_exceeded=(
+            bool(age_limit) and oldest_hours is not None and oldest_hours >= age_limit
+        ),
+    )
+
+
+async def _record_backlog_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+) -> None:
+    """AR-11: the agent stopping for want of human attention is an event.
+
+    Recorded after the caller's rollback, so it survives it, then pushed to
+    the governance channel: a backlog nobody is told about is a backlog
+    nobody clears.
+    """
+    unresolved = await unresolved_audit_samples(session, organization_id)
+    limit = settings.reviewer_agent_max_unresolved_samples
+    record_audit_backlog_refusal(
+        session, organization_id, context=context, unresolved=unresolved, limit=limit
+    )
+    await session.commit()
+    await notify_safely(
+        session,
+        organization_id,
+        "REVIEWER_AGENT_AUDIT_BACKLOG",
+        {
+            "object_type": "REVIEWER_AGENT",
+            "object_id": str(organization_id),
+            "object_name": f"{unresolved} sampled decisions unread; the bound is {limit}",
+            "principal_id": context.principal_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
+
+
+async def _raise_sample_reversal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """AR-11: raise a governed undo of what the disputed decision applied.
+
+    The sampled decision names its `GovernanceReview`; the review names the
+    `BulkStewardshipOperation` it decided. That chain is what makes the
+    correction traceable without a free-text field or a timestamp join, and
+    it is walked here rather than trusted from the request body -- the
+    reviewer says "reverse this sample", never "reverse operation X".
+
+    Since R11-C8 every object type the agent can approve has a correction
+    reachable from here, each through that type's own governed path:
+
+    * bulk stewardship -- a reversal operation, below;
+    * an enrichment proposal -- a withdrawal of the annotation version the
+      agent approved (`_raise_annotation_withdrawal`);
+    * the three description draft types -- table, column and, since R11-FP08,
+      routine -- a withdrawal of the version the draft published
+      (`_raise_description_draft_withdrawal`);
+    * a workbook import -- a reversal batch that puts back what the import
+      replaced (`_raise_model_import_reversal`).
+
+    The refusal for anything else is deliberately explicit: answering "no such
+    reversal" is honest where quietly doing nothing would let a reviewer
+    believe a correction had been filed.
+    """
+    if sample.object_type == "METADATA_ENRICHMENT_PROPOSAL":
+        await _raise_annotation_withdrawal(session, sample, context=context)
+        return
+    if sample.object_type in (
+        "ASSET_DESCRIPTION_DRAFT",
+        "COLUMN_DESCRIPTION_DRAFT",
+        # R11-FP08: the third description draft type reaches the same
+        # compensating action. Listed here rather than left to the refusal
+        # below, because "no compensating action exists" would be false the
+        # moment a routine draft became agent-decidable, and a correction that
+        # silently does not exist is the state R11-C8 closed.
+        "ROUTINE_DESCRIPTION_DRAFT",
+    ):
+        await _raise_description_draft_withdrawal(session, sample, context=context)
+        return
+    if sample.object_type == "MODEL_IMPORT_BATCH":
+        await _raise_model_import_reversal(session, sample, context=context)
+        return
+    if sample.object_type != "BULK_STEWARDSHIP_OPERATION":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no compensating action exists for {sample.object_type}; "
+                "correct it through that object type's own path"
+            ),
+        )
+    operation = await session.scalar(
+        select(BulkStewardshipOperation).where(
+            BulkStewardshipOperation.governance_review_id == sample.governance_review_id,
+            BulkStewardshipOperation.organization_id == sample.organization_id,
+        )
+    )
+    if operation is None:
+        raise HTTPException(
+            status_code=409, detail="the sampled operation is no longer available"
+        )
+    reversal, review = await request_bulk_operation_reversal(
+        session,
+        operation,
+        reason=f"reverses a disputed reviewer-agent decision (sample {sample.id})",
+        requested_by=context.principal_id,
+        sample=sample,
+    )
+    record_audit(
+        session,
+        context,
+        action="stewardship.bulk_operation.reversal_requested",
+        resource_type="bulk_stewardship_operation",
+        resource_id=str(reversal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "reverses_operation_id": str(operation.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(review.id),
+            "operation_type": reversal.operation_type,
+            "subject_count": len(reversal.subject_ids),
+        },
+    )
+
+
+async def _raise_annotation_withdrawal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """R11-C8: undo an agent-approved business annotation by withdrawing it.
+
+    The chain is walked, not trusted: the sample names its review, the review
+    names the enrichment proposal, and the annotation records the proposal that
+    last wrote it. The version withdrawn is the approved one -- and only if the
+    agent the sample audits is the one who approved it. If a person has approved
+    a newer version since, that version is theirs, and withdrawing it would be
+    the second wrong change this ledger exists to prevent; the correction is then
+    a new proposal, and this refuses rather than guesses.
+
+    Withdrawn rather than deleted or rolled back to the superseded version: the
+    content stays for any run grounded on it, and the table reads as having no
+    approved annotation until a better one is proposed -- the same rule a
+    withdrawn description follows.
+    """
+    review = await session.get(GovernanceReview, sample.governance_review_id)
+    annotation = (
+        await session.scalar(
+            select(MetadataBusinessAnnotation).where(
+                MetadataBusinessAnnotation.organization_id == sample.organization_id,
+                MetadataBusinessAnnotation.source_proposal_id == UUID(review.object_id),
+            )
+        )
+        if review is not None
+        else None
+    )
+    if annotation is None:
+        raise HTTPException(
+            status_code=409,
+            detail="the sampled proposal's annotation is no longer the one on this table",
+        )
+    current = await session.scalar(
+        select(MetadataBusinessAnnotationVersion)
+        .where(
+            MetadataBusinessAnnotationVersion.annotation_id == annotation.id,
+            MetadataBusinessAnnotationVersion.status == "APPROVED",
+        )
+        .order_by(MetadataBusinessAnnotationVersion.version.desc())
+        .limit(1)
+    )
+    if current is None or current.approved_by != sample.agent_principal_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this annotation has been approved again since the agent's decision; "
+                "correct it with a new proposal rather than withdrawing a person's version"
+            ),
+        )
+    withdrawal, withdrawal_review = await request_description_withdrawal(
+        session,
+        organization_id=sample.organization_id,
+        subject_type="ANNOTATION",
+        subject_id=annotation.id,
+        reason=f"withdraws a disputed reviewer-agent decision (sample {sample.id})",
+        requested_by=context.principal_id,
+        sample=sample,
+    )
+    record_audit(
+        session,
+        context,
+        action="business_annotation.withdrawal_requested",
+        resource_type="description_withdrawal",
+        resource_id=str(withdrawal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "annotation_id": str(annotation.id),
+            "version_id": str(current.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(withdrawal_review.id),
+        },
+    )
+
+
+async def _raise_description_draft_withdrawal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """R11-C8: undo an agent-approved description draft by withdrawing it.
+
+    The chain is walked, not trusted: the sample names its review, the review
+    names the draft, and the draft records the exact version its approval
+    published (`published_version_id`). That version is withdrawn only while
+    it is still the asset's description. If someone has published since, the
+    current text is theirs, and withdrawing it would be the second wrong change
+    this ledger exists to prevent -- the correction is then a new description,
+    and this refuses rather than guesses.
+
+    Withdrawn through the same `description_withdrawal` a steward raises (T2,
+    decided by a person), not rolled back to the version the draft superseded:
+    a withdrawn description already follows that rule, and the asset reads as
+    undescribed until a better description is approved.
+    """
+    review = await session.get(GovernanceReview, sample.governance_review_id)
+    draft: AssetDescriptionDraft | ColumnDescriptionDraft | RoutineDescriptionDraft | None = None
+    if review is not None:
+        if sample.object_type == "COLUMN_DESCRIPTION_DRAFT":
+            draft = await session.get(ColumnDescriptionDraft, UUID(review.object_id))
+        elif sample.object_type == "ROUTINE_DESCRIPTION_DRAFT":
+            draft = await session.get(RoutineDescriptionDraft, UUID(review.object_id))
+        else:
+            draft = await session.get(AssetDescriptionDraft, UUID(review.object_id))
+    if (
+        draft is None
+        or draft.organization_id != sample.organization_id
+        or draft.published_version_id is None
+    ):
+        raise HTTPException(
+            status_code=409, detail="the sampled draft published no description to withdraw"
+        )
+    if isinstance(draft, ColumnDescriptionDraft):
+        subject_type, subject_id = "COLUMN", draft.column_id
+    elif isinstance(draft, RoutineDescriptionDraft):
+        # R11-FP08: `DescriptionWithdrawal.subject_type` admits ROUTINE, and the
+        # withdrawal path resolves the current version from the routine store --
+        # so the correction for a wrongly approved routine description is the
+        # same governed retraction a steward raises, at the same tier (T2), not
+        # a rollback to whatever the draft superseded.
+        subject_type, subject_id = "ROUTINE", draft.routine_id
+    else:
+        subject_type, subject_id = "TABLE", draft.table_id
+    current = await current_description_version(session, subject_type, subject_id)
+    if current is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the description this draft published is no longer approved; "
+                "nothing is left to withdraw"
+            ),
+        )
+    if current.id != draft.published_version_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this description has been published again since the agent's decision; "
+                "correct it with a new description rather than withdrawing a person's version"
+            ),
+        )
+    withdrawal, withdrawal_review = await request_description_withdrawal(
+        session,
+        organization_id=sample.organization_id,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        reason=f"withdraws a disputed reviewer-agent decision (sample {sample.id})",
+        requested_by=context.principal_id,
+        sample=sample,
+    )
+    record_audit(
+        session,
+        context,
+        action="description.withdrawal.request",
+        resource_type="description_withdrawal",
+        resource_id=str(withdrawal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "subject_type": subject_type,
+            "subject_id": str(subject_id),
+            "version_id": str(current.id),
+            "draft_id": str(draft.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(withdrawal_review.id),
+        },
+    )
+
+
+async def _raise_model_import_reversal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """R11-C8: undo an agent-approved workbook import by restoring what it replaced.
+
+    The batch is found by the review the sample names, never named by the
+    caller. What the reversal restores, and what it refuses, is
+    `model_import.request_model_import_reversal`'s to decide; this walks the
+    chain and records who asked.
+    """
+    batch = await session.scalar(
+        select(ModelImportBatch).where(
+            ModelImportBatch.governance_review_id == sample.governance_review_id,
+            ModelImportBatch.organization_id == sample.organization_id,
+        )
+    )
+    if batch is None:
+        raise HTTPException(status_code=409, detail="the sampled import is no longer available")
+    reversal, review = await request_model_import_reversal(
+        session, batch, requested_by=context.principal_id, sample=sample
+    )
+    record_audit(
+        session,
+        context,
+        action="model_import.reversal_requested",
+        resource_type="model_import_batch",
+        resource_id=str(reversal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "reverses_batch_id": str(batch.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(review.id),
+            "change_count": reversal.change_count,
+        },
+    )
+
+
+async def _record_sample_age_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+) -> None:
+    """AR-11: the age bound stopping the agent is an event too.
+
+    Same shape and same rollback-survival reasoning as
+    `_record_backlog_refusal`, and the same governance notification kind --
+    an operator's action is identical either way ("go read the sample"), so a
+    second notification kind would be two names for one instruction. The
+    outbox events stay distinct; only the human-facing channel is shared, and
+    the message says which bound tripped.
+    """
+    oldest_hours = await oldest_unresolved_sample_age_hours(
+        session, organization_id, now=datetime.now(UTC)
+    )
+    limit_hours = settings.reviewer_agent_max_sample_age_hours
+    record_sample_age_refusal(
+        session,
+        organization_id,
+        context=context,
+        # The guard only raises with a real age, but the read is re-done here
+        # after a rollback, so treat a vanished row as zero rather than crash
+        # the refusal path that exists to explain the refusal.
+        oldest_hours=oldest_hours if oldest_hours is not None else 0.0,
+        limit_hours=limit_hours,
+    )
+    await session.commit()
+    await notify_safely(
+        session,
+        organization_id,
+        "REVIEWER_AGENT_AUDIT_BACKLOG",
+        {
+            "object_type": "REVIEWER_AGENT",
+            "object_id": str(organization_id),
+            "object_name": (
+                f"the oldest sampled decision has been unread for {oldest_hours} hours; "
+                f"the bound is {limit_hours}"
+            ),
+            "principal_id": context.principal_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
+
+
 @router.get(
     "/organizations/{organization_id}/reviewer-agent", response_model=ReviewerAgentStateRead
 )
@@ -879,20 +1722,12 @@ async def get_reviewer_agent_state(
     settings: Settings = Depends(get_settings),
 ) -> ReviewerAgentStateRead:
     enforce_organization(context, organization_id)
-    return ReviewerAgentStateRead(
-        organization_id=organization_id,
-        enabled=settings.reviewer_agent_enabled,
+    return await _reviewer_agent_state(
+        session,
+        organization_id,
+        settings,
         suspended=settings.reviewer_agent_suspended
         or await organization_suspended(session, organization_id),
-        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
-        configured_max_tier=settings.reviewer_agent_max_tier,
-        max_tier_clamped=(
-            effective_agent_ceiling(settings.reviewer_agent_max_tier)
-            != settings.reviewer_agent_max_tier
-        ),
-        sampling_rate=settings.reviewer_agent_sampling_rate,
-        agent_principal_id=settings.reviewer_agent_principal_id,
-        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
     )
 
 
@@ -938,6 +1773,10 @@ async def run_reviewer_agent(
         )
     except ReviewerAgentUnavailable as exc:
         await session.rollback()
+        if exc.reason_code == REASON_AUDIT_BACKLOG:
+            await _record_backlog_refusal(session, organization_id, context, settings)
+        elif exc.reason_code == REASON_SAMPLE_AGE:
+            await _record_sample_age_refusal(session, organization_id, context, settings)
         raise HTTPException(status_code=409, detail=exc.reason_code) from exc
     await session.commit()
     return ReviewerAgentRunResult(
@@ -965,20 +1804,7 @@ async def suspend_reviewer_agent(
         session, organization_id, suspended=True, context=context, reason=body.reason
     )
     await session.commit()
-    return ReviewerAgentStateRead(
-        organization_id=organization_id,
-        enabled=settings.reviewer_agent_enabled,
-        suspended=True,
-        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
-        configured_max_tier=settings.reviewer_agent_max_tier,
-        max_tier_clamped=(
-            effective_agent_ceiling(settings.reviewer_agent_max_tier)
-            != settings.reviewer_agent_max_tier
-        ),
-        sampling_rate=settings.reviewer_agent_sampling_rate,
-        agent_principal_id=settings.reviewer_agent_principal_id,
-        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
-    )
+    return await _reviewer_agent_state(session, organization_id, settings, suspended=True)
 
 
 @router.post(
@@ -997,19 +1823,8 @@ async def resume_reviewer_agent(
         session, organization_id, suspended=False, context=context, reason=body.reason
     )
     await session.commit()
-    return ReviewerAgentStateRead(
-        organization_id=organization_id,
-        enabled=settings.reviewer_agent_enabled,
-        suspended=settings.reviewer_agent_suspended,
-        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
-        configured_max_tier=settings.reviewer_agent_max_tier,
-        max_tier_clamped=(
-            effective_agent_ceiling(settings.reviewer_agent_max_tier)
-            != settings.reviewer_agent_max_tier
-        ),
-        sampling_rate=settings.reviewer_agent_sampling_rate,
-        agent_principal_id=settings.reviewer_agent_principal_id,
-        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
+    return await _reviewer_agent_state(
+        session, organization_id, settings, suspended=settings.reviewer_agent_suspended
     )
 
 
@@ -1027,6 +1842,31 @@ class DisagreementRateRead(ApiModel):
     breaches_revisit_trigger: bool
 
 
+class RiskTierDisagreementRateRead(ApiModel):
+    risk_tier: str
+    sampled: int
+    resolved: int
+    agreed: int
+    disagreed: int
+    pending: int
+    #: Only approvals are sampled, so this is the sampled false-approval rate
+    #: for the tier. None, never 0, when nothing has been resolved.
+    disagreement_rate: float | None
+    sufficient_sample: bool
+
+
+class AuditResolutionTimeRead(ApiModel):
+    #: Samples taken in the window that a human has since resolved, and the
+    #: hours each waited for its verdict. None when nothing is resolved.
+    resolved: int
+    median_hours: float | None
+    p90_hours: float | None
+    max_hours: float | None
+    #: Every unread sample the organization has, and the oldest one's age.
+    pending: int
+    oldest_pending_hours: float | None
+
+
 class DisagreementReportRead(ApiModel):
     window_days: int
     computed_at: datetime
@@ -1039,6 +1879,10 @@ class DisagreementReportRead(ApiModel):
     minimum_resolved_for_signal: int
     breaching_object_types: list[str]
     by_object_type: list[DisagreementRateRead]
+    #: AR-11: the same samples cut by risk tier.
+    by_risk_tier: list[RiskTierDisagreementRateRead]
+    #: AR-11: how long the sample waits for a human.
+    resolution: AuditResolutionTimeRead
 
 
 @router.get(
@@ -1083,6 +1927,27 @@ async def get_disagreement_rates(
             )
             for row in report.by_object_type
         ],
+        by_risk_tier=[
+            RiskTierDisagreementRateRead(
+                risk_tier=row.risk_tier,
+                sampled=row.sampled,
+                resolved=row.resolved,
+                agreed=row.agreed,
+                disagreed=row.disagreed,
+                pending=row.pending,
+                disagreement_rate=row.disagreement_rate,
+                sufficient_sample=row.sufficient_sample,
+            )
+            for row in report.by_risk_tier
+        ],
+        resolution=AuditResolutionTimeRead(
+            resolved=report.resolution.resolved,
+            median_hours=report.resolution.median_hours,
+            p90_hours=report.resolution.p90_hours,
+            max_hours=report.resolution.max_hours,
+            pending=report.resolution.pending,
+            oldest_pending_hours=report.resolution.oldest_pending_hours,
+        ),
     )
 
 
@@ -1136,6 +2001,73 @@ async def list_audit_samples(
     )
 
 
+@router.get(
+    "/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/downstream-impact",
+    response_model=SampleDownstreamImpactRead,
+)
+async def get_sample_downstream_impact(
+    organization_id: UUID,
+    sample_id: UUID,
+    context: SecurityContext = Depends(require_roles(*CONTRACT_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> SampleDownstreamImpactRead:
+    """R11-C8: the answers produced while a sampled decision's change stood.
+
+    A correction undoes the catalog change; this finds what it cannot undo --
+    the agent runs that cited or consulted what the decision changed, between
+    the decision and the moment its correction took effect. Read by the same
+    population that reads the sample queue, and value-free: identifiers,
+    timestamps and match bases, never a question or an answer. Deciding what to
+    do about each answer is the owner's step in the oversight runbook (section
+    4); see `aida.correction_impact` for how a match is made and what it proves.
+    """
+    enforce_organization(context, organization_id)
+    sample = await session.get(ReviewAuditSample, sample_id)
+    if sample is None or sample.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="audit sample not found")
+    impact = await downstream_impact(session, sample)
+    return SampleDownstreamImpactRead(
+        sample_id=sample.id,
+        object_type=sample.object_type,
+        human_outcome=sample.human_outcome,
+        window_start=impact.window_start,
+        window_end=impact.window_end,
+        correction=(
+            CorrectionStateRead(
+                kind=impact.correction.kind,
+                correction_id=impact.correction.correction_id,
+                status=impact.correction.status,
+                effective_at=impact.correction.effective_at,
+            )
+            if impact.correction is not None
+            else None
+        ),
+        reaches_answers=impact.reaches_answers,
+        subjects=[
+            ImpactSubjectRead(
+                object_type=subject.object_type,
+                object_id=subject.object_id,
+                annotation_version_id=subject.annotation_version_id,
+            )
+            for subject in impact.subjects
+        ],
+        scanned_runs=impact.scanned_runs,
+        truncated=impact.truncated,
+        affected_runs=[
+            AffectedRunRead(
+                agent_run_id=run.agent_run_id,
+                created_at=run.created_at,
+                datasource_id=run.datasource_id,
+                principal_id=run.principal_id,
+                status=run.status,
+                bases=list(run.bases),
+                matched_object_ids=list(run.matched_object_ids),
+            )
+            for run in impact.affected_runs
+        ],
+    )
+
+
 @router.post(
     "/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/resolve",
     response_model=ReviewAuditSampleRead,
@@ -1172,7 +2104,38 @@ async def resolve_sample(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.reverse_applied_changes:
+        if body.human_outcome != "DISAGREED":
+            raise HTTPException(
+                status_code=422,
+                detail="a reversal can only accompany a DISAGREED verdict",
+            )
+        # AR-11: this is the sample-to-correction link being written. Raised
+        # inside the same transaction as the verdict, so a sample can never be
+        # resolved as disputed with the reversal the reviewer asked for
+        # silently missing -- and the refusals inside each type's correction
+        # (no compensating action, no recorded effect, changed since) surface
+        # as the reviewer's own 4xx rather than as a correction that quietly
+        # did not happen.
+        await _raise_sample_reversal(session, sample, context=context)
     await session.commit()
+    if body.human_outcome == "DISAGREED":
+        # AR-11: a human saying the agent was wrong starts a correction, and
+        # the correction belongs to whoever owns the object. The procedure is
+        # Docs/40-engineering/11-reviewer-agent-oversight-runbook.md.
+        await notify_safely(
+            session,
+            organization_id,
+            "REVIEWER_AGENT_SAMPLE_DISAGREED",
+            {
+                "object_type": sample.object_type,
+                "object_id": str(sample.governance_review_id),
+                "risk_tier": sample.risk_tier,
+                "principal_id": context.principal_id,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            settings=get_settings(),
+        )
     return ReviewAuditSampleRead(
         sample_id=sample.id,
         governance_review_id=sample.governance_review_id,

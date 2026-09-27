@@ -9319,8 +9319,11 @@ table alongside a real 2-table FK graph, proving the producer's data does not su
 unified-graph edge, a `counts_by_source` entry, or (where relevant) a node — concrete evidence of
 the gap, not just a claim about it:
 
-- `test_at10_bi_metric_column_edges_do_not_appear_in_the_unified_graph` — a `BiMetricColumnEdge`
-  resolved to a real table via `matched_table_id` still contributes nothing.
+- (BI gap test, 2026-09-01) — a `BiMetricColumnEdge` resolved to a real table via
+  `matched_table_id` still contributed nothing. **Superseded 2026-09-11 by R11-B13**, which
+  joined BI lineage to the graph: the gap test was replaced by
+  `test_r11b13_a_bi_report_reaches_the_graph_with_its_provenance`, which asserts the
+  opposite. The entry above is left as the record of what was true on 2026-09-01.
 - `test_at10_ai_decision_edges_do_not_appear_in_the_unified_graph_or_impact` — a real
   `RETRIEVAL_SELECTED` `AiDecisionRecord` naming a real table as `target_node` contributes nothing
   to the graph *or* to that table's own impact traversal (`upstream`/`downstream` both empty).
@@ -11884,3 +11887,571 @@ would have meant looking in two places to answer one question.
 - **No bulk withdraw.** Retiring the descriptions on forty columns is forty
   requests and forty reviews. The workbook path deliberately cannot express a
   deletion, so there is no bulk route at all.
+
+---
+
+## 2026-09-09 — Four documented agent controls were not the controls that ran
+
+A critical review of the agent architecture (`10-architecture/15-agent-architecture-critical-review.md`,
+findings AR-01..AR-12) went looking for the distance between what the platform's documents claim
+about agent authority and what its code enforces. It found four guard defects and a class of
+declared-but-unread configuration. This entry records the remediation and, more usefully, the
+three things the *fix* found that the review itself had missed.
+
+### The correction this entry exists to make
+
+Three tracker rows and two entries in this log state, as verified evidence, that `AgentRun` carries
+no foreign key back to `AiAsset`/`AiAssetVersion` and that no proposal pathway in this codebase has
+a confidence-gated auto-apply branch: **UX-19** (2026-09-01), **N15** (2026-09-02) and **UX-15**
+(2026-09-02). Both statements were true and carefully checked when written. Both are false now.
+`AgentRun.ai_asset_version_id` exists and is populated by `agent_orchestrator._stage_screen`
+whenever a run executes under a registered agent's contract, and ADR-0027's
+`reviewer_agent.auto_decide_tier0_tier1` is a genuine unattended-decision branch. Per this log's own
+convention the original entries stand unedited; this is the correction. The delivered work in those
+rows is unaffected — what expired is their honesty note, which is exactly the kind of claim that
+rots silently because nothing tests a docstring.
+
+### What the review found
+
+Four guard defects, all in code that had passing tests:
+
+1. **The T0/T1 ceiling was a default, not a limit.** `Settings.reviewer_agent_max_tier` accepts T2
+   and T3, and `agent_decidable_object_types` passed that value straight into its comparison — so a
+   configured T3 admitted `CONTEXT_PRODUCT_VERSION`, `MODEL_ROUTE_CONFIGURATION`,
+   `CROSS_BOUNDARY_GRANT` and `ACCESS_POLICY`. Its own docstring said this could not happen.
+2. **Bulk items were tiered without their size.** Pre-review called `risk_tier_for(object_type)`
+   with no payload, which answers T1 for both bulk types — reading as "small" when it meant "not
+   measured". A 900-change workbook sat at T1.
+3. **A missing confidence was the most permissive input the reviewer rule had**, not the most
+   restrictive.
+4. **Suspension was checked at batch entry only**, so a suspension raised while a batch ran did not
+   stop the batch it was raised during.
+
+And a class of configuration that was validated on write, stored, and read by nothing:
+`AgentContract.daily_token_cap`, `per_run_token_cap`, `wall_clock_seconds_cap`,
+`capability_envelope.context_product_ids` and `capability_envelope.write_lanes`.
+
+### The three things the fix found that the review had not
+
+**AR-03 was understated, and the real version is worse.** The review said a missing confidence
+produced an approval. In practice the confidence was *always* missing: `_proposal_confidence` read
+`proposal_confidence` out of `GovernanceReview.pre_review_evidence`, a field that pre-review alone
+writes — and pre-review skips already-pre-reviewed rows to reach it. So the only pass that ever read
+it saw `None` every time. Every tier-eligible item with no prior rejection and no open quality
+incident was recommended APPROVE, and `reviewer_agent_approve_confidence` was unreachable dead
+configuration. The rule's docstring described it as "deliberately reluctant"; absent confidence was
+its most permissive branch.
+
+**A docstring was the specification and the code did not implement it.**
+`review_risk_tiers.agent_decidable_object_types` stated that a misconfigured ceiling "can never
+widen it past what this module classifies" while doing exactly that. The claim was load-bearing —
+ADR-0027's condition (a) rests on it — and nothing compared the two.
+
+**The reviewer agent's happy path had never been executed by a test.** Every auto-decision test in
+`tests/test_reviewer_agent.py` asserted a refusal, and the file never imported `aida.semantic_api`,
+so no target adapter was registered and `decide_review` would have refused every object type with
+`unsupported governance object type`. That is how four defects in one guard chain coexisted with a
+green suite. A fifth defect of the same shape: `test_the_allowlist_is_derived_from_the_tier_table_not_from_config`
+asserted that every type a T3 ceiling admitted was a *classified* type — true, while it admitted
+every T2 and T3 one. A passing test asserting the wrong property.
+
+### What was verified
+
+Full Python suite green (9,061 tests). `ruff`, `mypy`, import-linter (11 contracts kept), docs-link
+gate (214 files), reachability gate. OpenAPI baseline and `ui-next/src/lib/types.ts` regenerated,
+purely additive both times; `ui-next` 514 tests green. Migration `a7c41e93d2b0`
+(`agent_budget_window`) is the single Alembic head, **applied against the running PostgreSQL 17 and
+the table verified column-for-column** rather than assumed from a passing SQLite suite.
+
+AR-05's guard was raced on real PostgreSQL the following day
+(`tests/test_agent_budget_postgres_concurrency.py`), the same reproduction F05 got: ten racers on
+ten connections released from one `asyncio.Barrier`, at READ COMMITTED and REPEATABLE READ. It is
+falsifiable and was falsified — removing the cap clause from the conditional `UPDATE`'s `WHERE`
+turns three READ COMMITTED tests red with a 1000-token day holding 2000 tokens.
+
+### Known limitations, named rather than absorbed
+
+- **AR-09 is untouched.** Enterprise-scale capacity, recovery and tenant fairness are unmeasured.
+  One Temporal task queue still carries discovery and ingestion. Separating queues without the
+  experiments would have looked like progress and established nothing.
+- **AR-03's evaluation does not exist.** The agent now approves on a proposal's *self-reported*
+  score. Nothing has tested what that score is worth against misleading metadata or a deliberately
+  wrong proposal. Unattended review should not be enabled on the code fix alone.
+- **AR-04's stop is bounded only at READ COMMITTED.** At REPEATABLE READ a re-read returns the
+  snapshot and a running batch continues to its limit; no application-level check can defeat that.
+- **AR-05's numbers are estimates.** No provider adapter reports billable usage.
+  `reconcile_run_budget` is the single place a real figure would enter. At REPEATABLE READ the
+  losing reserver is refused SQLSTATE 40001, which needs a retry loop the application does not
+  supply — and at that isolation level removing the guard changes nothing, because the isolation
+  level bounds the day by itself.
+- **AR-06 enforced what it could trace and fail-closed what it could not.** `write_lanes` is now
+  refused at validation rather than stored unenforced. The endpoint/path enforcement matrix does not
+  exist.
+- **AR-10 closed one ingress, not the class.** The classifier remains evadable by paraphrase; INV-3
+  remains the load-bearing control.
+- **AR-11 stops the agent when humans fall behind. It says nothing about the decisions already
+  made** — withdrawal, compensation and notification procedures are absent.
+
+### Operator action required before enabling any of this
+
+Every `AgentContract` written before this change has an empty `capability_envelope.context_product_ids`,
+because nothing read the field. An empty allowlist now allows nothing, so a contracted agent will
+lose context-product access through MCP until its contract names the products it needs. Human
+principals are unaffected. Checked against the running stack at the time of writing: zero contracts
+exist there, so no live deployment is affected today.
+
+---
+
+## 2026-09-10 — AR-05 raced on PostgreSQL, and a budget leak found in its own fix
+
+Two pieces of work against the 2026-09-09 agent review, one of which is a correction to the
+remediation rather than to the original finding.
+
+### AR-05's reproduction, and what falsifying it showed
+
+`tests/test_agent_budget_postgres_concurrency.py` races `reserve_run_budget` on a real
+PostgreSQL, the same shape F05 got: ten racers on ten connections released from one
+`asyncio.Barrier`, at READ COMMITTED and REPEATABLE READ. Migration `a7c41e93d2b0` was applied
+against the running PostgreSQL 17 and `agent_budget_window` verified column-for-column — the
+table, both foreign keys, the unique constraint, the CHECK and all three indexes — rather than
+inferred from a green SQLite suite.
+
+The guard was then removed to check the tests were worth having. At READ COMMITTED three go red,
+with a 1000-token day holding 2000. **At REPEATABLE READ removing it changes nothing**: PostgreSQL
+aborts the blocked writers with 40001 before they can double-count, so the isolation level bounds
+the day by itself and those cases confirm the invariant without testing the guard. That is written
+into the file rather than left as an implied "eight tests passed", because it means only half the
+matrix is load-bearing — and it is the READ COMMITTED half, which is what the application connects
+at.
+
+### The leak that arrived inside the fix
+
+The reservation's failure path changed twice in a day and both versions were wrong.
+
+The first released a failed run's reservation in full. That treats a timeout as free, and a
+timeout can follow work the provider already billed.
+
+The second — a review correction, and right about the first — held the reservation in full
+instead. Nothing ever reconciled it. Five timeouts against a 1000-token day at a 200-token per-run
+cap consumed **the entire day**, and the sixth run was refused, the agent locked out until the UTC
+window rolled over having produced nothing. This was reproduced directly before being fixed, not
+reasoned about: five reservations, no answers, `agent_daily_token_cap_exhausted`.
+
+Neither version was careless; both substituted a guess for the number the platform actually has.
+It has the input. The payload was serialized and sent, once per planned attempt, and
+`estimate_payload_tokens` measured it. `settle_unresolved_run_budget` charges that and releases
+the output allowance the failed run never produced, recording both figures in
+`plan_evidence.budget_usage_uncertain`. Failure is neither free nor permanent.
+
+It never raises: it runs while an exception is already unwinding, and a budget error thrown from
+there would replace the reason the run failed with a reason about accounting.
+
+### Two fail-opens in the previous day's work, found by another session
+
+Recorded here because both were in code this project's own remediation added, and both passed
+their tests:
+
+- `load_contract_for_principal` returned `None` for an ambiguous principal, so an agent holding
+  two contracts skipped the capability envelope entirely — a fail-open introduced by the fix for
+  AR-06. It now refuses (`agent_contract_unresolved`).
+- `organization_suspended` lacked `populate_existing=True`, so the per-item suspension re-read
+  added for AR-04 was served from SQLAlchemy's identity map. The mid-batch stop was weaker than
+  its own docstring claimed.
+
+### Verified
+
+Full Python suite green. `ruff`, `mypy`, docs-link gate, `test_doc_claims.py`. The eight PostgreSQL
+concurrency tests run against the live stack rather than skipping, because the default
+`Settings.database_url` reaches it.
+
+### Still open, unchanged
+
+AR-09 (enterprise-scale capacity, unmeasured) and the measurement halves of AR-03, AR-04, AR-06,
+AR-10, AR-11 and AR-12. Every figure in the budget path remains an *estimate*; no provider adapter
+reports billable usage, and `reconcile_run_budget` is still the single place a real one would
+enter.
+
+## 2026-09-10 — Column description drafting, and Excel save-back through an add-in
+
+Commits `1b66c9f` (the backend, committed by a parallel session under its own message while this
+one was still writing it; its contents are this work and nothing else), `15ea6f1` (UI, tests and a
+review-queue fix) and `65d5719` (the Excel add-in), plus `72d1edb`, regenerating the surface control matrix
+those five routes had left stale. The full suite caught that; the targeted runs, which
+regenerated the OpenAPI baseline and UI types, did not. It was regenerated from a clean
+worktree at HEAD, because another session's uncommitted router was on disk.
+
+### Column descriptions are drafted, on the table-draft contract
+
+`aida.column_description_service` drafts a description for each undescribed column from catalog
+evidence alone: dbt column docs, the source system's comment, key and foreign-key membership, and
+approved same-source relationships. No model call. It scores on the four dimensions table drafts
+use and shares their 0.4 submission bar, and it publishes only through an independent decision on a
+`COLUMN_DESCRIPTION_DRAFT` review (risk tier T0, reviewer-agent resolver on `overall_score`).
+Nothing is read into a column's name. A draft records the description version it was composed
+against, and approval refuses if that has moved, retirement included. A partial unique index allows
+one open draft per column, and a workbook batch that describes a column closes its DRAFT-status
+draft as SUPERSEDED. Stewards use it from the column panel; the workbook export carries the open
+draft beside `business_description`.
+
+### A reviewer could approve table-draft text they had never seen
+
+Description drafts have no field diff, and the review queue's evidence for them listed the signals
+a draft was built from, never the draft. The proposed text now leads the evidence for column and
+table drafts, and the queue row quotes it.
+
+### On the dev catalog, deterministic drafting produces nothing submittable
+
+Measured read-only: 27 active tables, 196 columns, **0 reviewable drafts**. The catalog has no dbt
+column docs, no source comments and no approved relationships, so every draft is structure-only and
+scores 0.15 to 0.31. The rule is working. The expectation that column descriptions get generated is
+not met on this estate until the catalog carries authored evidence, or until model-assisted drafting
+covers the thin columns. That choice is open.
+
+### Excel save-back is the existing import, reached from inside Excel
+
+An Office add-in (`ui-next/excel-addin/`) opens a datasource's model from Atlas as a new workbook
+and sends the open workbook back to `POST /v1/datasources/{id}/model/import`, the endpoint the
+browser upload uses. Stale-edit skipping and the batch review are unchanged. Identity binding
+tightened: the server now refuses a workbook whose README names another datasource, and the export
+records the organization so the add-in can address the right tenant. Under OIDC the add-in signs in
+through an Office dialog that runs the existing PKCE flow. Vite builds the two add-in pages; dev
+HTTPS is opt-in. The frontend reachability walker now seeds every top-level page.
+
+### Verified
+
+- The full backend suite on a clean checkout of `72d1edb`: 9143 passed, 23 skipped, 0 failed (exit 0).
+- 19 backend tests for column drafts. The export, import, manifest and reachability suites.
+- The migration/ORM drift gate on real PostgreSQL. No breaking OpenAPI change: five paths added.
+- 591 ui-next tests, including the add-in pane against a fake Office runtime, and the production
+  build emitting both add-in pages and their icons.
+- The new migration was **not** applied to the dev database. A semantic-inference run in the
+  worker container had held one transaction for over an hour, with row-exclusive locks on
+  `governance_review`, so the `CREATE TABLE` queued behind it and would have queued writers
+  behind itself. It was cancelled; alembic's DDL is transactional, so nothing was left
+  half-applied and `alembic_version` is still `a7c41e93d2b0`. Run `alembic upgrade head`
+  once that run has finished.
+
+### Not verified
+
+The add-in has not been loaded in a real Excel, and no sign-in has gone through a real identity
+provider from its dialog. Loading it needs a trusted localhost certificate and a sideload, which are
+machine and tenant changes for the owner; the steps are in `ui-next/excel-addin/README.md`.
+
+### Still open
+
+- The drafting gap on thin catalogs: feed evidence, or model-assisted drafting for thin columns.
+- Document ingestion, the fourth write path for column descriptions, still has no UI.
+
+
+## 2026-09-11 — Model-assisted drafting for thin columns
+
+Follows the 2026-09-10 finding that evidence-only drafting produced 0 submittable drafts out of
+196 columns on the dev catalog, because it carries no dbt column docs, source comments or approved
+relationships. The owner chose model drafting for the thin columns only.
+
+### Where it landed
+
+Another session on this branch committed the code, tests and doc 17 inside `dd0e609`
+("feat(lineage-agent): implement lineage agent API…"), together with its own lineage-agent work.
+That commit's message does not mention them. They are the same files, byte for byte, as the ones
+verified before it landed. This entry is the record of what `dd0e609` carries for column drafting.
+
+`dd0e609` also committed stale generated files, rolling back the ones `6641451` had just
+regenerated. `ui-next/src/lib/types.ts` went back to the `StewardAgent*` names, lost the new
+`model_assist` fields and failed the UI-types drift gate; the OpenAPI baseline lost `agent_key`.
+`ac137db` regenerated all three from the code. They are byte-identical to an independent
+regeneration from `dd0e609`, and both drift checks pass on them.
+
+### What it does
+
+`aida.column_description_model` drafts only the columns whose catalog evidence is too thin to clear
+the review bar, and only on request (`model_assist`; *Use the model for thin columns* in the column
+panel). Columns with enough evidence are still drafted from it, and the model is never asked about
+them. An answer about a column it was not asked about is ignored. It may replace a thin evidence
+draft nobody has touched, but never one a person edited, one already in review, or another model
+draft.
+
+### The controls
+
+- **Metadata only, screened both ways.** Names, types, keys, references, classification and the
+  table's approved description pass `ingest_screening.screen_text` before they are sent. Every
+  answer is screened after. Quarantined input is withheld, and a quarantined answer is dropped: the
+  column falls back to its evidence draft.
+- **Labelled and capped.** A model draft records `origin = MODEL_INFERRED`, the basis the model gave,
+  and the call's route, model and fingerprints. Its confidence is capped at 0.70, and at 0.5 for a
+  guess from the name alone. An edit keeps the label (`MODEL_INFERRED_WITH_HUMAN_EDITS`).
+- **A person always decides.** The reviewer agent abstains on every model-inferred draft, whatever
+  its approve threshold says.
+- **The governed gateway only:** kill switch, approved route, credential, input-token cap, timeout
+  and output schema, and the route must be approved for `CLASSIFICATION`. Per-agent contract budgets
+  (AR-05) bind agent runs, not this call.
+
+### Verified
+
+- **On `ac137db`** (the code of `dd0e609` plus the regenerated files): ui-next typecheck clean,
+  605 tests passed in 80 files, and the production build succeeds. The UI types match the OpenAPI
+  schema, and the API has no breaking change; every difference is an addition.
+- **On `dd0e609`:** `ruff check`, `mypy` on the six changed modules, and all 12 import-linter
+  contracts pass. The full backend suite: 9,242 passed, 4 failed, 23 skipped, 1 xfailed. One of the
+  four is the stale OpenAPI baseline, which passes on `ac137db`. The other three still fail there.
+- **Before it landed**, on `6641451` plus this work: 204 targeted backend tests passed, including
+  nine new model-drafting tests. They cover refusal with its reason and nothing written, questioning
+  only thin columns, source comments never sent, both caps, hostile names withheld and hostile
+  answers dropped, fallback on a failed call, replacing only untouched thin drafts, agent abstention
+  after an edit, the five-table bound, and `draft_origin` in the workbook.
+
+### Failing, and not from this work
+
+Three gates fail on `ac137db`, all from `bc6ab78`'s ontology work, committed by another session.
+`ontology_head` and `ontology_version` have no migration (the migration/ORM drift gate).
+`aida.ontology_api` is not wired into the app (the reachability gate). `ONTOLOGY_VERSION` has no
+risk tier (the reviewer-agent classification test). None of them touches column drafting, and they
+are left for that work to close.
+
+### Not verified
+
+No real model has been called. The dev database has no route approved for `CLASSIFICATION`:
+`AIDA_MODEL_ROUTE` names `openai-bank-sql`, which does not exist there, and the routes that do exist
+use a provider with no adapter. The tests drive the whole path with a deterministic provider. The
+first real call needs a route keyed `openai-bank-sql` with `CLASSIFICATION`, created on *AI
+governance*, submitted, and approved in the review queue by someone other than its author.
+
+
+## 2026-09-11 — Open issues found end to end: a wedged database, owner routing, silent model errors, and a screen for data dictionaries
+
+Commits `2558550`, `cc98493`, `a84abd8` and `031d153`. The data-dictionary screen itself landed
+inside `04b7348` and `a1876ec`, another session's commits, alongside its own work; an early draft
+test of mine reached HEAD in `c732349` before the fix it tests.
+
+### The dev database was wedged by an infinite loop
+
+A proposal from the new screen hung. In PostgreSQL, the metadata worker had held one transaction
+for 7.4 hours. Another session's `alembic upgrade` (`CREATE TABLE ontology_version`) had queued
+behind it for 19 minutes, and every write to `governance_review` queued behind the migration, so
+no review could be created or decided anywhere in the stack.
+
+The transaction was `newly_created_table_drafter.enqueue_semantics_for_source`. It looped on
+"every table with no proposal for this scan", inside the one transaction its Kafka consumer opens
+per message. A table inference writes no proposal for stays in that set, so it was selected again
+on every pass, forever. The offset is never committed, so each worker restart replays the message
+and loops again; the 2026-09-10 entry's "semantic-inference run held one transaction for over an
+hour" was very likely this. A keyset cursor now tries each table once per call (`cc98493`), and a
+regression test feeds it an inference that writes nothing.
+
+### Owner routing had failed for every organization since the scheduler started
+
+The fleet scheduler logged `owner_routing_pass_failed` for every organization every ten seconds,
+10,584 times, with the exception redacted. Reproduced locally inside a rolled-back transaction:
+`AttributeError: 'MetadataBusinessAnnotation' object has no attribute 'tags'`. AT-6 (`6c8e340`)
+moved annotation content, tags included, onto the append-only
+`MetadataBusinessAnnotationVersion`. GL-6's routing pass, and `apply_ownership_rule`'s TAG match,
+kept reading the identity row, and their tests used fake sessions that returned `None` for the
+annotation. Both now join the APPROVED version (`031d153`). A real-query test covers both,
+including a tag that exists only on a superseded version.
+
+### A failed model call said only its status code
+
+Noted in R20 and left: `post_with_retry` kept only the HTTP status. The error now carries the
+provider's code, type and message, read from the error fields only, whitespace-collapsed, capped
+at 300 characters, and with key-shaped words (`sk-…`, `AIza…`) replaced (`2558550`). Column
+drafting's fallback note shows it.
+
+### Document ingestion has a screen
+
+Steward → Data dictionaries is the first caller of `document_ingestion_api.py`. A steward uploads
+a CSV data dictionary to a project, matches its rows to that project's catalog by exact name, and
+proposes the matched rows, each as its own review with a link to it. Proposing a document twice
+used to raise a second full set of claims and reviews, because extraction leaves the document
+MAPPED. It is now refused with 409 under a row lock on the document, and a real-PostgreSQL test
+proposes from two sessions at once and gets exactly one review per row. The screen has its own
+demo store for fixture mode.
+
+It ran once, live, against the running API in the verification organization "Local Verification
+Bank 1788668854": four rows kept and one skipped, three matched and one left unmatched, three
+claims proposed. Those three reviews are pending there.
+
+### Corrections to earlier claims
+
+- The left menu's group icons do have accessible names. The Review queue sat inside the collapsed
+  Reviewer group, which is how the menu works; an earlier message said otherwise.
+- The Organization selector taking the first organization is by design, and the browser remembers
+  the choice after that; an earlier message called it a problem.
+
+### Verified
+
+- The full backend suite on a clean checkout of `031d153`: 9,375 passed, 23 skipped, 1 xfailed,
+  0 failed. That includes the three gates `bc6ab78`'s ontology work had left red (migration/ORM
+  drift, reachability, risk-tier classification), which that work has since closed.
+- ui-next on `031d153`: typecheck clean, 632 tests passed in 85 files, and the production build.
+- Targeted runs: 15 gateway tests (7 new), 18 document-ingestion tests (1 new), 14 drafter and
+  auto-enqueue tests (1 new), 61 stewardship and owner-routing tests (2 new), and the new
+  concurrency test, which ran against a real PostgreSQL rather than skipping.
+- The drafter's regression test caught a first version of the fix that never advanced its
+  cursor, which would have looped exactly as before.
+
+### Live stack after the redeploy
+
+Every app image was rebuilt from `031d153` and the services recreated, after stopping the
+looping worker so the migration could not queue behind it again. `migrate` applied
+`e3b8f14c6a92` (quality rule proposals) and `7c2d94e1b8a3` (ontology definitions), and
+`alembic_version` is `7c2d94e1b8a3`. Then, against the running stack:
+
+- The new worker worked through its backlog of events in under a minute, past the message the
+  old image kept replaying, and no transaction has stayed open longer than 30 seconds since.
+- The scheduler has logged no `owner_routing_pass_failed` since the restart, over four
+  iterations; before it, every iteration failed for every organization.
+- Proposing the verification document a second time returns 409 ("descriptions were already
+  proposed for this document; decide them in the review queue"), and it still has three claims.
+- ui-next on :3001 serves the rebuilt build.
+
+### Still open
+
+- The `openai-bank-sql` route (created and submitted on 2026-09-11, review `c63bc4b8`) waits for a
+  person to approve it. It is T3, so no agent can. Model drafting has still not called a real
+  model.
+- The Excel add-in has not been loaded into Excel; the owner deferred it.
+- The drafter still processes a whole datasource in one transaction per message. It now ends, but
+  a very large source holds that transaction for the whole pass; committing per batch would bound
+  it.
+- AR-09 and the measurement halves of AR-03, AR-04, AR-06, AR-10, AR-11 and AR-12, unchanged.
+
+
+## 2026-09-11 — The ingest drafter commits each batch
+
+Commit `a206c9c`. It follows `cc98493`, which made the drafter's semantic-inference pass end but
+left it running every batch of a completed scan inside the one transaction the Kafka consumer
+opens per message. On a large source that held the datasource's row lock and a snapshot for the
+whole pass, so a migration touching those tables waited for all of it: the pile-up that wedged the
+dev stack earlier the same day, only shorter.
+
+The consumer now gives each batch of 100 tables its own transaction
+(`enqueue_semantics_in_batches`). A failure keeps the batches before it, and since the Kafka
+message is not acknowledged, a replay resumes where it stopped: tables already proposed are
+skipped. The single-table path from `handle_newly_created_table`, and any caller that owns its
+transaction, still runs every batch inside it (`enqueue_semantics_for_source`).
+
+### Verified
+
+- A new test runs the consumer's path with a batch size of one over two tables and gets two
+  batches, each in its own session.
+- All 20 tests in the three files that exercise the drafter (`test_auto_enqueue_on_ingest.py`,
+  `test_side_car_steward_contract.py`, `test_workflow_revalidation.py`), ruff and mypy.
+- Live: the metadata-worker image was rebuilt from `a206c9c` and the container recreated. Its Temporal worker and the drafter's Kafka consumer both started, it logged no errors, and no transaction in the database has stayed open longer than 30 seconds since.
+
+
+## 2026-09-11 — Provider-billed budgets, and the measured half of six review findings
+
+Commits `94babdf`, `d716694`, `b440a39`, `ac2ac7e`, `8a7dc8a`, `9676047` and `600b8d1`.
+
+The 2026-09-09 architecture review (`10-architecture/15`) left AR-03, AR-04, AR-06, AR-10, AR-11 and AR-12 partial, and in each case the missing half was a measurement. This pass took every one of those rows as far as it can go on this machine.
+
+None of the P0 or P1 rows closes. What changed is that each row now states a measured result where it used to state a suspicion, and in two places the measurement found something worse than the row had said.
+
+### Budgets charge what the provider billed (`94babdf`)
+
+Until this commit no one read OpenAI's `usage` or Gemini's `usageMetadata`, so every budget figure was the gateway's four-bytes-per-token estimate.
+
+- The adapters now return what the provider reports, and Gemini's thinking tokens are counted as output.
+- A completed run is charged the billed tokens of the attempt that answered, plus the input estimate of any attempt that failed before it (`run_token_charge`). Its `budget_evidence` names the basis.
+- The agent inbox reports what today's budget window was charged, which is the figure the cap is enforced against.
+
+### AR-04: two workers on one queue, measured (`d716694`)
+
+Three committing reviewer agents raced for one organization's twelve pre-reviewed items on a real PostgreSQL.
+
+- At READ COMMITTED, every item was decided exactly once (12 approvals, 12 audit rows). The losers skipped every contended item. No batch aborted, and none added throughput either, because the losers waited on the winner's row locks.
+- At REPEATABLE READ, every item was still decided exactly once, but each loser's claim was refused with 40001 and its whole batch rolled back.
+
+### AR-12: competitive claims carry a source and an expiry (`b440a39`)
+
+Product docs 01, 03, 04 and 05 now carry a machine-readable claims line, with an assessment date, a scope, a re-verify-by date and a source. Doc 08 is marked historical.
+
+`tests/test_competitive_claims.py` enforces the rule. From 2026-11-29 it fails until someone re-checks the claims.
+
+### AR-03: what the reviewer agent approves when a proposal is wrong (`ac2ac7e`)
+
+`tests/test_ar03_false_approval_benchmark.py` puts *twins* through each producer's own scoring function and the agent's real decision function. A twin pair is two proposals of one type with the same evidence, one true and one false.
+
+- **Result:** of 12 pairs across 7 object types, the agent tells **none** apart. It approved the false twin in 11 pairs before this pass and in 7 after it.
+- **Three resolvers went**, because their number says nothing about truth:
+  - `DOCUMENT_CLAIM`: a name-match certainty, which is 1.0 for every matched row;
+  - `GLOSSARY_LINK_PROPOSAL`: two name-equality constants, 1.0 and 0.92, both over the threshold;
+  - model-inferred `METADATA_ENRICHMENT_PROPOSAL`: the model's confidence in its own answer.
+- **`QUERY_HISTORY_METRIC_CANDIDATE` moved to T2.** Approving one publishes a `SemanticMetric`.
+- **A matching bug in data-dictionary import.** Columns were matched with `ILIKE`, so a `%` cell matched an arbitrary column at confidence 1.0.
+
+### AR-10: indirect-injection screening, measured and widened (`8a7dc8a`)
+
+`tests/test_ar10_screening_benchmark.py` runs `screen_text` on 40 attacks outside its corpus and on 46 benign catalog texts, pinned by case id.
+
+- **Classifier v1** missed 31 of the 40 attacks and quarantined 10 of the 46 benign texts. For example, "Owner: Dan Smith" matched the DAN jailbreak.
+- **`injection-defense-v2`** misses 2 attacks, both kept as residuals on purpose, and quarantines none.
+
+The path audit found five more model-context ingresses unscreened:
+
+- the orchestrator's prior-query template and confirmed examples;
+- its metadata-context identifiers;
+- semantic inference's names;
+- marketplace domain names;
+- the column-description model's type and relationship names.
+
+Each now passes `screen_text`, with a test that fails without it.
+
+### AR-11: the reviewer agent's oversight, measured and acted on (`9676047`)
+
+- **Measured:** disagreement is reported by risk tier as well as by object type, and each tier's rate is its sampled false-approval rate. Time to a human verdict is reported, along with the age of the oldest unread sample.
+- **Reported:** the backlog appears on the state endpoint and on the screen.
+- **Acted on:**
+  - A backlog refusal is now an audited event, recorded as an outbox event and sent as a notification.
+  - A disputed sample sends its own notification.
+  - `Docs/40-engineering/11-reviewer-agent-oversight-runbook.md` is the correction procedure, per object type.
+
+### AR-06: the contract reaches the live paths (`600b8d1`)
+
+`10-architecture/18-agent-capability-enforcement-matrix.md` is the matrix the row asked for.
+
+It found the orchestrator's contract enforcement unreachable. Contract existence, the kill switch, `tool_slugs` and the token caps were never applied, because neither MCP `tools/call` nor REST `POST /datasources/{id}/agent-analyses` told the orchestrator which contract applied. Both now resolve the caller's contract.
+
+**Operator action:** a contract with an empty `tool_slugs` list now refuses every governed tool call its agent makes.
+
+### Verified
+
+Everything was verified in a clean worktree at `600b8d1`:
+
+- **Drift gates** — OpenAPI (no breaking changes, baseline current), generated UI types, and the surface-control matrix: no drift.
+- **Lint and types** — ruff and mypy were clean on every changed source file, and import-linter kept all 12 contracts.
+- **UI** — the typecheck passed, 637 tests in 85 files passed, and the production build succeeded.
+- **Full backend suite** — 9,534 passed, 22 skipped, 1 xfailed, and 3 failed.
+
+The three failures were gates this batch had not run on its own:
+
+- The event-catalog gate found `reviewer_agent.audit_backlog_exceeded.v1` published but not catalogued.
+- The doc-claims gate twice read a backticked kebab-case route name, on a line that also mentioned a contract, as a cited import-linter contract name.
+
+`482807f` catalogues the event and gives the route in full. After it, both gate files pass (4,522 tests).
+
+**Live.** The images were rebuilt from `482807f` and the stack restarted:
+
+- **Health** — the API is healthy, ui-next is serving on :3001, and nothing logged an error in the first minutes.
+- **Contract** — the live OpenAPI carries `by_risk_tier`, `audit_backlog_exceeded` and both new schemas.
+- **Reviewer-agent state** — against Northwind, `GET .../reviewer-agent` reports 0 unresolved samples out of an allowed 50, with the bound not exceeded. The agent is disabled in this environment.
+- **Disagreement rates** — `GET .../reviewer-agent/disagreement-rates` returns an empty tier cut and a clock of nulls rather than zeros. No audit sample exists in this database, and the report says so instead of claiming a measurement.
+
+### Still open
+
+- **AR-03:** 7 false approvals remain. Stopping them needs evidence that is independent of the proposal, so unattended review stays off.
+- **AR-06:** the remaining gaps are:
+  - context products are not checked on resource reads, prompts or the REST paths;
+  - the kill switch does not reach native MCP tools;
+  - an external agent holding the Reviewer role can decide reviews;
+  - agents can edit other agents' contracts.
+- **AR-10:** what MCP sends out to external agents is unscreened.
+- **AR-11:**
+  - downstream harm is not measured;
+  - annotations and bulk links have no withdrawal path;
+  - a correction is not linked back to its sample.
+- **AR-09:** not attempted. It needs load and recovery runs against an agreed estate size, and nothing measured on one machine would support a capacity claim.
+- **Waiting on the owner:**
+  - the `openai-bank-sql` model route (review `c63bc4b8`, T3) needs a person's approval;
+  - the Excel add-in has not been loaded;
+  - the three verification-organization claims are undecided.

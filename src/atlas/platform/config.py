@@ -10,10 +10,11 @@ import difflib
 import os
 import sys
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 def _running_under_pytest() -> bool:
@@ -27,6 +28,14 @@ def _running_under_pytest() -> bool:
     invocations that skip the env var.
     """
     return "PYTEST_VERSION" in os.environ or "pytest" in sys.modules
+
+
+#: `AIDA_*` names the platform's own scripts read from the environment or `.env` and that no
+#: `Settings` field binds. Without this list the typo detector below takes one for a misspelling of
+#: a setting (`AIDA_BASE_URL` is 0.867 similar to `AIDA_DATABASE_URL`, over its 0.84 cutoff), and
+#: every app container refuses to start with it in `.env` (R11-VAL03). `tests/test_config.py` holds
+#: the list to names the repository's scripts and manifests use and no field binds.
+_SCRIPT_ONLY_ENV_NAMES = frozenset({"AIDA_BASE_URL"})
 
 
 class Settings(BaseSettings):
@@ -172,6 +181,11 @@ class Settings(BaseSettings):
     object_store_secret_key: str = ""
     default_query_row_limit: int = Field(default=5000, ge=1, le=100_000)
     hard_query_row_limit: int = Field(default=100_000, ge=1, le=1_000_000)
+    # R11-FP14: user-defined functions an operator has reviewed for effects and authorizes
+    # queries and generated tools to call, by the exact name the SQL uses (`fn_rate`, or
+    # `finance.fn_rate` for a qualified call). `SqlGuard` refuses any other function the
+    # parser does not recognise as a built-in, and every schema-qualified call.
+    sql_guard_allowed_functions: list[str] = Field(default_factory=list)
     query_timeout_seconds: int = Field(default=60, ge=1, le=3600)
     # QG-3: fairness under contention. Each line of business (DataSource.line_of_
     # business_id, the same per-LOB dimension aida.cost_showback already groups
@@ -188,6 +202,21 @@ class Settings(BaseSettings):
     # module docstring. A wait that outlives this bound is rejected with a clear,
     # distinguishable error (LobConcurrencyRejected) instead of growing the queue.
     query_gateway_lob_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    # R11-MP25: a bound per datasource, counted in Redis so it holds across every
+    # replica (the LOB bound above is per process). A query past it waits up to the
+    # timeout below, then is refused; with Redis unreachable, staging and
+    # production refuse and other environments run unbounded. Off by default
+    # because it needs the Redis service. Overrides are keyed by datasource id.
+    source_query_concurrency_enabled: bool = False
+    source_query_max_concurrent: int = Field(default=4, ge=1, le=1_000)
+    source_query_max_concurrent_overrides: dict[str, Annotated[int, Field(ge=1, le=1_000)]] = (
+        Field(default_factory=dict)
+    )
+    source_query_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    # R11-MP24: governed PostgreSQL reads (the EXPLAIN gate and execution) borrow
+    # from a bounded pool per source instead of opening two connections a query
+    # (`aida.connectors.postgres_pool`). Other engines are unaffected.
+    source_connection_pooling_enabled: bool = True
     max_postgres_plan_cost: float = Field(default=1_000_000.0, gt=0)
     # BigQuery bills by bytes scanned rather than exposing a comparable cost plan,
     # so the gateway gates dry-run byte estimates against this separate budget
@@ -225,28 +254,58 @@ class Settings(BaseSettings):
     # PR-2: how many (value, count) pairs `profile_column_values` captures per
     # gated column -- the "top values" half of the policy-approved exception.
     profile_value_top_n: int = Field(default=10, ge=1, le=100)
-    # PR-2: default retention window pinned onto a `ColumnValueProfileArtifact`
-    # at capture time from the policy that authorized it -- changing this
-    # setting later never retroactively extends or shortens an
-    # already-captured artifact's `expires_at`.
-    profiling_exception_default_retention_days: int = Field(default=30, ge=1, le=3650)
     # PR-2: how many expired value-bearing artifacts the background purge
     # sweep deletes per scheduler iteration, mirroring `scheduler_batch_size`.
     profiling_exception_purge_batch_size: int = Field(default=500, ge=1, le=5_000)
     max_active_runs_per_organization: int = Field(default=100, ge=1, le=10_000)
+    # R11-FP17: the per-source half of run admission, which was a hard-coded `1`
+    # in `fleet.reserve_analysis_run` until this setting existed. Still 1 by
+    # default, so the shipped behaviour is unchanged: one discovery run per
+    # source at a time is backpressure against the source, not a licensing
+    # bound, and raising it means accepting concurrent scans of one system.
+    max_active_runs_per_datasource: int = Field(default=1, ge=1, le=1_000)
+    # --- R11-FP17: per-tenant and per-source daily quotas -------------------
+    # These are *quotas*, not the per-pass and per-run bounds the rest of this
+    # class is full of. A bound ("at most 500 signals per pass") limits one unit
+    # of work; a quota limits how much of a resource a tenant or a source may
+    # consume in a day, across every unit of work, and needs accumulated state
+    # to do it -- `aida.usage_quotas`, over `tenant_usage_window` /
+    # `source_usage_window`, with the cap in the UPDATE's own predicate the way
+    # `aida.agent_budget` already does it for an agent contract's token cap.
+    #
+    # Every one of them is `None` by default, and that is not a quota of zero:
+    # `None` means "this estate has declared no quota for this dimension", and
+    # `aida.usage_quotas` then does not touch the database at all. A number here
+    # would be an operator's number invented by this repository -- the same
+    # mistake the alert thresholds in `infra/monitoring/` refuse to make -- and
+    # a quota nobody chose that starts refusing work on upgrade is worse than no
+    # quota. What *is* enforced by default is unchanged: the two concurrency
+    # limits above.
+    analysis_run_daily_quota_per_organization: int | None = Field(default=None, ge=1, le=1_000_000)
+    analysis_run_daily_quota_per_datasource: int | None = Field(default=None, ge=1, le=1_000_000)
+    model_token_daily_quota_per_organization: int | None = Field(
+        default=None, ge=1, le=100_000_000_000
+    )
+    model_token_daily_quota_per_datasource: int | None = Field(
+        default=None, ge=1, le=100_000_000_000
+    )
+    parser_statement_daily_quota_per_organization: int | None = Field(
+        default=None, ge=1, le=1_000_000_000
+    )
+    parser_statement_daily_quota_per_datasource: int | None = Field(
+        default=None, ge=1, le=1_000_000_000
+    )
     scheduler_poll_seconds: int = Field(default=10, ge=1, le=300)
     scheduler_batch_size: int = Field(default=100, ge=1, le=1000)
     outbox_max_attempts: int = Field(default=10, ge=1, le=100)
     outbox_max_backoff_seconds: int = Field(default=300, ge=1, le=3600)
     relationship_candidate_scan_max_columns: int = Field(default=100_000, ge=1_000, le=1_000_000)
-    cross_source_candidate_max_datasource_pairs: int = Field(default=50, ge=1, le=2_000)
     rename_candidate_scan_max_tables: int = Field(default=200, ge=10, le=5_000)
     rename_candidate_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     object_resolution_scan_max_tables_per_datasource: int = Field(default=300, ge=10, le=5_000)
     object_resolution_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     relationship_candidate_composite_max_columns: int = Field(default=4, ge=2, le=8)
     relationship_candidate_composite_max_per_table: int = Field(default=25, ge=1, le=500)
-    usage_boost_enabled_default: bool = False
     usage_boost_refresh_minutes: int = Field(default=60, ge=5, le=1440)
     usage_boost_window_days: int = Field(default=7, ge=1, le=90)
     usage_boost_batch_size: int = Field(default=200, ge=1, le=5_000)
@@ -266,6 +325,25 @@ class Settings(BaseSettings):
     # Default every 6 hours; bounded 15 minutes to 7 days so an operator can
     # tighten or loosen it without a code change.
     graph_reconciliation_interval_minutes: int = Field(default=360, ge=15, le=10_080)
+    # R11-D11: the writer for the ADR-0018/ADR-0020 classification projections
+    # (`business_node_closure`, `business_node_rollup`). Both were built and
+    # measured, and then nothing ever called the rebuild -- so `rollup()` took
+    # its authoritative fallback every time. ADR-0020 measured that fallback at
+    # 3,147 ms against 0.4 ms for the materialised read (13,548 nodes,
+    # 5,000,000 assignments, PostgreSQL 16), which is why the projection exists.
+    #
+    # Daily by default, matching the reaper and the two expiry sweeps: a
+    # full recompute is ~47 s for a bank-scale estate, so this is a batch job
+    # and a sub-daily cadence would buy fresher coverage counts at a cost that
+    # scales with the estate. `computed_at` is returned to callers, so the
+    # answer is labelled with its age rather than silently drifting.
+    # `business_rollup_rebuild_enabled=False` is the ops kill switch, and
+    # `business_rollup_rebuild_batch_size` bounds how many organizations one
+    # pass rebuilds so a large multi-tenant deployment spreads the work over
+    # successive passes instead of doing all of it on one tick.
+    business_rollup_rebuild_enabled: bool = True
+    business_rollup_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
+    business_rollup_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
     # P2-06: generic stale-row reaper. Daily by default (86_400s); bounded 15
     # minutes to 7 days so an operator can tighten or loosen it without a code
     # change, but never turn it into a per-tick scan. `reaper_enabled=False`
@@ -312,6 +390,12 @@ class Settings(BaseSettings):
     # --- ADR-0027: risk-tiered agent checking -----------------------------
     # Off by default. An organization that never enables this sees exactly
     # today's behaviour: every review item waits for a human.
+    #
+    # R11-C3 (decided 2026-09-12): and refused outright in production. Measured
+    # against labelled false twins it approved 9 of 14 false proposals and told
+    # no pair apart, and no adjudication mechanism exists to fix that, so "off"
+    # is a decision rather than a default. Development and test still accept it,
+    # because the benchmark that measured it has to be able to run it.
     reviewer_agent_enabled: bool = False
     #: The reviewer agent's own workload identity. Must differ from every
     #: human principal -- `reviewer_agent` refuses to decide an item it
@@ -348,12 +432,123 @@ class Settings(BaseSettings):
     #: it already decided. Set to 0 to disable the check (and to accept that
     #: the oversight claim is then unbacked).
     reviewer_agent_max_unresolved_samples: int = Field(default=50, ge=0, le=100_000)
+    #: AR-11: how long the *oldest* unread sample may sit before the agent
+    #: stops deciding. The count bound above is necessary but not sufficient:
+    #: forty-nine samples nobody has looked at in eight months is inside the
+    #: default count bound and is plainly not oversight. Condition (b)'s
+    #: argument is that a human reads the sample, and a claim with no deadline
+    #: on it cannot be breached, so it was reported (`oldest_pending_hours`)
+    #: rather than enforced. This is the deadline. Set to 0 to disable, the
+    #: same explicit operator choice `reviewer_agent_max_unresolved_samples`
+    #: offers, and with the same consequence: the oversight claim is unbacked.
+    reviewer_agent_max_sample_age_hours: int = Field(default=168, ge=0, le=8_760)
     #: AR-04: how old a pre-review may be and still be acted on. Beyond this
     #: the item is left for the next pre-review pass to re-derive rather than
     #: decided on evidence gathered before the world moved. The decision path
     #: re-derives evidence anyway; this bounds how far back a *selected*
     #: recommendation may have come from.
     reviewer_agent_evidence_max_age_minutes: int = Field(default=60, ge=1, le=10_080)
+
+    # --- ADR-0029: the steward agent -------------------------------------
+    # No on/off flag of its own: the agent does nothing in an organization
+    # until someone registers it -- an APPROVED `AGENT`-kind AI asset version
+    # carrying an `AgentContract` for the principal below. Its kill switch is
+    # that contract's.
+    #: The steward agent's own workload identity. Must differ from
+    #: `reviewer_agent_principal_id`, or the agent that drafts would be the
+    #: agent that checks; `steward_agent` refuses to run rather than trust it.
+    steward_agent_principal_id: str = "agent:steward"
+    #: Hard ceiling on proposals of each kind one run may open, whatever the
+    #: request asks for (ADR-0023's bounded-scope rule).
+    steward_agent_max_proposals_per_run: int = Field(default=25, ge=1, le=200)
+    #: How many of the agent's own proposals may wait for a decision before it
+    #: stops proposing. A drafter that outruns its reviewers saves nobody any
+    #: time -- it moves the backlog into the review queue, which is AR-11's
+    #: lesson applied to the maker side. 0 disables the check.
+    steward_agent_max_pending_proposals: int = Field(default=100, ge=0, le=100_000)
+    #: How often the scheduler starts it, in minutes, in every organization
+    #: that registered it (`aida.task_agent_schedule`). 0, the default, means
+    #: never: a person starts every run. The same for every task agent below.
+    steward_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+
+    # --- AT-11 (R11-B17): classification propagation ---------------------
+    #: How often the scheduler propagates classifications along reviewed
+    #: column lineage, in minutes. 0, the default, means never -- the same
+    #: convention as the task agents above, and for the same reason: this
+    #: writes proposals a person has to read, so an estate opts in rather
+    #: than discovering a queue it did not ask for. Derived values never
+    #: become asserted without the review queue either way.
+    classification_propagation_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+    #: Edges one pass collects per datasource before it stops and says so.
+    #: A large estate degrades to "propagated over the first N edges", never
+    #: an unbounded scan.
+    classification_propagation_max_edges: int = Field(default=5_000, ge=1, le=100_000)
+
+    # --- DQ-2 (R11-B8): scheduled freshness evaluation --------------------
+    #: How often the scheduler evaluates approved watermark contracts and
+    #: files the verdict into the data-quality incident sink, in minutes. 0,
+    #: the default, means never -- the same convention as the task agents and
+    #: the propagation pass above, and for a sharper reason here: this pass
+    #: OPENS incidents, and an open CRITICAL incident fails governed tools
+    #: closed (DQ-3). An estate turns that on deliberately, after its
+    #: watermark contracts are approved, rather than discovering that a
+    #: never-observed table started blocking answers.
+    freshness_evaluation_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+    #: Watermark contracts one pass reads per datasource before it stops and
+    #: says so in its own audit record. A large estate degrades to "evaluated
+    #: the first N contracts", never an unbounded scan.
+    freshness_evaluation_max_tables: int = Field(default=500, ge=1, le=50_000)
+
+    # --- R11-FP16: acting on change signals -------------------------------
+    #: How often the scheduler processes PENDING change signals (R11-FP15), in
+    #: minutes. 0, the default, means never, for the freshness pass's reason:
+    #: this OPENS incidents, and an open CRITICAL incident fails governed tools
+    #: closed. An estate turns it on deliberately. Signals keep accumulating
+    #: while it is off, and are processed oldest first once it is on.
+    change_signal_processing_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+    #: Signals one pass processes per organization before it stops; the rest
+    #: wait for the next pass, so a burst of changes stays a bounded pass.
+    change_signal_processing_batch_size: int = Field(default=200, ge=1, le=5_000)
+    # R11-FP16: rebuild what a source change made stale -- regenerated tool versions,
+    # descriptions and context product versions drafted into their review queues -- and resolve
+    # a source-change hold once nothing standing on the view is stale (`aida.context_rebuild`).
+    # Off by default: it drafts into review queues, so an estate opts in after change-signal
+    # processing.
+    context_rebuild_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+
+    # --- ADR-0029: the lineage agent -------------------------------------
+    # The same registration rules as the steward agent's: nothing until an
+    # approved AGENT-kind version carries a contract for this principal.
+    lineage_agent_principal_id: str = "agent:lineage"
+    #: Views parsed per run, at most.
+    lineage_agent_max_proposals_per_run: int = Field(default=25, ge=1, le=200)
+    #: How many of its own proposed *edges* may wait for review before it stops.
+    #: One view yields a column edge per output column, so this is larger than
+    #: the steward agent's bound on whole proposals.
+    lineage_agent_max_pending_proposals: int = Field(default=500, ge=0, le=100_000)
+    lineage_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+
+    # --- ADR-0029: the quality agent -------------------------------------
+    # Registered like the others: nothing until an approved AGENT-kind version
+    # carries a contract for this principal.
+    quality_agent_principal_id: str = "agent:quality"
+    #: Rules proposed per capability per run, at most.
+    quality_agent_max_proposals_per_run: int = Field(default=25, ge=1, le=200)
+    #: How many of its own proposals may wait for review before it stops. Lower
+    #: than the steward agent's bound: every one is T2 and needs a person.
+    quality_agent_max_pending_proposals: int = Field(default=50, ge=0, le=10_000)
+    quality_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+
+    # --- ADR-0029 / R11-FP14: the tool agent ------------------------------
+    # Registered like the others: nothing until an approved AGENT-kind version
+    # carries a contract for this principal.
+    tool_agent_principal_id: str = "agent:tool"
+    #: Tool drafts proposed per capability per run, at most.
+    tool_agent_max_proposals_per_run: int = Field(default=10, ge=1, le=200)
+    #: How many of its own tool reviews may wait before it stops. Every one is T2
+    #: and needs a person, and a tool review asks more of one than a description.
+    tool_agent_max_pending_proposals: int = Field(default=25, ge=0, le=10_000)
+    tool_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to
@@ -375,8 +570,34 @@ class Settings(BaseSettings):
     governance_notifications_enabled: bool = False
     slack_webhook_url: str | None = None
     teams_webhook_url: str | None = None
+    #: Which payload format `teams_webhook_url` is sent. Not a style choice --
+    #: the two values target two different Microsoft mechanisms, and only one
+    #: of them still exists on a current tenant.
+    #:
+    #: `ADAPTIVE_CARD` (default) posts the `{"type": "message", "attachments":
+    #: [...]}` envelope a **Workflows / Power Automate** webhook accepts. This
+    #: is the supported mechanism: Microsoft's own retirement notice
+    #: (https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/,
+    #: last updated 2026-04-14) disabled Office 365 connectors in Teams over
+    #: **2026-05-18 to 2026-05-22**, which is already past.
+    #:
+    #: `MESSAGE_CARD` is the legacy Office 365 connector body this module used
+    #: to be hardcoded to. It is kept selectable, not deleted, for two real
+    #: cases: a tenant still running a connector URL under an extension, and a
+    #: tenant whose Workflow was built with an action that happens to accept
+    #: MessageCard. Microsoft documents MessageCard on Workflows as accepted
+    #: only at the webhook endpoint, *not* by the "Post card in a chat or
+    #: channel" action the stock templates use -- which answers with
+    #: `AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'`
+    #: -- and never with working buttons. So it is a compatibility escape
+    #: hatch, not a second supported path.
+    #:
+    #: Changing this changes what a live channel renders, so it is explicit
+    #: configuration rather than sniffing the URL: a Workflows and a connector
+    #: URL are both `*.webhook.office.com` and cannot be told apart.
+    teams_card_format: Literal["ADAPTIVE_CARD", "MESSAGE_CARD"] = "ADAPTIVE_CARD"
     governance_notification_timeout_seconds: float = Field(default=5.0, gt=0.0)
-    #: Which of the seven kinds to deliver. Narrowing this is how an
+    #: Which kinds to deliver. Narrowing this is how an
     #: organization stops a noisy channel without turning the feature off.
     governance_notification_events: list[str] = Field(
         default_factory=lambda: [
@@ -387,6 +608,8 @@ class Settings(BaseSettings):
             "KILL_SWITCH_ENGAGED",
             "KILL_SWITCH_RELEASED",
             "CERTIFICATION_EXPIRING",
+            "REVIEWER_AGENT_AUDIT_BACKLOG",
+            "REVIEWER_AGENT_SAMPLE_DISAGREED",
         ]
     )
     #: Base URL of the portal, used to build the deep link in a message. A
@@ -422,6 +645,80 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # R11-MP21: values that identify a person or an account (account and card
+    # numbers, IBANs, e-mail addresses, SSNs) are replaced by tokens before the
+    # question reaches a model or embedding provider, and restored into the SQL
+    # locally. And the question also passes the metadata injection screen, which
+    # handles homoglyphs, encodings and several languages.
+    question_value_redaction_enabled: bool = True
+    question_obfuscation_screen_enabled: bool = True
+    # R11-MP22: what discovery does when the source account can write
+    # (`aida.connectors.write_probe`). WARN records it and carries on; REFUSE
+    # stops the analysis, so a bank can require a read-only account per source.
+    source_write_access_policy: Literal["WARN", "REFUSE"] = "WARN"
+    # R11-MP17: a confirmed query becomes a template and few-shot example for
+    # every user of its datasource, so it needs a confirmation from someone other
+    # than the person who asked it. Off only for a single-user demo estate.
+    query_memory_requires_second_confirmation: bool = True
+    # R11-MP18: MCP offers and runs only governed tool versions with an active
+    # certification (`tool_certification.certification_is_active`). Unset means
+    # "required in staging and production, not in development and test", so a
+    # demo estate with uncertified tools still works and a bank deployment does
+    # not expose one. Set it to decide explicitly.
+    mcp_tool_certification_required: bool | None = None
+
+    @property
+    def mcp_requires_tool_certification(self) -> bool:
+        if self.mcp_tool_certification_required is not None:
+            return self.mcp_tool_certification_required
+        return self.environment in {"staging", "production"}
+
+    # R11-MP10: hosts an upstream MCP server may be registered and discovered on.
+    # Empty (the default) means none: reading another server's tool list is an
+    # outbound connection, and the list of places it may go is a deployment decision.
+    mcp_client_allowed_hosts: list[str] = Field(default_factory=list)
+    mcp_client_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    # --- Ask rate budget (R11-MP14) ----------------------------------------------
+    # Questions per caller per minute on the two Ask routes. Off by default, like
+    # the MCP and GraphQL budgets, because it needs Redis; the per-call model-token
+    # quota (`model_token_daily_quota_*`) bounds spend with or without it.
+    ask_budget_enabled: bool = False
+    ask_requests_per_minute: int = Field(default=20, ge=1, le=10_000)
+    # --- GraphQL rate budgets (R11-GQL01) ---------------------------------------
+    # Off by default, like the MCP budget above: an operator turns them on where Redis is part
+    # of the deployment. Counted per caller (organization, principal type, principal id) in
+    # fixed windows by `aida.request_budget`, which fails closed in staging and production when
+    # the store is unreachable. A refused request answers 429 `RATE_LIMITED` and runs nothing.
+    graphql_budget_enabled: bool = False
+    graphql_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
+    #: Execution mutations (R11-GQL02) per caller per day; a replay of an idempotency key counts
+    #: too, because it is still a request the platform has to answer.
+    graphql_executions_per_day: int = Field(default=500, ge=1, le=1_000_000)
+    # --- GraphQL demand limits (R11-GQL01) ---------------------------------------
+    # The budget `aida.graphql_limits.admit_document` holds every document to before a resolver
+    # runs, and the endpoint holds every response to after. Defaults are the design's initial
+    # values (section 13: depth 6, 50 aliases, pages of at most 100, 500 returned objects) and the
+    # bounds it named without numbers; each upper bound is the ceiling strawberry's own backstop
+    # limiters are set to, so no valid setting can make a backstop refuse what admission passed.
+    # `tests/test_graphql_settings.py` pins the defaults to `graphql_limits.DEFAULT_LIMITS`.
+    graphql_max_request_bytes: int = Field(default=32_768, ge=4_096, le=1_048_576)
+    graphql_max_tokens: int = Field(default=2_000, ge=500, le=20_000)
+    graphql_max_depth: int = Field(default=6, ge=4, le=12)
+    graphql_max_aliases: int = Field(default=50, ge=1, le=200)
+    #: At least the schema's default page (20), so a field's default can always be admitted.
+    graphql_max_page_size: int = Field(default=100, ge=20, le=500)
+    graphql_max_nodes: int = Field(default=500, ge=100, le=10_000)
+    graphql_max_string_argument_length: int = Field(default=512, ge=256, le=4_096)
+    graphql_max_selection_visits: int = Field(default=5_000, ge=500, le=50_000)
+    graphql_max_response_bytes: int = Field(default=1_048_576, ge=65_536, le=16_777_216)
+    graphql_deadline_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    graphql_max_scope_datasources: int = Field(default=200, ge=1, le=5_000)
+    graphql_max_execution_rows: int = Field(default=1_000, ge=1, le=10_000)
+    #: Schema introspection. Off: the SDL is published under `Docs/90-reference/` and that is how
+    #: a client discovers the schema. On, it is served to PlatformAdmin and AgentDeveloper only,
+    #: in development, test or staging -- production refuses the setting. Hiding the schema is
+    #: never authorization: every field decides on its own whatever this says.
+    graphql_introspection_enabled: bool = False
     # --- Data quality (DQ-6) -------------------------------------------------
     #
     # Off by default so a tenant that has not reviewed the feature keeps today's
@@ -493,17 +790,6 @@ class Settings(BaseSettings):
     certification_expiry_warn_days: int = Field(default=7, ge=1, le=90)
     certification_expiry_warn_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     certification_revoke_enforce_maker_checker: bool = True
-    # P3-09: OFF by default. `backfill_certification_evidence_v1` is a best-
-    # effort backfill of the new `AssetCertification.evidence` blob for
-    # pre-P3-09 ACTIVE rows; it snapshots today's description version /
-    # ownership / quality / glossary state (the true state at certify time
-    # is gone) and tags the resulting row with `backfilled=True` so future
-    # readers do not conflate a reconstructed snapshot with an as-of-certify
-    # one. Left OFF at startup because a large estate should backfill via
-    # the `scripts/backfill_certification_evidence.py` CLI on the operator's
-    # own schedule, not lengthen every app boot; a single-tenant / small-
-    # estate dev deployment can flip this true.
-    certification_evidence_backfill_on_startup: bool = False
     # P2-07: OwnershipAssignment re-affirmation cadence + expiry-warning sweep +
     # identity-merge/delete leaver flip.
     #
@@ -570,7 +856,6 @@ class Settings(BaseSettings):
         "postgres_bruteforce"
     )
     vector_index_url: str | None = None
-    vector_index_credential_reference: str | None = Field(default=None, max_length=500)
     vector_index_collection: str = Field(default="atlas-metadata", max_length=200)
     vector_index_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     # Exact cosine is linear in candidates. Measured end to end on PostgreSQL 16 with
@@ -590,6 +875,17 @@ class Settings(BaseSettings):
     # refuses rather than falling back to the deterministic hash double, because a
     # "vector similarity" score computed from a SHA-256 digest is noise wearing the name
     # of a signal (INV-4, INV-9).
+    # R11-MP15: embedding calls need an APPROVED model route with the EMBEDDINGS
+    # capability for the configured provider and model. Unset means "required in
+    # staging and production, not in development and test".
+    embedding_route_required: bool | None = None
+
+    @property
+    def embedding_route_requires_approval(self) -> bool:
+        if self.embedding_route_required is not None:
+            return self.embedding_route_required
+        return self.environment in {"staging", "production"}
+
     embedding_provider: Literal["unset", "openai", "gemini"] = "unset"
     # Resolved through the same path as every other model credential, so an embedding key
     # inherits the same rotation, the same registry and the same production refusal of
@@ -603,6 +899,42 @@ class Settings(BaseSettings):
     embedding_model_version: str = Field(default="unset", max_length=100)
     embedding_dimensions: int = Field(default=768, ge=8, le=8192)
     embedding_chunking_version: int = Field(default=1, ge=1)
+    # RT-1 built a persisted vector index and nothing ever scheduled its
+    # rebuild: it was reachable only from an operator endpoint whose UI does
+    # not exist, so an index went stale and the vector channel silently fell
+    # back to embedding every candidate on every query -- the cost the index
+    # exists to remove, with answers still correct and nothing complaining.
+    # Enabled by default because the pass is a no-op with no embedding
+    # provider configured, which is the shipped state; the interval is
+    # daily, and `..._batch_size` bounds how many organizations one sweep
+    # touches. Same shape as `business_rollup_rebuild_*` above.
+    vector_index_rebuild_enabled: bool = True
+    vector_index_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
+    vector_index_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
+    # R11-FP17: the footprint register as gauges an alert can be written against. Enabled by
+    # default because it reads what the Operations screen already reads and exports totals by
+    # kind alone -- no tenant in a label, nothing a boundary protects -- and because the
+    # failure it exists to catch is a backlog growing while every request still succeeds.
+    # Five minutes: fast enough to alert on, far too slow to cost anything.
+    footprint_metrics_enabled: bool = True
+    footprint_metrics_interval_seconds: int = Field(default=300, ge=60, le=86_400)
+    # R11-FP17: the port the fleet scheduler, the graph projector and (R11-AUD03) the
+    # Temporal worker expose their own Prometheus registry on
+    # (`aida.worker_metrics.serve_worker_metrics`).
+    # `prometheus_client`'s registry is per process and only `aida.main` serves
+    # `/metrics`, so every gauge the two passes above publish previously landed in a
+    # process nothing could reach -- the real reason no deployment scraped them.
+    # 0 means "do not listen", and is the default because opening a port is a change
+    # to a deployment's network surface that belongs with whoever configures the
+    # scrape. 9108 is the suggested value; `infra/monitoring/` uses it throughout.
+    worker_metrics_port: int = Field(default=0, ge=0, le=65_535)
+    # R11-B18: an approved route can be silently retired by its provider, and
+    # the approval cannot expire when they do. The sweep lists models (free)
+    # and never generates (not free), so it is on by default; it is a no-op
+    # for a provider it cannot probe or a credential it does not have.
+    model_route_health_enabled: bool = True
+    model_route_health_interval_seconds: int = Field(default=21_600, ge=300, le=604_800)
+    model_route_health_batch_size: int = Field(default=50, ge=1, le=1_000)
 
     # What to do with a request whose workspace cannot be resolved (ADR-0018 rollout).
     # SHADOW proceeds and logs; DENY refuses. It defaults to SHADOW because the API
@@ -669,20 +1001,36 @@ class Settings(BaseSettings):
     entitlement_timeout_seconds: int = Field(default=10, ge=1, le=60)
 
     # --- GROUP C (DQ-1): ITSM webhook emitter for routed quality incidents.
-    # Off by default (`dq_itsm_webhook_enabled=False`) so an unconfigured
-    # deployment's behaviour is unchanged -- a quality incident is still
-    # routed and persisted (`NotificationEventRecord`) even with the emitter
-    # disabled, it just stays in status PENDING rather than attempting an
-    # outbound call. The actual ITSM system (ServiceNow/Jira/...) is an infra
-    # concern; this is a generic, configurable webhook target that receives
-    # `notification_routing.format_itsm_payload`'s JSON body, mirroring
-    # `entitlement_webhook_url`'s shape.
-    dq_itsm_webhook_enabled: bool = False
+    # Off until `dq_itsm_webhook_url` is set: the URL is the opt-in. An
+    # unconfigured deployment's behaviour is unchanged -- a quality incident is
+    # still routed and persisted (`NotificationEventRecord`), it just stays in
+    # status PENDING rather than attempting an outbound call. R11-S9 retired a
+    # separate `dq_itsm_webhook_enabled` switch: it gated its own URL a second
+    # time, so the switch on with no URL and a URL with the switch off both
+    # failed, and the pair expressed one decision in two places. The ITSM system
+    # itself (ServiceNow/Jira/...) is an infra concern; this is a generic
+    # webhook target that receives `notification_routing.format_itsm_payload`'s
+    # JSON body, mirroring `entitlement_webhook_url`'s shape.
     dq_itsm_webhook_url: str | None = None
     dq_itsm_webhook_token: SecretStr | None = None
     dq_itsm_webhook_timeout_seconds: int = Field(default=10, ge=1, le=60)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
+    # R11-OKF02: characters of OKF knowledge one question is handed (`aida.okf_context`). The
+    # first is the REST context route's and the MCP knowledge tool's budget when the caller names
+    # none; the second is Ask's own, smaller because the SQL-generation payload already carries
+    # the schema metadata the knowledge explains. 48,000 is the selection's hard ceiling.
+    okf_context_default_max_chars: int = Field(default=16_000, ge=1_000, le=48_000)
+    okf_context_ask_max_chars: int = Field(default=8_000, ge=1_000, le=48_000)
+    # R11-OKF03: importing an edited OKF bundle as pending proposals (`aida.okf_import_api`).
+    # Off until the row is accepted: both import routes refuse with OKF_IMPORT_DISABLED before
+    # reading the upload. Its limits are code constants in `aida.okf_import_bundle`, not
+    # settings, so a hostile archive cannot wait for an operator to raise one.
+    okf_import_enabled: bool = False
+    # R11-SQL01: how long a validated SQL draft's receipt may be run on. Short on purpose: a
+    # receipt proves the statement passed validation *then*; Run re-validates in full anyway,
+    # and a stale receipt is refused rather than trusted.
+    sql_draft_receipt_ttl_minutes: int = Field(default=15, ge=1, le=1_440)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     # AG-7: query-memory similarity/adaptation. Off by default so a tenant that has
     # not reviewed the feature keeps today's MODEL_GATEWAY-only behaviour; flipping
@@ -728,17 +1076,77 @@ class Settings(BaseSettings):
             key = raw.strip()
             if not key or key in seen:
                 continue
-            if self.model_route and key == self.model_route:
+            # The primary is the SQL_GENERATION route (R11-MP03), which is
+            # `model_route` unless a purpose route replaces it.
+            if key == self.model_route_for("SQL_GENERATION"):
                 continue
             seen.add(key)
             keys.append(key)
         return keys
+
+    # R11-MP03: an approved route per purpose, so a cheap model can classify
+    # while a stronger one writes SQL. Keys are the route capabilities the runtime
+    # asks a model for: SQL_GENERATION (Ask) and CLASSIFICATION (semantic
+    # inference, column drafting, marketplace discovery). A purpose with no entry
+    # uses `model_route`. Each named route must still be APPROVED, for that
+    # capability, in the caller's organization; naming it here approves nothing.
+    # SQL_CANDIDATE (R11-MP07) is different: it has no default, and only when it
+    # is named does Ask ask that route for a second, independent statement to
+    # compare against the first. It needs the SQL_GENERATION capability.
+    # RISK_DECISION (R11-MP09) has no default either: only when it names an
+    # APPROVED route with the DECISION capability is a decision model consulted,
+    # and then only to refuse a question the deterministic screens let through.
+    model_routes_by_purpose: dict[
+        Literal["SQL_GENERATION", "CLASSIFICATION", "SQL_CANDIDATE", "RISK_DECISION"], str
+    ] = Field(default_factory=dict)
+    #: R11-MP09: the probability at or above which the decision model refuses.
+    decision_escalation_threshold: float = Field(default=0.8, ge=0.5, le=0.99)
+    #: R11-MP27: at or above which an ambiguous question gets a clarification note,
+    #: and a preference for the second candidate marks the answer disputed.
+    decision_clarify_threshold: float = Field(default=0.7, ge=0.5, le=0.99)
+    decision_dispute_threshold: float = Field(default=0.8, ge=0.5, le=0.99)
+    decision_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    # R11-MP26: follow-up questions. A follow-up carries at most this many earlier
+    # turns, cut to this many characters (oldest dropped first); a conversation
+    # holds at most `conversation_max_turns`. Retention is the reaper rule
+    # `stale_ask_conversations` (30 days after the last turn, overridable).
+    conversation_context_turns: int = Field(default=3, ge=1, le=10)
+    conversation_context_max_chars: int = Field(default=6_000, ge=500, le=50_000)
+    conversation_max_turns: int = Field(default=50, ge=2, le=500)
+    openrouter_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
+
+    def model_route_for(self, purpose: Literal["SQL_GENERATION", "CLASSIFICATION"]) -> str | None:
+        """The route key this deployment uses for `purpose` (R11-MP03)."""
+        return self.model_routes_by_purpose.get(purpose) or self.model_route
+
+    @property
+    def selected_model_route_keys(self) -> frozenset[str]:
+        """Every route key the runtime may call: the default route, each
+        purpose's route and the fallbacks. The gateway admits a call only on
+        one of these."""
+        keys = {self.model_route, *self.model_routes_by_purpose.values()}
+        keys.update(self.model_route_fallback_keys)
+        return frozenset(key for key in keys if key)
 
     model_timeout_seconds: int = Field(default=30, ge=1, le=300)
     model_max_input_tokens: int = Field(default=8_000, ge=100, le=1_000_000)
     model_max_output_tokens: int = Field(default=2_000, ge=100, le=100_000)
     openai_base_url: str = "https://api.openai.com/v1"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # R11-MP01: Azure OpenAI has no public default -- a route's alias must map to the bank's
+    # own resource in `model_endpoint_urls` -- and every call names this API version, the
+    # first GA version with structured outputs.
+    azure_openai_api_version: str = "2024-10-21"
+    # R11-MP01: OpenRouter forwards a request to whichever upstream provider it
+    # picks, which is a residency decision nobody approved. Keyed by a route's
+    # `endpoint_alias`, the upstream providers that route may use, in preference
+    # order; the adapter sends them with `allow_fallbacks: false`. With
+    # `openrouter_require_pinned_provider` on (the default), an OpenRouter route
+    # whose alias has no entry here fails closed instead of letting OpenRouter choose.
+    openrouter_provider_order: dict[str, list[str]] = Field(default_factory=dict)
+    openrouter_require_pinned_provider: bool = True
     # MG-3: private routing. A `ModelRouteConfiguration.endpoint_alias` that appears
     # as a key here resolves to this base URL instead of the public
     # openai_base_url/gemini_base_url default -- e.g. an Azure OpenAI private
@@ -747,8 +1155,25 @@ class Settings(BaseSettings):
     # so every route approved before this setting existed is unaffected.
     model_endpoint_urls: dict[str, str] = Field(default_factory=dict)
     model_provider_max_attempts: int = Field(default=3, ge=1, le=5)
+    # R11-MP04: consecutive route failures (fallback-worthy status, timeout,
+    # network) after which the fallback loop skips that route for the cool-down.
+    # 0 turns the breaker off.
+    model_route_breaker_failure_threshold: int = Field(default=3, ge=0, le=20)
+    model_route_breaker_cooldown_seconds: int = Field(default=60, ge=5, le=3600)
+    # R11-MP05: how many times Ask may ask the model to correct a generated
+    # statement that the guard or catalog would refuse for a reason a model can
+    # fix (a parse error, an unknown table or column, a wildcard, an unbounded
+    # join). Each attempt is its own budgeted, recorded model call. 0 turns it off.
+    agent_sql_repair_attempts: int = Field(default=1, ge=0, le=2)
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, validation_alias="GEMINI_API_KEY")
+    anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    openrouter_api_key: SecretStr | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    azure_openai_api_key: SecretStr | None = Field(
+        default=None, validation_alias="AZURE_OPENAI_API_KEY"
+    )
     allow_development_sql_override: bool = True
     audit_hmac_key: str = "development-only-change-me"
     # QG-5: which signer produces the audit HMAC evidence in query_gateway.py.
@@ -921,6 +1346,53 @@ class Settings(BaseSettings):
                 names.add(f"AIDA_{field_name}".upper())
         return names
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Same source order pydantic-settings uses, with the dotenv source
+        filtered so a credential reference in `.env` is not a fatal error.
+
+        The two sources did not behave the same, and the difference was a real
+        defect. `reject_unrecognized_aida_env_vars` below explains why an
+        unrecognized `AIDA_*` name must be tolerated: a
+        `credential_reference="env://AIDA_SAMPLE_SOURCE_DSN"` names an env var
+        this model has never heard of, and its own comment points at
+        `.env.example` as the place that does it. But it only tolerates the
+        *process environment*, because pydantic-settings' env source drops an
+        unknown key before validation. The **dotenv** source does not drop it:
+        it hands it to the model, where `extra="forbid"` refuses it. So
+        `.env.example` shipped line 60 -- the documented sample-source
+        credential -- and anyone following the documented bootstrap
+        (`cp .env.example .env`) got a `Settings(_env_file=".env")` that raised
+        `extra_forbidden` for every host-side script, while the identical name
+        exported into the environment worked fine. Two sessions hit it
+        independently on 2026-09-17 before it was traced here.
+
+        This narrows the refusal to the case that deserves it, and nothing
+        else. `extra="forbid"` was already catching a misspelling in `.env`,
+        which is right and is kept -- the defect was that it could not tell a
+        typo from a credential reference and so refused both:
+
+        - a key that is *not* a close match of any real field is an
+          operator-named credential reference, so it is dropped here exactly as
+          the env source drops it;
+        - a key that *is* a close match is almost certainly a typo of a real
+          setting, so it is still passed through for `extra="forbid"` to refuse
+          loudly. Verified both ways before and after the change.
+        """
+        return (
+            init_settings,
+            env_settings,
+            _CredentialReferenceTolerantDotEnv(dotenv_settings, settings_cls),
+            file_secret_settings,
+        )
+
     @model_validator(mode="after")
     def reject_unrecognized_aida_env_vars(self) -> "Settings":
         # C1 (2026-08-30 audit): pydantic-settings' env source silently drops any
@@ -942,7 +1414,7 @@ class Settings(BaseSettings):
         suspects: list[str] = []
         for raw_name in os.environ:
             name = raw_name.upper()
-            if not name.startswith("AIDA_") or name in known:
+            if not name.startswith("AIDA_") or name in known or name in _SCRIPT_ONLY_ENV_NAMES:
                 continue
             match = difflib.get_close_matches(name, known, n=1, cutoff=0.84)
             if match:
@@ -973,6 +1445,25 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def reject_incoherent_graphql_limits(self) -> "Settings":
+        # R11-GQL01: a page the node budget could never admit would make every connection
+        # field's largest page unusable, and a response ceiling below the request ceiling
+        # would refuse an echo of the caller's own document. Introspection is a development
+        # convenience; production discovers the schema from the published SDL.
+        if self.graphql_max_page_size > self.graphql_max_nodes:
+            raise ValueError("graphql_max_page_size must not exceed graphql_max_nodes")
+        if self.graphql_max_response_bytes < self.graphql_max_request_bytes:
+            raise ValueError(
+                "graphql_max_response_bytes must be at least graphql_max_request_bytes"
+            )
+        if self.environment == "production" and self.graphql_introspection_enabled:
+            raise ValueError(
+                "GraphQL introspection is forbidden in production; clients read the "
+                "published schema (Docs/90-reference/graphql-schema.graphql)"
+            )
+        return self
+
+    @model_validator(mode="after")
     def reject_insecure_production_configuration(self) -> "Settings":
         if self.environment == "production" and self.identity_provider == "development":
             raise ValueError("development identity provider is forbidden in production")
@@ -993,11 +1484,19 @@ class Settings(BaseSettings):
             raise ValueError("default query row limit cannot exceed the hard limit")
         if self.environment == "production" and self.allow_development_sql_override:
             raise ValueError("development SQL override is forbidden in production")
+        if self.environment == "production" and self.reviewer_agent_enabled:
+            raise ValueError(
+                "unattended reviewer-agent approvals are forbidden in production: "
+                "measured unsafe under R11-C3 (9 of 14 false proposals approved)"
+            )
         if self.model_generation_enabled and not self.model_route:
             raise ValueError("model generation requires an explicit approved route")
         if self.environment == "production" and (
             not self.openai_base_url.startswith("https://")
             or not self.gemini_base_url.startswith("https://")
+            or not self.anthropic_base_url.startswith("https://")
+            or not self.openrouter_base_url.startswith("https://")
+            or not self.openrouter_decisions_url.startswith("https://")
         ):
             raise ValueError("production model provider URLs must use HTTPS")
         if self.environment == "production":
@@ -1044,6 +1543,49 @@ class Settings(BaseSettings):
             )
         return self
 
+
+
+class _CredentialReferenceTolerantDotEnv(PydanticBaseSettingsSource):
+    """Wraps the dotenv source and drops the `AIDA_*` keys that name a
+    credential reference rather than a setting.
+
+    See `Settings.settings_customise_sources` for why this exists. It delegates
+    rather than subclassing `DotEnvSettingsSource` so it inherits whatever
+    construction that source was given (`_env_file`, encoding, nesting) instead
+    of re-deriving it.
+    """
+
+    def __init__(
+        self, inner: PydanticBaseSettingsSource, settings_cls: type[BaseSettings]
+    ) -> None:
+        super().__init__(settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        # Never consulted: `__call__` below is overridden and does not use it.
+        # Declared because the base class makes it abstract.
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = self._inner()
+        known = Settings._known_env_names()
+        kept: dict[str, Any] = {}
+        for key, value in values.items():
+            name = f"AIDA_{key}".upper() if not key.upper().startswith("AIDA_") else key.upper()
+            if name in known or key.lower() in Settings.model_fields:
+                kept[key] = value
+                continue
+            # Not a field. Keep it only if it looks like a typo of one, so
+            # `extra="forbid"` can say so; otherwise it is a credential
+            # reference (or a name a script reads) and belongs to nobody but the operator.
+            if name in _SCRIPT_ONLY_ENV_NAMES:
+                continue
+            if difflib.get_close_matches(name, known, n=1, cutoff=0.84):
+                kept[key] = value
+        return kept
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._inner!r})"
 
 @lru_cache
 def get_settings() -> Settings:

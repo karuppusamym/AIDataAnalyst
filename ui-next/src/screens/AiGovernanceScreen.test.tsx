@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { AgentEvaluationRunRead, AiRuntimeStatusRead, ModelRouteConfigurationCreate, ModelRouteConfigurationRead } from "../lib/types";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { AgentEvaluationRunRead, AiRuntimeStatusRead, KillSwitchStateRead, ModelRouteConfigurationCreate, ModelRouteConfigurationRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
 
@@ -21,6 +21,9 @@ const submitModelRoute = vi.fn<(routeId: string, signal?: AbortSignal) => Promis
 const fetchAgentEvaluations =
   vi.fn<(organizationId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<AgentEvaluationRunRead>>>();
 const runAgentEvaluation = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<AgentEvaluationRunRead>>();
+/* R11-AUD08: the organization kill switch panel reads its own route. Its behaviour
+   is pinned in `AiGovernanceKillSwitch.test.tsx`; here it only has to be on the screen. */
+const fetchModelKillSwitchState = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<KillSwitchStateRead[]>>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -35,6 +38,8 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchAgentEvaluations: (organizationId: string, query: unknown, signal?: AbortSignal) =>
       fetchAgentEvaluations(organizationId, query, signal),
     runAgentEvaluation: (organizationId: string, signal?: AbortSignal) => runAgentEvaluation(organizationId, signal),
+    fetchModelKillSwitchState: (organizationId: string, signal?: AbortSignal) =>
+      fetchModelKillSwitchState(organizationId, signal),
   };
 });
 
@@ -71,6 +76,8 @@ beforeEach(() => {
   submitModelRoute.mockReset();
   fetchAgentEvaluations.mockReset();
   runAgentEvaluation.mockReset();
+  fetchModelKillSwitchState.mockReset();
+  fetchModelKillSwitchState.mockResolvedValue([]);
   fetchAiRuntimeStatus.mockResolvedValue(RUNTIME);
   fetchModelRoutes.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   fetchAgentEvaluations.mockResolvedValue({ items: [], limit: 100, offset: 0, total: 0 });
@@ -97,6 +104,25 @@ describe("AiGovernanceScreen against the real ai_governance_api.py / api.py rout
     // Runtime tiles render the real, humanized status values.
     expect(await screen.findByText("hybrid")).toBeInTheDocument();
     expect(screen.getByText("development headers only")).toBeInTheDocument();
+  });
+
+  it("puts the organization kill switch's state on the screen an operator checks whether AI is running", async () => {
+    fetchModelKillSwitchState.mockResolvedValue([
+      {
+        id: "ks_org", organization_id: "org1", route_key: "*", scope: "ORGANIZATION", engaged: true,
+        reason: "provider incident 4471", engaged_by: "pat.admin", engaged_at: "2026-09-19T08:30:12Z",
+        released_by: null, released_at: null,
+        created_at: "2026-09-19T08:30:12Z", updated_at: "2026-09-19T08:30:12Z",
+      },
+    ]);
+    const AiGovernanceScreen = await loadScreen();
+    render(<AiGovernanceScreen />);
+
+    const panel = await screen.findByRole("article", { name: "Organization kill switch" });
+    expect(await within(panel).findByText("Model use is stopped for the whole organization.")).toBeInTheDocument();
+    expect(fetchModelKillSwitchState).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000001", expect.anything());
+    // Beside, not instead of, everything the screen already showed.
+    expect(await screen.findByText("hybrid")).toBeInTheDocument();
   });
 
   it("shows the legacy empty copy when there are no model routes yet", async () => {

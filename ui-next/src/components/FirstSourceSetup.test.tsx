@@ -183,7 +183,7 @@ describe("deriveSetupSteps", () => {
 -------------------------------------------------------------------------- */
 
 const fetchOrgWorkspaces = vi.fn();
-const fetchOrgDatasources = vi.fn();
+const listOrgDatasources = vi.fn();
 const fetchDatasourceAnalysisRuns = vi.fn();
 const fetchCatalogRows = vi.fn();
 const fetchAgentRuns = vi.fn();
@@ -194,7 +194,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchOrgWorkspaces: (...args: unknown[]) => fetchOrgWorkspaces(...args),
-    fetchOrgDatasources: (...args: unknown[]) => fetchOrgDatasources(...args),
+    listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
     fetchDatasourceAnalysisRuns: (...args: unknown[]) => fetchDatasourceAnalysisRuns(...args),
     fetchCatalogRows: (...args: unknown[]) => fetchCatalogRows(...args),
     fetchAgentRuns: (...args: unknown[]) => fetchAgentRuns(...args),
@@ -205,7 +205,7 @@ vi.mock("../lib/api", async (importOriginal) => {
 beforeEach(() => {
   for (const mock of [
     fetchOrgWorkspaces,
-    fetchOrgDatasources,
+    listOrgDatasources,
     fetchDatasourceAnalysisRuns,
     fetchCatalogRows,
     fetchAgentRuns,
@@ -214,7 +214,7 @@ beforeEach(() => {
     mock.mockReset();
   }
   fetchOrgWorkspaces.mockResolvedValue({ items: [{ status: "ACTIVE" }], total: 1 });
-  fetchOrgDatasources.mockResolvedValue({ items: [SOURCE], total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [SOURCE], total: 1 });
   fetchDatasourceAnalysisRuns.mockResolvedValue({ items: [], total: 0 });
   fetchCatalogRows.mockResolvedValue({ items: [], total: 0 });
   fetchAgentRuns.mockResolvedValue({ items: [], total: 0 });
@@ -282,7 +282,7 @@ describe("FirstSourceSetup", () => {
   });
 
   it("says a source has not been registered rather than showing an empty step", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [], total: 0 });
+    listOrgDatasources.mockResolvedValue({ items: [], total: 0 });
     const FirstSourceSetup = await loadPanel();
     render(<FirstSourceSetup onNavigate={vi.fn()} />);
 

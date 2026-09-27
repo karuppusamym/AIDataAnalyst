@@ -105,8 +105,10 @@ class ViewNotEligibleError(ViewToolBlueprintError):
     unparsed or quarantined -- refused, never guessed. Mirrors AT-19's
     `_view_definition_transformation_detail` gating in `mcp_server.py`."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, code: str = "VIEW_DEFINITION_NOT_ELIGIBLE") -> None:
         self.reason = reason
+        #: Stable and value-free, for a caller that records why rather than says it (R11-FP14).
+        self.code = code
         super().__init__(f"view is not eligible for tool generation: {reason}")
 
 
@@ -237,25 +239,31 @@ def build_view_tool_blueprint(view: ViewToolSource, *, dialect: str) -> ViewTool
 
 def _require_eligible_view_definition(view_definition: MetadataViewDefinition | None) -> None:
     if view_definition is None:
-        raise ViewNotEligibleError("no captured view definition for this table")
+        raise ViewNotEligibleError(
+            "no captured view definition for this table", code="VIEW_DEFINITION_MISSING"
+        )
     if view_definition.status != "ACTIVE":
         raise ViewNotEligibleError(
-            f"view definition status is {view_definition.status}, not ACTIVE"
+            f"view definition status is {view_definition.status}, not ACTIVE",
+            code="VIEW_DEFINITION_INACTIVE",
         )
     if view_definition.availability != AVAILABLE:
         raise ViewNotEligibleError(
             "view definition text is UNAVAILABLE "
-            f"({view_definition.unavailable_reason or 'no reason recorded'})"
+            f"({view_definition.unavailable_reason or 'no reason recorded'})",
+            code="VIEW_DEFINITION_UNAVAILABLE",
         )
     if view_definition.redaction_status != "PARSED":
         raise ViewNotEligibleError(
             f"view definition redaction status is {view_definition.redaction_status}, "
-            "not PARSED"
+            "not PARSED",
+            code="VIEW_DEFINITION_NOT_PARSED",
         )
     if not is_eligible_for_model_context(view_definition.screening_status):
         raise ViewNotEligibleError(
             "view definition is quarantined by prompt-risk screening "
-            f"(screening_status={view_definition.screening_status})"
+            f"(screening_status={view_definition.screening_status})",
+            code="VIEW_DEFINITION_QUARANTINED",
         )
 
 

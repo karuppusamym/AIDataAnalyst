@@ -1,0 +1,27 @@
+/* R11-S13 (M3): the documentation workspace shell.
+
+   Only the tab axis and the panel that holds a tab live here. Each tab is the
+   screen it always was and still ships its own stylesheet, so nothing below
+   restates a rule `DocumentationWorklistScreen.css`, `DescriptionDraftsScreen.css`
+   or `DataDictionariesScreen.css` already owns. The tab chrome deliberately
+   matches `BusinessMeaningScreen.css`'s, which is the shell's existing
+   in-screen tab pattern -- two visual languages for one idea is the thing this
+   row is removing, not adding. */
+
+.docws{display:flex;flex-direction:column;min-height:0;height:100%;gap:10px;padding:22px 24px 0}
+.docws__tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);flex:none}
+.docws__tab{all:unset;padding:8px 12px;font-size:12.5px;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent}
+.docws__tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.docws__tab--active{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.docws__scope{margin:0;flex:none;font-size:12px;color:var(--ink-3)}
+
+/* The tab's own screen draws its padding, so the panel supplies none -- it
+   only gives the screen the remaining height and its own scroll context. */
+.docws__panel{flex:1;min-height:0;display:flex;flex-direction:column}
+.docws__panel > *{flex:1;min-height:0}
+.docws__loading{flex:1;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:13px}
+
+@media (max-width:900px){
+  .docws{padding:16px 14px 0}
+  .docws__tabs{overflow-x:auto}
+}

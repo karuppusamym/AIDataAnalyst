@@ -1,9 +1,19 @@
-"""SQL-based view and procedure lineage extraction.
+"""SQL-based view lineage extraction.
 
-Parses SQL view definitions and stored procedure bodies using sqlglot to
-extract column-level lineage edges.  Definitions are NEVER executed -- this
-is parse-only analysis.  Literal values in SQL are REDACTED (replaced by
-placeholders) so no source data leaks into lineage metadata.
+Parses SQL view definitions using sqlglot to extract column-level lineage
+edges.  Definitions are NEVER executed -- this is parse-only analysis.
+Literal values in SQL are REDACTED (replaced by placeholders) so no source
+data leaks into lineage metadata.
+
+Procedure *bodies* are not parsed here.  `parse_procedure_lineage` used to
+live in this module as a second name for `parse_view_lineage` -- the same
+flat statement sweep, with no control-flow or dynamic-SQL handling (AT-D5).
+It was removed on 2026-09-11 (R11-X5) once its only caller, the
+`view_lineage_api` router, went with it; the procedure-aware parser N3
+called for is `aida.procedure_lineage.parse_procedure_lineage`.  What
+remains of the procedure story here is the `PROCEDURE_RESULT_TARGET`
+sentinel for a standalone `SELECT` with no destination table, which
+`aida.procedure_lineage` and `aida.routine_lineage_edges` still read.
 
 Supported dialects: postgres, snowflake, bigquery, tsql (SQL Server), oracle.
 Graceful degradation: if a parse fails the module returns an empty edge list
@@ -36,7 +46,9 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Final, Literal
+from typing import Final
+
+from aida.cost_metrics import ParseOutcome, Parser, classify_parse, parser_span
 
 try:
     import sqlglot
@@ -61,6 +73,14 @@ class TransformationType(str, Enum):
     # or procedure depends on every column of the named source table, but
     # individual columns could not be resolved (see `parse_view_lineage`).
     TABLE_STAR = "TABLE_STAR"
+    # Table-level evidence for a table a statement reads without naming any of
+    # its columns -- `count(*)`, `EXISTS (SELECT 1 FROM t)`, `SELECT 1 FROM t`:
+    # what depends on it is how many rows it has, or whether any match, and no
+    # column's value flows. Same `STAR_COLUMN_MARKER` ends as TABLE_STAR, which
+    # would claim every column flows. Emitted by the procedure parser
+    # (`procedure_lineage._table_rows_read`) only; this module's view parse is
+    # unchanged by it.
+    TABLE_ROWS = "TABLE_ROWS"
 
 
 class Confidence(str, Enum):
@@ -68,8 +88,6 @@ class Confidence(str, Enum):
     PARTIAL = "PARTIAL"
     LOW = "LOW"
 
-
-DialectName = Literal["postgres", "snowflake", "bigquery", "tsql", "oracle"]
 
 _SQLGLOT_DIALECT_MAP: dict[str, str] = {
     "postgres": "postgres",
@@ -97,6 +115,18 @@ FILTER_EVIDENCE_TARGET_COLUMN: Final[str] = "<FILTER_PREDICATE>"
 # `source_column` / `target_column` for a `TABLE_STAR` table-level edge --
 # the literal star notation, which can never collide with a real column name.
 STAR_COLUMN_MARKER: Final[str] = "*"
+
+# Where the procedure parser (`aida.procedure_column_owners`) leaves, on a column
+# reference, the table it resolved that reference to by scope -- the name
+# `_extract_source_columns` then reports in place of the reference's own
+# qualifier. `""` means no single table can be proved to own it (recorded
+# unresolved, never guessed). Absent on every node this module parses itself, so
+# view lineage is unchanged by it.
+COLUMN_OWNER_META: Final[str] = "aida_column_owner"
+# ... or, in the same place, this: the reference is a routine's variable or a
+# record's field, not a column of any table, so it is no source at all -- as a
+# T-SQL `@variable`, which sqlglot never parses as a column, has never been one.
+VARIABLE_REFERENCE: Final[str] = "<VARIABLE>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +216,8 @@ def _extract_source_columns(
     """Extract (table, column) pairs referenced in an expression.
 
     Walks the AST to find all Column nodes and resolves their table references.
+    A reference the procedure parser resolved by scope (`COLUMN_OWNER_META`)
+    reports that table instead of its qualifier, and a variable is skipped.
     """
     if not _SQLGLOT_AVAILABLE:
         return []
@@ -193,8 +225,11 @@ def _extract_source_columns(
     if not isinstance(expression, exp.Expression):
         return results
     for column in expression.find_all(exp.Column):
-        table_name = ""
-        if column.table:
+        owner = column.meta.get(COLUMN_OWNER_META)
+        if owner == VARIABLE_REFERENCE:
+            continue
+        table_name = owner if isinstance(owner, str) else ""
+        if owner is None and column.table:
             table_name = column.table
         col_name = column.name
         if col_name:
@@ -435,15 +470,24 @@ def _extract_edges_from_select(
     merged_aliases = {**table_aliases}
     merged_aliases.update(cte_aliases)
 
-    # Also collect aliases from subqueries and CTEs in this select
+    # Also collect aliases from subqueries and CTEs in this select -- *filling in*
+    # what the caller's map lacks, never overwriting what it already resolved.
+    # Every caller builds `table_aliases` from the same `find_all(exp.Table)` walk,
+    # so for them this is identical to assignment. The difference is a caller that
+    # deliberately *bound* a name: a trigger body's `inserted`/`NEW` is resolved to
+    # the firing table (`procedure_lineage._bind_subject`). Assignment re-collected
+    # `FROM inserted i` as `i -> inserted` and clobbered that binding, so an aliased
+    # `SELECT i.x INTO #t FROM inserted i` recorded its source as a table literally
+    # named `inserted` -- while the unaliased form, and an aliased INSERT...SELECT,
+    # happened to resolve correctly by other routes (R11-FP01, 2026-09-18).
     for table in select_stmt.find_all(exp.Table):
         fqn = _resolve_table_name(table)
         if fqn:
             if table.alias:
-                merged_aliases[table.alias] = fqn
-            merged_aliases[fqn] = fqn
+                merged_aliases.setdefault(table.alias, fqn)
+            merged_aliases.setdefault(fqn, fqn)
             if table.name:
-                merged_aliases[table.name] = fqn
+                merged_aliases.setdefault(table.name, fqn)
 
     # Handle UNION queries -- each branch resolves its own WHERE/aggregation
     # independently; nothing is inherited from the union as a whole.
@@ -671,6 +715,17 @@ def parse_view_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
 
     The SQL is never executed.  Literal values are redacted from hashes.
 
+    R11-FP17: instrumented here, at the public entry point, rather than in
+    `_parse_sql`.  Every caller in the platform goes through this function --
+    `lineage_agent`, `context_rebuild`, `dbt_column_lineage` -- while
+    `aida.procedure_lineage` reuses the private helpers directly and times
+    itself at its own call sites.  Metric publication only: `parser_span`
+    touches no database and holds nothing about the SQL but its length, so this
+    module stays the catalog- and database-free parser AT-D2 requires.  The
+    per-source half of parser cost cannot live here at all, because this module
+    deliberately does not know which source a definition came from; the callers
+    that do know record it (`cost_metrics.record_parser_spend`).
+
     Args:
         sql: The SQL view definition (e.g. CREATE VIEW v AS SELECT ...)
         dialect: Target SQL dialect (postgres, snowflake, bigquery, tsql, oracle)
@@ -678,54 +733,20 @@ def parse_view_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
     Returns:
         ParseResult with extracted edges and confidence level.
     """
-    if dialect not in _SQLGLOT_DIALECT_MAP:
-        return ParseResult(
-            confidence=Confidence.LOW.value,
-            dialect=dialect,
-            sql_hash=_compute_sql_hash(sql),
-            errors=[f"unsupported dialect: {dialect}"],
-        )
-    return _parse_sql(sql, dialect)
-
-
-def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
-    """Parse SQL text as a flat sequence of DML statements -- currently
-    identical to `parse_view_lineage`, not a procedure-aware parser.
-
-    AT-D5: this is `_parse_sql` under a procedure-flavoured name, not real
-    procedure-body parsing (tracker item N3, TODO, not started). It has no
-    control-flow handling (IF/LOOP/CURSOR/branching), no
-    variable/temp-table scope resolution, and -- most importantly --
-    **no dynamic-SQL detection at all**: a `CREATE PROCEDURE ... AS $$ ...
-    EXECUTE format(...) ... $$` body's dynamic string is invisible to
-    sqlglot and silently produces no edge for that statement, with nothing
-    flagging the gap as unresolved rather than merely absent. It works
-    today only because `sqlglot.parse` on a bare (non-`CREATE PROCEDURE`)
-    sequence of statements -- e.g. a body already unwrapped by the caller
-    into `SELECT`/`INSERT`/`UPDATE`/`MERGE` statements -- happens to
-    extract the same per-statement edges `parse_view_lineage` would extract
-    from the same SQL; a real `CREATE PROCEDURE`/`CREATE FUNCTION` wrapper
-    generally fails to parse under `sqlglot` and falls back to
-    `Confidence.LOW` with a parse error, same as any unparseable input.
-    Do not read the separate name as evidence of procedure-specific
-    capability -- see N3 in `Docs/60-delivery/03-tracker.md` for the real,
-    unstarted work this would take.
-
-    The SQL is never executed.  Literal values are redacted from hashes.
-
-    Args:
-        sql: The SQL text (ideally already unwrapped to its constituent DML
-            statements; a full `CREATE PROCEDURE` wrapper is not parsed).
-        dialect: Target SQL dialect
-
-    Returns:
-        ParseResult with extracted edges and confidence level.
-    """
-    if dialect not in _SQLGLOT_DIALECT_MAP:
-        return ParseResult(
-            confidence=Confidence.LOW.value,
-            dialect=dialect,
-            sql_hash=_compute_sql_hash(sql),
-            errors=[f"unsupported dialect: {dialect}"],
-        )
-    return _parse_sql(sql, dialect)
+    with parser_span(Parser.VIEW_LINEAGE, dialect=dialect, sql=sql) as span:
+        if dialect not in _SQLGLOT_DIALECT_MAP:
+            span.observed(ParseOutcome.UNSUPPORTED_DIALECT)
+            return ParseResult(
+                confidence=Confidence.LOW.value,
+                dialect=dialect,
+                sql_hash=_compute_sql_hash(sql),
+                errors=[f"unsupported dialect: {dialect}"],
+            )
+        result = _parse_sql(sql, dialect)
+        # One view definition is one statement, which is what this entry point
+        # is documented to take. The outcome is classified by the shared
+        # `classify_parse` rather than inline, so a missing sqlglot is counted
+        # as a deployment fault here and at the procedure-parse call sites
+        # alike instead of being buried in the expected UNPARSEABLE noise.
+        span.observed(classify_parse(result.errors, has_edges=bool(result.edges)))
+        return result

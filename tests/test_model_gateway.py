@@ -163,7 +163,8 @@ async def test_openai_adapter_uses_responses_json_schema_without_leaking_key() -
         max_output_tokens=1000,
     )
     await client.aclose()
-    assert result["confidence"] == 0.9
+    assert result.output["confidence"] == 0.9
+    assert result.usage is None
 
 
 @pytest.mark.asyncio
@@ -245,7 +246,7 @@ async def test_openai_adapter_falls_back_to_the_public_default_for_an_unmapped_a
         max_output_tokens=1000,
     )
     await client.aclose()
-    assert result == {}
+    assert result.output == {}
     assert seen_hosts == ["api.openai.com"]
 
 
@@ -340,4 +341,4 @@ async def test_gemini_adapter_uses_generate_content_json_schema() -> None:
         max_output_tokens=1000,
     )
     await client.aclose()
-    assert result["confidence"] == 0.8
+    assert result.output["confidence"] == 0.8

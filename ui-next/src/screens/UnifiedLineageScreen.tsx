@@ -1,4 +1,6 @@
 import { layoutTopology } from "../lib/lineageLayout";
+import { resolveGraphQuestion } from "../lib/graphQuestion";
+import { OntologyManager } from "../components/OntologyManager";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   UnifiedLineageEdgeRead,
@@ -7,7 +9,13 @@ import type {
   UnifiedLineageImpactRead,
   UnifiedLineageNodeRead,
 } from "../lib/types";
-import { ApiError, fetchLineageImpact, fetchOrgDatasources, fetchUnifiedLineageGraph } from "../lib/api";
+import {
+  ApiError,
+  fetchLineageImpact,
+  fetchUnifiedLineageGraph,
+  findOrgDatasourceById,
+  listOrgDatasources,
+} from "../lib/api";
 import {
   domainsWithDatasources,
   fetchDomainLineageGraph,
@@ -118,7 +126,9 @@ const LAYER_DEFS: { key: LayerKey; label: string; tone: Tone; sources: UnifiedLi
   { key: "SUGGESTED", label: "Suggested", tone: "warn", sources: ["SUGGESTED_RELATIONSHIP"] },
   { key: "DBT", label: "dbt", tone: "accent", sources: ["DBT_DEPENDENCY"] },
   { key: "OL", label: "OpenLineage", tone: "ok", sources: ["OPENLINEAGE_ETL"] },
-  { key: "OTHER", label: "View / procedure", tone: "mute", sources: ["VIEW_DEFINITION", "PROCEDURE_DEFINITION"] },
+  /* R11-FP01: TRIGGER_DEFINITION is parsed code like the other two, so it
+     filters with them rather than getting a sixth chip. */
+  { key: "OTHER", label: "View / procedure / trigger", tone: "mute", sources: ["VIEW_DEFINITION", "PROCEDURE_DEFINITION", "TRIGGER_DEFINITION"] },
 ];
 
 function layerOf(source: UnifiedLineageEdgeRead["edge_source"]): LayerKey {
@@ -187,31 +197,58 @@ function EdgeRow({ edge }: { edge: UnifiedLineageEdgeRead }) {
   );
 }
 
-function ImpactRow({ direction, item }: { direction: "Upstream" | "Downstream"; item: UnifiedLineageImpactNodeRead }) {
+/* Three columns, not five. The impact panel is 240-320px wide, and Direction
+   and Evidence as columns of their own pushed Evidence and Quality past its
+   right edge -- reachable only by scrolling sideways. Direction is now the
+   group a row sits under, and evidence a line under the asset. */
+function ImpactRow({ item }: { item: UnifiedLineageImpactNodeRead }) {
   const qualityState = item.quality_state ?? "UNKNOWN";
+  const evidence = item.contributing_edge_sources.map((s) => s.toLowerCase().replace(/_/g, " ")).join(", ");
   return (
     <tr>
-      <td>{direction}</td>
       <td>
         <div className="ult__impactasset">{item.label}</div>
         <div className="ult__impactqn">{item.qualified_name}</div>
+        {evidence ? <div className="ult__impactevidence">via {evidence}</div> : null}
       </td>
-      <td className="tnum">{item.depth}</td>
-      <td>{item.contributing_edge_sources.map((s) => s.toLowerCase().replace(/_/g, " ")).join(", ")}</td>
-      <td>
+      <td className="tnum ult__impactdepth">{item.depth}</td>
+      <td className="ult__impactquality">
         <Pill tone={qualityTone(qualityState)}>{qualityState.toLowerCase().replace(/_/g, " ")}</Pill>
       </td>
     </tr>
   );
 }
 
-export function UnifiedLineageScreen() {
+/**
+ * Which of this screen's two panes leads.
+ *
+ * R11-S13 (M1): `lineage` is one destination with three views, and two of them
+ * are this screen. The graph and the bounded impact of the selected node were
+ * always both here -- the graph wide, the impact in a 360px rail -- and
+ * "who breaks if I change this" is the question that rail made hardest to
+ * read. `lead` is which one gets the width; it is NOT a second set of data, a
+ * second endpoint or a second permission contract. One component, one set of
+ * requests, two emphases.
+ */
+export type UnifiedLineageLead = "graph" | "impact";
+
+export function UnifiedLineageScreen({ lead = "graph" }: { lead?: UnifiedLineageLead } = {}) {
   const ORG = useOrgId();
+  const impactLed = lead === "impact";
+  const [ontologyOpen, setOntologyOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [detailsVisible, setDetailsVisible] = useState(true);
   const [maximized, setMaximized] = useState(false);
   const [neighborhood, setNeighborhood] = useState(true);
   const [params, setParams] = useUrlState();
+  const [assetSearch, setAssetSearch] = useState("");
+  const [nodeKind, setNodeKind] = useState("ALL");
+  const [minimumConfidence, setMinimumConfidence] = useState(0);
+  const [question, setQuestion] = useState("");
+  const [questionError, setQuestionError] = useState<string | null>(null);
+  const [questionPlan, setQuestionPlan] = useState<ReturnType<typeof resolveGraphQuestion> | null>(null);
+  const impactDepth = Math.min(5, Math.max(1, Math.floor(Number(params.get("depth")) || 5)));
+  const impactDirection = ["upstream", "downstream"].includes(params.get("direction") ?? "") ? params.get("direction")! : "both";
   const ds = params.get("ds");
   // Scope lives in the URL alongside `ds`/`dom` so a domain-wide graph is as
   // shareable as a single-source one.
@@ -220,7 +257,29 @@ export function UnifiedLineageScreen() {
   const selectedNodeId = params.get("node");
   const tab = params.get("tab") === "nodes" || params.get("tab") === "edges" ? params.get("tab")! : "topology";
 
-  const { datasources, error: datasourcesError } = useDatasourcePicker(ORG);
+  const {
+    datasources,
+    error: datasourcesError,
+    loading: datasourcesLoading,
+  } = useDatasourcePicker(ORG);
+  // The picker is scoped to what the active workspace reaches, deliberately.
+  // A link can still name a source outside that list, and its graph loads when
+  // the caller may read it -- so the picker has to say which source that is,
+  // not show "Select a datasource…" above a graph it did not select.
+  const linkedOutsideScope =
+    scopeKind === "source" && !!ds && !datasourcesLoading && !datasources.some((d) => d.id === ds);
+  const [linkedSourceName, setLinkedSourceName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!linkedOutsideScope || !ds) {
+      setLinkedSourceName(null);
+      return;
+    }
+    const ac = new AbortController();
+    void findOrgDatasourceById(ORG, ds, ac.signal).then((source) => {
+      if (!ac.signal.aborted) setLinkedSourceName(source?.name ?? null);
+    });
+    return () => ac.abort();
+  }, [ORG, ds, linkedOutsideScope]);
 
   const [nodeLimit, setNodeLimit] = useState("300");
   const [edgeLimit, setEdgeLimit] = useState("1500");
@@ -239,6 +298,7 @@ export function UnifiedLineageScreen() {
   // Reported by the domain graph, never inferred here: domains with
   // candidates reaching into this one that no ACTIVE grant covers.
   const [withheldDomainIds, setWithheldDomainIds] = useState<string[]>([]);
+  const [withheldSourceCount, setWithheldSourceCount] = useState(0);
   const [grantTargetDomainId, setGrantTargetDomainId] = useState<string | null>(null);
 
   const [impact, setImpact] = useState<UnifiedLineageImpactRead | null>(null);
@@ -257,7 +317,7 @@ export function UnifiedLineageScreen() {
       try {
         const [allDomains, sources] = await Promise.all([
           fetchOrgDataDomains(ORG, ac.signal),
-          fetchOrgDatasources(ORG, ac.signal),
+          listOrgDatasources(ORG, ac.signal),
         ]);
         if (cancelled) return;
         setDomains(domainsWithDatasources(allDomains, sources.items ?? []));
@@ -281,6 +341,7 @@ export function UnifiedLineageScreen() {
       setGraph(null);
       setError(null);
       setWithheldDomainIds([]);
+      setWithheldSourceCount(0);
       setLoading(false);
       return;
     }
@@ -303,12 +364,14 @@ export function UnifiedLineageScreen() {
         // the same shape, so everything downstream is untouched.
         setGraph({ ...result, datasource_id: "" } as unknown as UnifiedLineageGraphRead);
         setWithheldDomainIds(result.withheld_cross_boundary_domain_ids ?? []);
+        setWithheldSourceCount(result.withheld_datasource_count ?? 0);
         return;
       }
       const result = await fetchUnifiedLineageGraph(scopeId, options, ac.signal);
       if (seq !== graphSeq.current) return;
       setGraph(result);
       setWithheldDomainIds([]);
+      setWithheldSourceCount(0);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
       if (seq !== graphSeq.current) return;
@@ -363,7 +426,7 @@ export function UnifiedLineageScreen() {
     setImpactLoading(true);
     setImpactError(null);
     try {
-      const result = await fetchLineageImpact(impactDatasourceId, impactNodeId, { depth: 5, nodeLimit: 200 }, ac.signal);
+      const result = await fetchLineageImpact(impactDatasourceId, impactNodeId, { depth: impactDepth, nodeLimit: 200 }, ac.signal);
       if (seq !== impactSeq.current) return;
       setImpact(result);
     } catch (e) {
@@ -373,7 +436,7 @@ export function UnifiedLineageScreen() {
     } finally {
       if (seq === impactSeq.current) setImpactLoading(false);
     }
-  }, [ds, scopeKind, selectedNodeId]);
+  }, [ds, scopeKind, selectedNodeId, impactDepth]);
 
   useEffect(() => {
     void loadImpact();
@@ -389,12 +452,20 @@ export function UnifiedLineageScreen() {
     });
   }, []);
 
+  const filteredNodes = useMemo(() => (graph?.nodes ?? []).filter(n =>
+    (nodeKind === "ALL" || n.node_kind === nodeKind) &&
+    `${n.label} ${n.qualified_name}`.toLowerCase().includes(assetSearch.trim().toLowerCase())
+  ), [graph, nodeKind, assetSearch]);
   const filteredEdges = useMemo(
-    () => (graph ? graph.edges.filter((e) => activeLayers.has(layerOf(e.edge_source))) : []),
-    [graph, activeLayers],
+    () => {
+      const ids = new Set(filteredNodes.map(n => n.id));
+      return (graph?.edges ?? []).filter(e => activeLayers.has(layerOf(e.edge_source)) &&
+        e.confidence >= minimumConfidence && ids.has(e.source_node_id) && ids.has(e.target_node_id));
+    },
+    [graph, activeLayers, filteredNodes, minimumConfidence],
   );
 
-  const layout = useMemo(() => (graph ? layoutTopology(graph.nodes, filteredEdges, selectedNodeId, neighborhood) : null), [graph, filteredEdges, selectedNodeId, neighborhood]);
+  const layout = useMemo(() => (graph ? layoutTopology(filteredNodes, filteredEdges, selectedNodeId, neighborhood) : null), [graph, filteredNodes, filteredEdges, selectedNodeId, neighborhood]);
 
   const topologyEdges = useMemo(() => {
     if (!layout) return [];
@@ -408,19 +479,90 @@ export function UnifiedLineageScreen() {
     return [
       ...[...impact.upstream].sort((a, b) => a.depth - b.depth).map((item) => ({ direction: "Upstream" as const, item })),
       ...[...impact.downstream].sort((a, b) => a.depth - b.depth).map((item) => ({ direction: "Downstream" as const, item })),
-    ];
-  }, [impact]);
+    ].filter(row => impactDirection === "both" || row.direction.toLowerCase() === impactDirection);
+  }, [impact, impactDirection]);
+
+  /* R11-S13 (M1): held in a variable so the Impact view can put it BEFORE the
+     graph in the DOM, not merely above it in CSS. A screen reader and the Tab
+     key follow document order, so a view whose whole point is the impact table
+     must not make a keyboard user walk the graph's zoom, layer chips, asset
+     filters and graph-question form to reach it. Visual order and reading
+     order agree in both views because the same value moves. */
+  const impactPane = (
+    <aside hidden={!detailsVisible} className="ult__impact" aria-label="Impact">
+      {!selectedNodeId ? (
+        <Empty title="Select a graph node" hint="Bounded upstream and downstream impact will appear here." />
+      ) : impactError ? (
+        <ErrorState title="Impact could not be loaded" detail={impactError} onRetry={() => void loadImpact()} />
+      ) : impactLoading || !impact ? (
+        <div className="ult__skeleton" role="status" aria-live="polite">
+          Tracing impact…
+        </div>
+      ) : (
+        <>
+          <div className="ult__panelhead">
+            <div>
+              <p className="ult__eyebrow">TRANSITIVE IMPACT</p>
+              <h2 className="ult__h2">{impact.focus_label}</h2>
+            </div>
+            <Pill tone={kindTone(impact.focus_node_kind)}>{impact.focus_node_kind.toLowerCase().replace(/_/g, " ")}</Pill>
+          </div>
+          {impactRows.length === 0 ? (
+            <Empty title="No connected impact" />
+          ) : (
+            <div className="ult__impactscroll">
+              <table className="ult__impacttable">
+                <thead>
+                  <tr>
+                    <th scope="col">Asset</th>
+                    <th scope="col" className="ult__impactdepth">Depth</th>
+                    <th scope="col" className="ult__impactquality">Quality</th>
+                  </tr>
+                </thead>
+                {(["Upstream", "Downstream"] as const).map((direction) => {
+                  const rows = impactRows.filter((row) => row.direction === direction);
+                  return rows.length > 0 ? (
+                    <tbody key={direction}>
+                      <tr>
+                        <th scope="colgroup" colSpan={3} className="ult__impactgroup">
+                          <span>{direction}</span>
+                          <span className="ult__impactgroupcount">{rows.length}</span>
+                        </th>
+                      </tr>
+                      {rows.map(({ item }) => (
+                        <ImpactRow key={`${direction}-${item.node_id}`} item={item} />
+                      ))}
+                    </tbody>
+                  ) : null;
+                })}
+              </table>
+            </div>
+          )}
+          {impact.upstream_truncated || impact.downstream_truncated ? (
+            <p className="ult__trunc">Truncated at this depth/node limit — narrower search shows more of the true chain.</p>
+          ) : null}
+        </>
+      )}
+    </aside>
+  );
 
   return (
     <div className={`ult${maximized ? " ult--maximized" : ""}`}>
       <header className="ult__head">
         <div>
-          <h1 className="ult__h1">Unified lineage</h1>
+          {/* R11-S13 (M1): the heading names the VIEW, because this screen is
+              now two of the merged destination's three views and a heading
+              that said "Unified lineage" over an impact-led layout would be
+              describing the other one. */}
+          <h1 className="ult__h1">{impactLed ? "Lineage impact" : "Unified lineage"}</h1>
           <p className="ult__lede">
-            Declared constraints, approved relationships, dbt dependencies, and OpenLineage runs, merged into one
-            bounded, value-free graph — pick a node to see its bounded upstream/downstream impact.
+            {impactLed
+              ? "Who breaks if this changes: bounded upstream and downstream impact for the selected node, over the same merged graph — declared constraints, approved relationships, dbt dependencies, OpenLineage runs and view/procedure definitions."
+              : "Declared constraints, approved relationships, dbt dependencies, and OpenLineage runs, merged into one bounded, value-free graph — pick a node to see its bounded upstream/downstream impact."}
           </p>
         </div>
+        <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
+        {ontologyOpen ? <OntologyManager key={ORG} organizationId={ORG} onClose={() => setOntologyOpen(false)} /> : null}
       </header>
 
       <div className="ult__controls">
@@ -453,6 +595,9 @@ export function UnifiedLineageScreen() {
           <Field label="Data source">
             <select value={ds ?? ""} onChange={(e) => setParams({ ds: e.target.value || null, node: null })}>
               <option value="">Select a datasource…</option>
+              {linkedOutsideScope && ds ? (
+                <option value={ds}>{`${linkedSourceName ?? ds} (outside this workspace)`}</option>
+              ) : null}
               {datasources.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.name}
@@ -505,6 +650,13 @@ export function UnifiedLineageScreen() {
           : "One data source. Switch scope to Domain to see relationships that cross between sources."}
       </p>
 
+      {linkedOutsideScope ? (
+        <p className="ult__note" role="status">
+          This link opens <strong>{linkedSourceName ?? "a data source"}</strong>, which the active workspace does not
+          list. Pick one of the workspace's sources above to stay within it.
+        </p>
+      ) : null}
+
       {/* Reported by the server, never inferred here. A domain with candidates
           reaching in but no ACTIVE grant is named rather than dropped, so an
           incomplete graph cannot pass for a complete one (ADR-0017 §4). */}
@@ -532,6 +684,21 @@ export function UnifiedLineageScreen() {
         </div>
       ) : null}
 
+      {/* R11-D28: also reported by the server. A data source of this domain that the
+          caller's workspace refuses contributes nothing to the graph; it is counted,
+          never named, so a short graph still says it is short. */}
+      {scopeKind === "domain" && withheldSourceCount > 0 ? (
+        <p className="ult__withheld" role="status">
+          <strong>
+            {withheldSourceCount === 1
+              ? "One data source in this domain is not shown."
+              : `${withheldSourceCount} data sources in this domain are not shown.`}
+          </strong>{" "}
+          Your workspace does not give you access to {withheldSourceCount === 1 ? "it" : "them"}, so{" "}
+          {withheldSourceCount === 1 ? "its" : "their"} tables and edges are left out of this graph.
+        </p>
+      ) : null}
+
       {scopeKind === "domain" && dom ? (
         <CrossBoundaryGrants
           domainId={dom}
@@ -547,7 +714,12 @@ export function UnifiedLineageScreen() {
         </p>
       ) : null}
 
-      <div className={`ult__layout${detailsVisible ? "" : " ult__layout--wide"}`}>
+      <div
+        className={`ult__layout${detailsVisible ? "" : " ult__layout--wide"}${
+          impactLed ? " ult__layout--impactled" : ""
+        }`}
+      >
+        {impactLed ? impactPane : null}
         <article className="ult__main">
           <div className="ult__panelhead">
             <div>
@@ -612,10 +784,30 @@ export function UnifiedLineageScreen() {
                     className={`ult__tab${tab === t ? " ult__tab--active" : ""}`}
                     onClick={() => setParams({ tab: t === "topology" ? null : t })}
                   >
-                    {t === "topology" ? "Topology" : t === "nodes" ? `Nodes (${graph.nodes.length})` : `Edges (${filteredEdges.length})`}
+                    {t === "topology" ? "Topology" : t === "nodes" ? `Nodes (${filteredNodes.length})` : `Edges (${filteredEdges.length})`}
                   </button>
                 ))}
               </div>
+
+              <div className="ult__filters">
+                <Field label="Find assets"><input value={assetSearch} onChange={e => setAssetSearch(e.target.value)} placeholder="Name or qualified name" /></Field>
+                <Field label="Node type"><select value={nodeKind} onChange={e => setNodeKind(e.target.value)}><option value="ALL">All types</option>{[...new Set(graph.nodes.map(n => n.node_kind))].sort().map(kind => <option key={kind}>{kind}</option>)}</select></Field>
+                <Field label="Minimum edge confidence"><select value={minimumConfidence} onChange={e => setMinimumConfidence(Number(e.target.value))}><option value={0}>All confidence levels</option><option value={0.75}>75% and above</option><option value={0.9}>90% and above</option><option value={1}>100%</option></select></Field>
+                <Button onClick={() => { setAssetSearch(""); setNodeKind("ALL"); setMinimumConfidence(0); }}>Clear asset filters</Button>
+              </div>
+              <p className="ult__note">Filters apply to the loaded graph. Impact queries use the authorized source graph, independently of these display filters.</p>
+              <form onSubmit={e => { e.preventDefault(); setQuestionPlan(null); setQuestionError(null); try { setQuestionPlan(resolveGraphQuestion(question, graph.nodes)); } catch (error) { setQuestionError((error as Error).message); } }}>
+                <Field label="Ask the graph"><input value={question} onChange={e => { setQuestion(e.target.value); setQuestionPlan(null); }} placeholder="downstream of sales.orders within 3 hops" /></Field>
+                <Button type="submit">Preview graph query</Button>
+                {questionError ? <p role="alert">{questionError}</p> : null}
+                {questionPlan && graph.nodes.some(n => n.id === questionPlan.node.id) ? <div>
+                  <p>{questionPlan.direction} of {questionPlan.node.qualified_name || questionPlan.node.label}, up to {questionPlan.depth} hops; 200-node limit. Domain selections inspect impact within the asset's own source.</p>
+                  <Button onClick={() => { setParams({ node: questionPlan.node.id, depth: String(questionPlan.depth), direction: questionPlan.direction }); setDetailsVisible(true); }}>Run impact query</Button>
+                </div> : null}
+                <p className="ult__note">
+                  {'Ask "upstream of", "downstream of" or "lineage of" an exact asset name, optionally "within 1–5 hops" -- or "what depends on …" and "what feeds …". A guided, read-only lookup.'}
+                </p>
+              </form>
 
               {tab === "topology" ? (
                 layout && layout.columns.length > 0 ? (
@@ -669,7 +861,16 @@ export function UnifiedLineageScreen() {
                               tabIndex={0}
                               aria-label={`Select ${n.qualified_name}`}
                               onClick={() => selectNode(n.id)}
-                              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && selectNode(n.id)}
+                              /* R11-C2: `preventDefault` so Space activates
+                                 the node instead of scrolling the page out
+                                 from under it -- the default action for Space
+                                 on anything that is not really a button. */
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  selectNode(n.id);
+                                }
+                              }}
                             >
                               <rect x={-COL_WIDTH / 2 + 10} y={-13} width={COL_WIDTH - 20} height={26} rx={5} />
                               <text x={0} y={4} textAnchor="middle">
@@ -683,18 +884,17 @@ export function UnifiedLineageScreen() {
                     </div>
                     {layout.omitted > 0 ? (
                       <p className="ult__topocap">
-                        Showing {layout.shown} of {graph.nodes.length} nodes in the diagram — the "Nodes" tab lists all of
-                        them.
+                        Showing {layout.shown} of {filteredNodes.length} matching nodes in the diagram — the "Nodes" tab lists all matching nodes.
                       </p>
                     ) : null}
                   </div>
                 ) : (
-                  <Empty title="No connected nodes in view" hint="Every returned node was filtered out by the active layer chips." />
+                  <Empty title="No connected nodes in view" hint="Try clearing the asset filters or enabling more lineage layers." />
                 )
               ) : tab === "nodes" ? (
                 <div className="ult__listwrap">
                   <VirtualList
-                    items={graph.nodes}
+                    items={filteredNodes}
                     getKey={(n) => n.id}
                     ariaLabel="Unified lineage nodes"
                     estimateSize={40}
@@ -717,52 +917,7 @@ export function UnifiedLineageScreen() {
           )}
         </article>
 
-        <aside hidden={!detailsVisible} className="ult__impact" aria-label="Impact">
-          {!selectedNodeId ? (
-            <Empty title="Select a graph node" hint="Bounded upstream and downstream impact will appear here." />
-          ) : impactError ? (
-            <ErrorState title="Impact could not be loaded" detail={impactError} onRetry={() => void loadImpact()} />
-          ) : impactLoading || !impact ? (
-            <div className="ult__skeleton" role="status" aria-live="polite">
-              Tracing impact…
-            </div>
-          ) : (
-            <>
-              <div className="ult__panelhead">
-                <div>
-                  <p className="ult__eyebrow">TRANSITIVE IMPACT</p>
-                  <h2 className="ult__h2">{impact.focus_label}</h2>
-                </div>
-                <Pill tone={kindTone(impact.focus_node_kind)}>{impact.focus_node_kind.toLowerCase().replace(/_/g, " ")}</Pill>
-              </div>
-              {impactRows.length === 0 ? (
-                <Empty title="No connected impact" />
-              ) : (
-                <div className="ult__impactscroll">
-                  <table className="ult__impacttable">
-                    <thead>
-                      <tr>
-                        <th>Direction</th>
-                        <th>Asset</th>
-                        <th>Depth</th>
-                        <th>Evidence</th>
-                        <th>Quality</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {impactRows.map(({ direction, item }) => (
-                        <ImpactRow key={`${direction}-${item.node_id}`} direction={direction} item={item} />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {impact.upstream_truncated || impact.downstream_truncated ? (
-                <p className="ult__trunc">Truncated at this depth/node limit — narrower search shows more of the true chain.</p>
-              ) : null}
-            </>
-          )}
-        </aside>
+        {impactLed ? null : impactPane}
       </div>
     </div>
   );

@@ -16,6 +16,7 @@ needing a live Temporal server -- there is none in this test environment.
 """
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -49,18 +50,32 @@ class _HangingTemporalClient:
 
 
 class _FlakyThenOkTemporalClient:
-    """Stands in for `temporalio.client.Client`: fails on the first
-    `connect()` (the outage `lifespan` hits at startup), then succeeds on
-    every subsequent call -- simulating Temporal coming back while the app
-    is already running, for the background reconnect loop to pick up.
+    """Stands in for `temporalio.client.Client`: fails `connect()` until the
+    test says Temporal is back, then succeeds -- simulating Temporal
+    recovering while the app is already running, for the background reconnect
+    loop to pick up.
+
+    The recovery is gated on an explicit `recover()` rather than on the call
+    count, because the reconnect loop runs on a 0.05s interval in the app's
+    own thread and the test asserts the *degraded* state first. Keyed on
+    "second call succeeds", that assertion raced the loop: any startup slower
+    than one interval -- adding a router is enough -- let the retry land and
+    publish a client before the test looked, so the failure reported a
+    perfectly working reconnect as a broken one. Gating it makes both halves
+    of the test deterministic instead of trading one flake for the other.
     """
 
     def __init__(self) -> None:
         self.calls = 0
+        self._recovered = threading.Event()
+
+    def recover(self) -> None:
+        """Let the next `connect()` succeed. Called from the test thread."""
+        self._recovered.set()
 
     async def connect(self, address: str, *, namespace: str) -> object:
         self.calls += 1
-        if self.calls == 1:
+        if not self._recovered.is_set():
             raise ConnectionError("temporal unreachable (test)")
         return object()  # sentinel standing in for a real, connected Client
 
@@ -157,13 +172,19 @@ def test_readiness_recovers_to_up_once_reconnect_succeeds(
     """
     monkeypatch.setattr(main_module.settings, "temporal_enabled", True)
     monkeypatch.setattr(main_module.settings, "temporal_reconnect_interval_seconds", 0.05)
-    monkeypatch.setattr(main_module, "Client", _FlakyThenOkTemporalClient())
+    temporal = _FlakyThenOkTemporalClient()
+    monkeypatch.setattr(main_module, "Client", temporal)
     monkeypatch.setattr(main_module, "session_factory", _ImmediatelyFailingDbSession)
 
     with TestClient(main_module.app) as client:
-        # Startup hit the (first, failing) call -- degraded on entry.
+        # Startup hit the failing connect, and it keeps failing until this test
+        # says otherwise -- so "degraded on entry" is a fact here, not a race
+        # against the reconnect interval.
         assert main_module.app.state.temporal_client is None
         assert client.get("/health/ready").json()["dependencies"]["temporal"] == "DOWN"
+
+        # Temporal comes back. The loop is already running; nothing restarts.
+        temporal.recover()
 
         # Give the background reconnect loop (0.05s interval) a few cycles
         # to run its (now-succeeding) retry and publish the new client.

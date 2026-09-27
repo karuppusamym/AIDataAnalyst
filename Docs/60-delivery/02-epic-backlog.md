@@ -1,5 +1,7 @@
 # Epic Backlog
 
+> **Scope reconciled 2026-09-11.** [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
 > Status: Authoritative. Owner: Product + Engineering.
 > Every epic carries: the persona jobs it serves, the module that owns it, its phase, and **acceptance criteria that can be objectively verified**. An epic without testable acceptance criteria is not ready to start.
 

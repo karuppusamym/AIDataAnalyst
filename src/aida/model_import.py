@@ -24,6 +24,13 @@ a workbook exported on Monday and uploaded on Friday would silently discard
 everything published in between -- the classic lost update, and the failure
 mode most likely to go unnoticed in a bulk tool.
 
+**An applied import can be reversed** (R11-C8). `request_model_import_reversal`
+raises an ordinary batch whose changes put back what each applied change
+replaced, each expecting exactly the version that change published -- so the
+same stale check skips a field edited since. It is the one way a change here
+clears a field: a reversal change with `new_value=None` withdraws the version
+the reversed import published where there was nothing before it.
+
 What the workbook deliberately cannot do:
 
 * **Clear a description.** A blank cell is indistinguishable from a cell
@@ -51,24 +58,34 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida import xlsx_reader
 from aida.asset_description_service import publish_asset_documentation_version
 from aida.business_annotation_versions import (
     AnnotationVersionContent,
     write_annotation_version,
 )
 from aida.catalog_read_model import _business_annotations, _latest_approved_documentation
+from aida.column_description_service import supersede_open_column_drafts
 from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
 )
-from aida.model_export import COLUMN_SHEET, TABLE_SHEET
+from aida.description_withdrawal import WITHDRAWN
+from aida.model_export import COLUMN_SHEET, README_SHEET, TABLE_SHEET
 from aida.models import (
+    AssetDocumentation,
+    AssetDocumentationVersion,
+    ColumnDocumentation,
+    ColumnDocumentationVersion,
     DataSource,
     GovernanceReview,
+    MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataColumn,
     MetadataTable,
     ModelImportBatch,
     ModelImportChange,
+    ReviewAuditSample,
 )
 from aida.xlsx_reader import ParsedSheet, WorkbookParseError, read_workbook
 
@@ -377,6 +394,40 @@ async def _diff_tables(
     return changes
 
 
+def _check_workbook_datasource(sheets: dict[str, ParsedSheet], datasource: DataSource) -> None:
+    """Refuse a workbook exported from a different datasource.
+
+    The workbook's identity is the README sheet's `Datasource id` row. Rows are
+    matched on ids scoped to the target datasource, so a foreign workbook could
+    never *apply* to the wrong source -- every row would be rejected as "no
+    active column with this id in this datasource". That is safe and useless: a
+    steward who saved into the wrong source is told four hundred times that ids
+    are wrong instead of once that the file is. A save-back client (the Excel
+    add-in) reads the same row to decide where to send the file, so the server
+    checking it is what makes the binding more than a client-side convention.
+
+    A workbook with no README, or no id in it -- an old export, or one rebuilt
+    by hand -- is still accepted: the per-row id check stays the authority, and
+    refusing it would break round trips that work today.
+    """
+    readme = _sheet_or_none(sheets, README_SHEET)
+    if readme is None:
+        return
+    for row in readme.rows:
+        if (row.get("Field") or "").strip() != "Datasource id":
+            continue
+        declared = (row.get("Value") or "").strip().lower()
+        if declared and declared != str(datasource.id).lower():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"this workbook was exported from a different datasource ({declared}). "
+                    "Save it back to that source, or export a fresh workbook from this one."
+                ),
+            )
+        return
+
+
 async def parse_and_diff_workbook(
     session: AsyncSession,
     *,
@@ -401,9 +452,26 @@ async def parse_and_diff_workbook(
         sheets = read_workbook(content)
     except WorkbookParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _check_workbook_datasource(sheets, datasource)
 
     columns_sheet = _sheet_or_none(sheets, COLUMN_SHEET)
     tables_sheet = _sheet_or_none(sheets, TABLE_SHEET)
+    # The reader stops at its row ceiling and says so; diffing what it kept would record a batch
+    # that looks complete and silently leaves out every row past the ceiling (found 2026-09-21).
+    cut = [
+        sheet.name
+        for sheet in (tables_sheet, columns_sheet)
+        if sheet is not None and sheet.truncated
+    ]
+    if cut:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"the {' and '.join(repr(name) for name in cut)} sheet has more than "
+                f"{xlsx_reader.MAX_ROWS_PER_SHEET:,} rows, the most one upload reads, so the rows "
+                "past that would be left out. Split the edits across smaller uploads."
+            ),
+        )
     if columns_sheet is None and tables_sheet is None:
         raise HTTPException(
             status_code=422,
@@ -419,6 +487,26 @@ async def parse_and_diff_workbook(
     if columns_sheet is not None:
         pending.extend(await _diff_columns(session, columns_sheet, datasource_id=datasource.id))
 
+    return await record_model_import(
+        session,
+        datasource=datasource,
+        pending=pending,
+        content=content,
+        filename=filename,
+        uploaded_by=uploaded_by,
+    )
+
+
+async def record_model_import(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    pending: list[_PendingChange],
+    content: bytes,
+    filename: str,
+    uploaded_by: str,
+) -> ModelImportBatch:
+    """Persist a proposed edit batch, shared by Excel and the browser worksheet."""
     real_changes = [change for change in pending if change.status == "PENDING"]
     if len(real_changes) > MAX_CHANGES_PER_BATCH:
         raise HTTPException(
@@ -552,8 +640,7 @@ async def submit_batch_for_review(
         raise HTTPException(
             status_code=409,
             detail=(
-                "this workbook changes nothing that is still included; there is nothing "
-                "to review"
+                "this workbook changes nothing that is still included; there is nothing to review"
             ),
         )
     review = GovernanceReview(
@@ -621,7 +708,17 @@ async def _apply_column_changes(
                 "was exported; this edit was not applied so their change is not lost"
             )
             continue
-        await publish_column_description(
+        if change.new_value is None:
+            # R11-C8: a reversal putting back "no description". The batch it
+            # undoes described a column that had none; undoing that retires the
+            # version it published, keeping the text, as a withdrawal does. The
+            # stale check above has proved `documented` is still that version.
+            if documented is not None:
+                documented.status = WITHDRAWN
+                documented.updated_at = now
+            change.status = "APPLIED"
+            continue
+        published = await publish_column_description(
             session,
             organization_id=batch.organization_id,
             table_id=column.table_id,
@@ -632,6 +729,23 @@ async def _apply_column_changes(
             approved_at=now,
         )
         change.status = "APPLIED"
+        change.published_version = published.version
+
+    # A column that just received a reviewed description no longer needs the
+    # machine draft that was waiting for it. Only DRAFT-status drafts are
+    # closed: one already in review keeps its review, and approving it will be
+    # refused on the version check rather than overwrite what this batch
+    # published.
+    await supersede_open_column_drafts(
+        session,
+        [
+            UUID(change.subject_id)
+            for change in changes
+            if change.status == "APPLIED" and change.new_value is not None
+        ],
+        reason=f"model import batch {batch.id} published a description for this column",
+        now=now,
+    )
 
 
 async def _apply_table_changes(
@@ -705,17 +819,28 @@ async def _apply_table_changes(
             if fresh:
                 # One readme field, so at most one fresh change here; take the
                 # last if a hand-built sheet somehow repeated the row.
-                await publish_asset_documentation_version(
-                    session,
-                    organization_id=batch.organization_id,
-                    table_id=table.id,
-                    readme=fresh[-1].new_value,
-                    created_by=batch.uploaded_by,
-                    approved_by=reviewer,
-                    approved_at=now,
-                )
+                restored = fresh[-1].new_value
+                published_version: int | None = None
+                if restored is None:
+                    # R11-C8: a reversal putting back "no documentation"; see
+                    # `_apply_column_changes`.
+                    if document is not None:
+                        document.status = WITHDRAWN
+                        document.updated_at = now
+                else:
+                    version = await publish_asset_documentation_version(
+                        session,
+                        organization_id=batch.organization_id,
+                        table_id=table.id,
+                        readme=restored,
+                        created_by=batch.uploaded_by,
+                        approved_by=reviewer,
+                        approved_at=now,
+                    )
+                    published_version = version.version
                 for change in fresh:
                     change.status = "APPLIED"
+                    change.published_version = published_version
 
         if annotation_changes:
             annotation = annotations.get(table.id)
@@ -739,11 +864,18 @@ async def _apply_table_changes(
                         "workbook was exported; this edit was not applied"
                     )
             if fresh:
-                edited = {change.field: change.new_value for change in fresh}
+                # A reversal never carries `None` for an annotation field --
+                # `request_model_import_reversal` refuses one -- so the filter
+                # only keeps the type honest.
+                edited = {
+                    change.field: change.new_value
+                    for change in fresh
+                    if change.new_value is not None
+                }
                 # Every field the workbook did not edit is carried forward from
                 # the current version verbatim: this publishes a new version of
                 # the whole annotation, so an unedited field must survive it.
-                await write_annotation_version(
+                annotation_version = await write_annotation_version(
                     session,
                     organization_id=batch.organization_id,
                     annotation_id=annotation.annotation_id,
@@ -764,6 +896,7 @@ async def _apply_table_changes(
                 )
                 for change in fresh:
                     change.status = "APPLIED"
+                    change.published_version = annotation_version.version
 
 
 async def apply_model_import_batch(
@@ -847,3 +980,231 @@ async def reject_model_import_batch(
     batch.reviewed_at = now
     await session.flush()
     return "model_import.rejected.v1"
+
+
+#: What a reversal's review asks for, so the queue names it for what it is
+#: rather than as one more workbook upload.
+REVERSAL_ACTION = "REVERSE_WORKBOOK_EDITS"
+
+
+async def _value_replaced(session: AsyncSession, change: ModelImportChange) -> str | None:
+    """What an applied change replaced, read from the version it replaced.
+
+    A change only applies when it is fresh -- when its field's current version
+    is exactly `expected_version` -- so that version row, which the append-only
+    stores keep, is the record of what the change overwrote. `old_value` is not:
+    it is what the field held when the workbook was *diffed*, and a description
+    withdrawn between upload and approval leaves it naming text that was no
+    longer published. Restoring from it would put a withdrawn description back.
+
+    `None` means the field had no version when the change applied. Raises
+    `LookupError` when the version the change names cannot be read back.
+    """
+    if change.expected_version is None:
+        return None
+    subject_id = UUID(change.subject_id)
+    value: str | None
+    if change.subject_type == "COLUMN":
+        value = await session.scalar(
+            select(ColumnDocumentationVersion.description)
+            .join(
+                ColumnDocumentation,
+                ColumnDocumentation.id == ColumnDocumentationVersion.documentation_id,
+            )
+            .where(
+                ColumnDocumentation.column_id == subject_id,
+                ColumnDocumentationVersion.version == change.expected_version,
+            )
+        )
+    elif change.field == "readme":
+        value = await session.scalar(
+            select(AssetDocumentationVersion.readme)
+            .join(
+                AssetDocumentation,
+                AssetDocumentation.id == AssetDocumentationVersion.documentation_id,
+            )
+            .where(
+                AssetDocumentation.table_id == subject_id,
+                AssetDocumentationVersion.version == change.expected_version,
+            )
+        )
+    else:
+        versions = (
+            (
+                await session.execute(
+                    select(MetadataBusinessAnnotationVersion)
+                    .join(
+                        MetadataBusinessAnnotation,
+                        MetadataBusinessAnnotation.id
+                        == MetadataBusinessAnnotationVersion.annotation_id,
+                    )
+                    .where(
+                        MetadataBusinessAnnotation.table_id == subject_id,
+                        MetadataBusinessAnnotationVersion.version == change.expected_version,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # One annotation per table is what the import assumes; two would make
+        # "version N of this table's annotation" ambiguous, so neither is read.
+        value = getattr(versions[0], change.field) if len(versions) == 1 else None
+    if value is None:
+        raise LookupError(f"version {change.expected_version} of {change.subject_label}")
+    return value
+
+
+async def request_model_import_reversal(
+    session: AsyncSession,
+    original: ModelImportBatch,
+    *,
+    requested_by: str,
+    sample: ReviewAuditSample | None = None,
+) -> tuple[ModelImportBatch, GovernanceReview]:
+    """Raise a governed undo of one applied workbook import (R11-C8).
+
+    A reversal is an ordinary batch -- same tables, same `GovernanceReview`,
+    same maker-checker guard, same apply path -- because it is the same decision
+    shape: these fields on these assets, set to these values, decided by
+    someone other than whoever asked. Each of its changes puts back what one
+    applied change replaced (`_value_replaced`) and expects exactly the version
+    that change published, so the apply path's own stale check skips a field
+    someone has edited since instead of overwriting their edit. A field that
+    had no value before gets none back: its change carries `new_value=None`,
+    and applying it withdraws the version the import published.
+
+    `reverses_batch_id` is what the reviewer agent reads to pin the reversal at
+    T2, so no agent decides it. `sample` is the sample-to-correction edge when
+    a DISAGREED verdict raised it.
+
+    Refuses, rather than half-undoing:
+
+    * an import that was never applied, or applied nothing;
+    * a reversal -- undoing one is a fresh, reviewed import;
+    * an import that did not record the versions it published, which is how
+      one applied before `published_version` existed presents. Its `None`
+      means "not recorded", and without it a reversal could not tell the
+      import's version from a later one;
+    * an import whose record of what it replaced cannot be read back;
+    * an import already reversed, or with a reversal waiting.
+    """
+    if original.status != "APPLIED":
+        raise HTTPException(status_code=409, detail="only an applied model import can be reversed")
+    if original.reverses_batch_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="this import is itself a reversal; undoing one is a fresh, reviewed import",
+        )
+    applied = list(
+        (
+            await session.execute(
+                select(ModelImportChange)
+                .where(
+                    ModelImportChange.batch_id == original.id,
+                    ModelImportChange.status == "APPLIED",
+                )
+                .order_by(
+                    ModelImportChange.sheet_name,
+                    ModelImportChange.row_number,
+                    ModelImportChange.field,
+                )
+            )
+        ).scalars()
+    )
+    if not applied:
+        raise HTTPException(
+            status_code=409, detail="this import applied no changes; there is nothing to reverse"
+        )
+    if any(change.published_version is None for change in applied):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this import did not record which versions it published, so a reversal "
+                "cannot be bounded to them; correct it with a new import"
+            ),
+        )
+    existing = await session.scalar(
+        select(ModelImportBatch.id).where(
+            ModelImportBatch.reverses_batch_id == original.id,
+            ModelImportBatch.status.in_(("PENDING_REVIEW", "APPLIED")),
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409, detail="a reversal of this import is already pending or applied"
+        )
+
+    unrestorable = HTTPException(
+        status_code=409,
+        detail=(
+            "this import's record of what it replaced cannot be read back, so a "
+            "reversal cannot restore it; correct it with a new import"
+        ),
+    )
+    restorations: list[tuple[ModelImportChange, str | None]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for change in applied:
+        key = (change.subject_type, change.subject_id, change.field)
+        if key in seen:
+            # A repeated row: the field was published once, so it is undone once.
+            continue
+        seen.add(key)
+        try:
+            replaced = await _value_replaced(session, change)
+        except LookupError as exc:
+            raise unrestorable from exc
+        if (
+            replaced is None
+            and change.subject_type == "TABLE"
+            and change.field in _ANNOTATION_FIELDS
+        ):
+            # An annotation edit only applies over an existing version, so an
+            # annotation field always replaced a value. (A column's
+            # `business_description` shares the name, not the store.)
+            raise unrestorable
+        restorations.append((change, replaced))
+
+    reversal = ModelImportBatch(
+        organization_id=original.organization_id,
+        datasource_id=original.datasource_id,
+        filename=f"reversal of {original.filename}"[:255],
+        # A reversal has no upload of its own; this ties it to the file whose
+        # effect it undoes.
+        content_sha256=original.content_sha256,
+        status="PENDING_REVIEW",
+        change_count=len(restorations),
+        uploaded_by=requested_by,
+        reverses_batch_id=original.id,
+        review_audit_sample_id=sample.id if sample is not None else None,
+    )
+    session.add(reversal)
+    await session.flush()
+    for change, replaced in restorations:
+        session.add(
+            ModelImportChange(
+                organization_id=original.organization_id,
+                batch_id=reversal.id,
+                sheet_name=change.sheet_name,
+                row_number=change.row_number,
+                subject_type=change.subject_type,
+                subject_id=change.subject_id,
+                subject_label=change.subject_label,
+                field=change.field,
+                old_value=change.new_value,
+                new_value=replaced,
+                expected_version=change.published_version,
+            )
+        )
+    review = GovernanceReview(
+        organization_id=original.organization_id,
+        object_type="MODEL_IMPORT_BATCH",
+        object_id=str(reversal.id),
+        requested_action=REVERSAL_ACTION,
+        requested_by=requested_by,
+    )
+    session.add(review)
+    await session.flush()
+    reversal.governance_review_id = review.id
+    await session.flush()
+    return reversal, review

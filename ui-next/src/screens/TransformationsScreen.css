@@ -7,7 +7,7 @@
 .txscreen__filters .field{width:240px}
 
 .txdisabled{border:1px solid var(--warn);border-radius:var(--radius);background:var(--warn-soft);padding:16px 18px}
-.txdisabled__title{font-size:14px;font-weight:600;color:var(--warn)}
+.txdisabled__title{font-size:14px;font-weight:600;color:var(--warn-ink)}
 .txdisabled__body{margin:6px 0 0;font-size:13px;color:var(--ink-2)}
 .txdisabled__hint{margin:8px 0 0;font-size:12px;color:var(--ink-3);line-height:1.6}
 .txdisabled__hint code{font-family:var(--mono);font-size:11px;background:var(--sunk);border-radius:var(--radius-sm);padding:1px 5px}
@@ -70,7 +70,7 @@
 .txtestbanner p{margin:0;color:var(--ink-2)}
 .txtestbanner--ok{background:var(--ok-soft);color:var(--ok)}
 .txtestbanner--bad{background:var(--bad-soft);color:var(--bad)}
-.txtestbanner--warn{background:var(--warn-soft);color:var(--warn)}
+.txtestbanner--warn{background:var(--warn-soft);color:var(--warn-ink)}
 .txtestbanner--mute{background:var(--sunk);color:var(--ink-2)}
 .txtestbanner--info{background:var(--info-soft);color:var(--info)}
 

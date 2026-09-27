@@ -5,23 +5,24 @@
 
 ## 1. Store roles
 
-> **Implementation status (2026-08-30).** Three of the seven stores below are wired and three
-> are not. Verified against `compose.yaml`, `pyproject.toml` dependencies and `src/`:
+> **Implementation status (2026-09-20).** Five of the seven stores below are wired, one is wired
+> for a single purpose, and one does not exist. Verified against `compose.yaml`, `pyproject.toml`
+> dependencies and `src/`:
 >
 > | Store | Today |
 > |---|---|
-> | PostgreSQL | **Built.** Authoritative, 34 Alembic revisions, single schema |
+> | PostgreSQL | **Built.** Authoritative, 192 Alembic revision files as of 2026-09-20 (one head, enforced in CI), single schema |
 > | Neo4j | **Built.** `neo4j==5.28.2` dependency, service in `compose.yaml`, `src/aida/graph_store.py` (formerly lineage_graph_store.py) and `projectors/graph_projector.py`. Note: ADR-0020's 2026-08-30 amendment decided to keep it as a per-organization setting rather than drop it (tracker C7) |
 > | Kafka | **Built** (Redpanda locally). `aiokafka==0.14.0`, `projectors/outbox_publisher.py`. One topic, not eight — see `07-event-and-messaging-model.md` §6. `gap/02` row C8/D2 proposes deferring it |
 > | Redis | **Built.** `redis==6.4.0`; MCP budgets and locks |
-> | pgvector | **Extension only.** `infra/postgres/init.sql` runs `CREATE EXTENSION IF NOT EXISTS vector` and the image is `pgvector/pgvector:pg17`, but **no embedding column exists** in any model or migration and nothing writes or reads a vector. `src/aida/retrieval.py` is BM25-style lexical scoring, and its own comment says pgvector arrives "in Phase 2 when the embedding column is added". Tracked as `N5` |
+> | Vector index | **Built, without `pgvector`.** `infra/postgres/init.sql` still runs `CREATE EXTENSION IF NOT EXISTS vector` and the image is `pgvector/pgvector:pg17`, but nothing uses the extension. Embeddings live in an ordinary `bytea` column (the `embedding` table, `src/aida/models.py`) behind a port (ADR-0019); the default backend is `postgres_bruteforce`, and the `pgvector` adapter is not implemented — it refuses with `PGVECTOR_ADAPTER_NOT_IMPLEMENTED` (`src/aida/vector_store.py`). Hybrid retrieval fuses vector, graph and lexical rankings (`src/aida/retrieval.py`), and the index fills only once an embedding provider is configured (`embedding_provider` defaults to `unset`). Design in `19-embeddings-design.md`; tracked as `N5` |
 > | Search index | **Does not exist.** No search-engine dependency, no service, no client code. Lexical search is SQL inside PostgreSQL |
-> | Object storage | **Not wired.** MinIO runs in `compose.yaml`, but there is **no object-storage client** in the dependency list (no `boto3`, no `minio`) and nothing in `src/` reads or writes it. Profiling artifacts, evidence packs and the WORM archive are all target behaviour |
+> | Object storage | **Wired for the WORM audit archive only.** `src/aida/audit_archive_s3.py` implements S3 Object Lock over `httpx`, signed by `src/aida/aws_sigv4.py` — no SDK, no `boto3`, no `minio` dependency — and is wired in `src/aida/main.py`; the default backend is `none`, and MinIO is in `compose.yaml` behind the `archive` profile. Profiling artifacts and evidence packs are not held in object storage; that remains target behaviour |
 
 | Store | Role | Authority | Rebuild source | Growth driver |
 |---|---|---|---|---|
 | PostgreSQL | All governed state, outbox, audit ledger | **Authoritative** | Backup/restore only | Catalog objects, executions, audit |
-| pgvector (in PostgreSQL) | Embeddings for semantic retrieval | Projection | Catalog + semantics | Objects × embedding dim |
+| Vector index (in PostgreSQL) | Embeddings for semantic retrieval | Projection | Catalog + semantics | Objects × embedding dim |
 | Neo4j | Graph traversal, lineage, ontology | Projection | Outbox replay | Nodes + edges |
 | Search index | Lexical + faceted search | Projection | Catalog + semantics + glossary | Indexed objects |
 | Redis | Cache, session, distributed locks | Ephemeral | Recompute | Concurrency |
@@ -177,6 +178,14 @@ flowchart LR
     DL -->|authorized requeue| P
     N --> RL["Reconciliation:<br/>lag counts + drift detection"]
 ```
+
+> **Implementation status (2026-09-20).** Only the Neo4j projector exists
+> (`src/aida/projectors/graph_projector.py`, fed by `src/aida/projectors/outbox_publisher.py`).
+> There is **no vector projector and no search projector**, and no search index to project into.
+> The vector index is not fed from the outbox: it is rebuilt from the catalog by an operator route
+> and by a scheduler pass (`src/aida/vector_index_service.py`), so rule 2 below describes the
+> graph path only. The rebuild targets below are unmeasured, and the rebuild drill has never been
+> run. See INV-1 in `01-principles-and-invariants.md`.
 
 **Rules.**
 

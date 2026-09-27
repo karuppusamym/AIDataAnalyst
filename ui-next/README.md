@@ -47,8 +47,22 @@ Two independent build-time axes, neither inferred from the other:
 
 | Variable | Values | Meaning |
 | --- | --- | --- |
-| `VITE_USE_FIXTURES` | `0` / anything else | live backend, or bundled demo data |
+| `VITE_USE_FIXTURES` | `0` / anything else | live backend, or bundled demo data. **Unset, the build mode decides**: `npm run dev` and `vite build --mode demo` carry demo data, every other build (`npm run build` included) does not |
 | `VITE_AUTH_MODE` | `development` (default) / `oidc` / `proxy` | how a request proves who is making it |
+
+Demo data is excluded from a production build rather than merely switched off
+in it (R11-X1). `src/lib/fixtures.ts` is ~189 kB minified — it used to be about
+a fifth of the shipped JavaScript, downloaded by every production user to serve
+a code path they could never take, because the demo/live test was read at
+runtime and no bundler can drop a branch it only learns about in the browser.
+`vite.config.ts` now settles the question while configuring the build (see
+`src/lib/demoDataMode.ts`) and hands the client a literal, so Rollup folds the
+guard in `src/lib/api/transport.ts` and drops the fixtures with it. A demo
+build keeps them as their own lazily fetched chunk rather than preloading them
+with the shell.
+
+The consequence to know about: flipping between demo and live now means
+rebuilding. A production build has no fixtures in it to fall back to.
 
 `development` sends `X-Principal-Id`/`X-Roles`. `proxy` sends nothing — an
 authenticating reverse proxy is the authority. `oidc` sends only
@@ -96,11 +110,13 @@ npm run typecheck
 src/
   tokens.css              colour, type, spacing; both themes; focus; reduced-motion
   App.tsx                 shell, persona, nav, routing
-  lib/types.ts            mirrors src/aida/schemas.py — hand-written, see UX-14
+  lib/types.ts            generated from the API's OpenAPI schemas by
+                          scripts/generate_ui_types.py (UX-14) — do not edit by hand
+  lib/ui-types.ts         the hand-written types the OpenAPI document does not carry
   lib/api.ts              one fetch wrapper; typed errors; every request abortable
   lib/fixtures.ts         1M-row catalog computed per index, never materialised
   components/             primitives, CatalogTable, EvidencePane,
-                          ProposalCard, PropagationLog
+                          ReviewDetail, PropagationLog
   screens/                one component per entry in lib/routes.ts's SCREEN_IDS
 ```
 
@@ -118,11 +134,14 @@ get forgotten first:
 And the rule that matters most in this product: a model-proposed value is never
 rendered as an established one (ADR-0001).
 
-## Two primitives that carry rules, not styles
+## Two components that carry rules, not styles
 
-`ProposalCard` — the unit of governed change. `rationale` and `evidence` are **required
-fields on the type**, not optional props. A proposal that shows its outcome but not its
-reasoning is not reviewable; the reviewer is being asked to rubber-stamp. Confidence is
+`ProposalRow` (in `src/screens/ReviewQueueScreen.tsx`, styled by
+`src/components/ProposalRow.css`) — the unit of governed change. It replaced a
+fixture-era `ProposalCard` component that no longer exists. A proposal that shows its
+outcome but not its reasoning is not reviewable; the reviewer is being asked to
+rubber-stamp, so the row shows the diff and whatever evidence the review read model
+carries, and offers no Approve button on a proposal you raised yourself. Confidence is
 rendered as a number as well as a bar, because a steward tuning an auto-apply threshold
 needs the number.
 

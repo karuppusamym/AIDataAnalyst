@@ -18,6 +18,12 @@ Metadata arrives four ways: native pull adapters, authenticated push producers (
 - Delivery and catalog changes commit atomically, with a graph snapshot event in the same transaction.
 - Raw payloads are not retained after successful processing; only fingerprints, counts, statuses, and timestamps remain.
 
+> **Implementation status (2026-09-20).** "Explicit confirmation" for `FULL` is the caller
+> sending `snapshot_type: "FULL"` itself. The synchronous push endpoint used to *default* to
+> `FULL`, so a body that omitted the field retired every object it left out; it now defaults to
+> `INCREMENTAL` (R11-AUD05), so `FULL` happens only when it is asked for. There is no separate
+> confirmation step, token or dry run beyond that.
+
 ## Consequences
 
 ### Positive

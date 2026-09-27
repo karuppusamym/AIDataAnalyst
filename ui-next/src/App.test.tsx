@@ -40,7 +40,8 @@ describe("App shell persona gating", () => {
     fireEvent.click(nav.getByRole("button", { name: "Operator" }));
     expect(nav.queryByRole("button", { name: /Catalog/ })).not.toBeInTheDocument();
     fireEvent.click(nav.getByRole("button", { name: /Operations/ }));
-    expect(location.hash).toBe("#/operations");
+    // R11-S10: the journey is part of the route now, not only of the sidebar.
+    expect(location.hash).toBe("#/operator/operations");
     expect(nav.getByRole("button", { name: "Operator" })).toHaveAttribute("aria-expanded", "true");
   });
 
@@ -107,7 +108,7 @@ describe("App shell persona gating", () => {
     fireEvent.change(input, { target: { value: "context compile" } });
     fireEvent.click(within(screen.getByRole("dialog", { name: "Quick navigation" })).getByRole("button", { name: /Context products/ }));
 
-    expect(location.hash).toBe("#/context");
+    expect(location.hash).toBe("#/developer/context");
     expect(screen.queryByRole("dialog", { name: "Quick navigation" })).not.toBeInTheDocument();
   });
 
@@ -123,16 +124,19 @@ describe("App shell persona gating", () => {
     expect(within(section).getAllByRole("button").map((button) => button.textContent)).toEqual([
       "Ask Atlas",
       "Catalog",
+      // R11-AUD08: the API's global search over table and column names.
+      "Search",
       "Semantic layer",
       "Tool registry",
       "Tool plans",
+      // R11-S13 (M1): "Unified lineage" was the seventh item here. It is a
+      // view of "Lineage" now, not a peer destination.
       "Lineage",
-      "Unified lineage",
     ]);
     expect(within(section).getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
 
     fireEvent.click(within(section).getByRole("button", { name: "Semantic layer" }));
-    expect(location.hash).toBe("#/semantics");
+    expect(location.hash).toBe("#/analyst/semantics");
   });
 
   it("restores the correct page on browser history navigation", async () => {
@@ -210,9 +214,280 @@ describe("navigation drops the page you left behind", () => {
     fireEvent.click(nav.getByRole("button", { name: "Reviewer" }));
     fireEvent.click(nav.getByRole("button", { name: "Review queue" }));
 
-    expect(location.hash).toBe("#/governance");
+    expect(location.hash).toBe("#/reviewer/governance");
     expect(location.search).not.toContain("severity=HIGH");
     expect(location.search).not.toContain("status=OPEN");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S10 — the shell asks before discarding a half-written form.
+
+   `useUnsavedChanges` returned a confirm function for exactly this and nothing
+   ever called it, so every sidebar click threw away an unsaved edit in
+   silence. This asserts the wiring at the one choke point every in-app
+   navigation goes through, which is the whole reason the guard lives there.
+--------------------------------------------------------------------------- */
+
+describe("navigating away from unsaved work", () => {
+  /* `beforeEach` calls `vi.resetModules()`, so `App` is imported into a fresh
+     module graph every test. The registry has to come from THAT graph -- a
+     statically imported copy is a different module instance, and registering
+     into it would leave the shell looking at an empty registry while the test
+     went green on a guard that never ran. */
+  async function loadAppAndRegistry() {
+    const App = await loadApp();
+    const registry = await import("./lib/unsavedChanges");
+    registry.resetUnsavedRegistryForTests();
+    return { App, registry };
+  }
+
+  it("does not move, and does not close the drawer, when the user declines", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    history.replaceState(null, "", "/#/analyst/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const { App, registry } = await loadAppAndRegistry();
+    render(<App />);
+    registry.registerDirtyReporter(() => "Discard your unsaved changes?");
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Semantic layer" }));
+
+    expect(confirm).toHaveBeenCalled();
+    // Still on Catalog: declining must leave the user exactly where they were.
+    expect(location.hash).toBe("#/analyst/catalog");
+  });
+
+  it("moves once the user agrees to discard", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    history.replaceState(null, "", "/#/analyst/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const { App, registry } = await loadAppAndRegistry();
+    render(<App />);
+    registry.registerDirtyReporter(() => "Discard your unsaved changes?");
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Semantic layer" }));
+
+    // Asked, and then obeyed -- the pair matters: a guard that never asks
+    // would also pass the second assertion on its own.
+    expect(confirm).toHaveBeenCalled();
+    expect(location.hash).toBe("#/analyst/semantics");
+  });
+
+  it("asks nothing at all when no form is dirty", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    history.replaceState(null, "", "/#/analyst/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const { App } = await loadAppAndRegistry();
+    render(<App />);
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Semantic layer" }));
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(location.hash).toBe("#/analyst/semantics");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S10 — a saved link still opens the page it named.
+--------------------------------------------------------------------------- */
+
+describe("old routes still work", () => {
+  it("opens the flat pre-grouping form and rewrites it to the grouped one", async () => {
+    history.replaceState(null, "", "/#/operations");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("navigation", { name: "Operator pages" })).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(location.hash).toBe("#/operator/operations"));
+  });
+
+  it("opens a merged-away route on the screen that absorbed it", async () => {
+    history.replaceState(null, "", "/#/quality-agent");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    // Not Overview: a bookmark to the quality agent's console opens the merged
+    // console with that agent selected.
+    await waitFor(() => expect(location.hash).toBe("#/steward/task-agents"));
+    expect(new URLSearchParams(location.search).get("agent")).toBe("quality");
+    expect(await screen.findByRole("region", { name: "Task agents" })).toBeInTheDocument();
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-S13 (M3) — the two documentation routes that were merged away.
+
+     The hard requirement is the same one R11-S10 set: a link somebody saved
+     opens the page they saved, not the dashboard and not the merged screen's
+     default tab. Both are asserted -- the screen AND the tab -- because
+     landing on the workspace with the wrong view in front is the failure mode
+     an alias that forgot to declare `view` produces, and it looks like a pass
+     if you only check the screen.
+  ------------------------------------------------------------------------- */
+  it("opens a saved description-drafts link on the Drafts tab of the workspace", async () => {
+    history.replaceState(null, "", "/#/description-drafts");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/worklist"));
+    expect(new URLSearchParams(location.search).get("view")).toBe("drafts");
+    const region = await screen.findByRole("region", { name: "Documentation" });
+    expect(region).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Drafts" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("opens a saved data-dictionaries link on the Imports tab, keeping its document selection", async () => {
+    // `?document=` was `data-dictionaries`' own field. It survives because the
+    // workspace declares it; an undeclared field would be filtered out by
+    // `normalizeLocation` and the permalink would lose the document it named.
+    history.replaceState(null, "", "/?document=doc_7#/data-dictionaries");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/worklist"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("view")).toBe("imports");
+    expect(params.get("document")).toBe("doc_7");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Imports" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-S13 (M1) — the second lineage route, and its own undeclared fields.
+  ------------------------------------------------------------------------- */
+  it("opens a saved unified-lineage link on the Graph view, keeping scope, node and tab", async () => {
+    // Every field `unified-lineage` declared, on one link. All of them are
+    // declared by the merged screen, so `normalizeLocation` keeps them.
+    history.replaceState(null, "", "/?scope=domain&dom=dom_1&node=n_7&tab=edges#/unified-lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/analyst/lineage"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("view")).toBe("graph");
+    expect(params.get("scope")).toBe("domain");
+    expect(params.get("dom")).toBe("dom_1");
+    expect(params.get("node")).toBe("n_7");
+    expect(params.get("tab")).toBe("edges");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("keeps depth and direction on a pasted lineage link", async () => {
+    /* THE LATENT BUG THIS MERGE FIXED. `UnifiedLineageScreen` reads `depth`
+       and `direction` and its graph-question form writes all of `node`,
+       `depth` and `direction` -- and `unified-lineage` declared neither. So
+       pasting the link that button produced into a fresh tab normalized both
+       fields away, and the impact query silently reverted to depth 5 in both
+       directions. The flat form is used deliberately: it is non-canonical, so
+       `normalizeLocation` rewrites it, which is where the fields were lost. */
+    history.replaceState(null, "", "/?node=n_7&depth=3&direction=downstream#/unified-lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/analyst/lineage"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("depth")).toBe("3");
+    expect(params.get("direction")).toBe("downstream");
+  });
+
+  it("opens the legacy ?view=graph spelling on the merged Graph view", async () => {
+    // `#/lineage?view=graph` was the retired two-tab bar's graph tab. The
+    // value is kept and the destination improved: the merged graph is a
+    // superset of the bounded one that tab opened.
+    history.replaceState(null, "", "/?view=graph#/analyst/lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-S13 (items 15/17) — Playbooks is the Automation view of the one
+     stewardship workspace. The screen AND the view are asserted, for the same
+     reason as the documentation routes above.
+  ------------------------------------------------------------------------- */
+  it("opens a saved playbooks link on the Automation view of Stewardship", async () => {
+    history.replaceState(null, "", "/#/steward/playbooks");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/stewardship"));
+    expect(new URLSearchParams(location.search).get("view")).toBe("automation");
+    expect(await screen.findByRole("region", { name: "Stewardship" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Automation" })).toHaveAttribute("aria-selected", "true"),
+    );
+    // The playbooks screen itself, not an empty view with the right tab lit.
+    expect(await screen.findByRole("heading", { name: "Playbooks" })).toBeInTheDocument();
+  });
+
+  it("opens a pre-workspace bulk link on Bulk actions, keeping its filter", async () => {
+    // The flat form, so `normalizeLocation` rewrites it -- which is where an
+    // undeclared field would be dropped. `action`/`field`/`pattern` are all
+    // declared by `stewardship`, so the filter survives the rewrite.
+    history.replaceState(null, "", "/?action=certify&field=SCHEMA_NAME&pattern=raw_%25#/stewardship");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/stewardship"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("action")).toBe("certify");
+    expect(params.get("field")).toBe("SCHEMA_NAME");
+    expect(params.get("pattern")).toBe("raw_%");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Bulk actions" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("no longer lists Playbooks as a sidebar item, and still finds it from the palette", async () => {
+    history.replaceState(null, "", "/#/steward/stewardship");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    expect(nav.getByRole("button", { name: /Stewardship/ })).toBeInTheDocument();
+    expect(nav.queryByRole("button", { name: /Playbooks/ })).not.toBeInTheDocument();
+    // Task agents is NOT absorbed: bounded agent execution stays its own page.
+    expect(nav.getByRole("button", { name: /Task agents/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search pages" }), {
+      target: { value: "playbook" },
+    });
+    const dialog = within(screen.getByRole("dialog", { name: "Quick navigation" }));
+    expect(dialog.getByRole("button", { name: /Stewardship/ })).toBeInTheDocument();
+  });
+
+  it("opens the legacy ?view=narrated spelling on Explain", async () => {
+    history.replaceState(null, "", "/?view=narrated#/analyst/lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Explain" })).toHaveAttribute("aria-selected", "true"),
+    );
   });
 });
 

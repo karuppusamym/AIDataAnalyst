@@ -3,6 +3,24 @@
   "description": "QG-1 adversarial SQL corpus for the postgres dialect. Every case must be rejected by aida.query_gateway.QueryExecutionGateway's single validation pipeline -- zero bypasses is the exit condition.",
   "cases": [
     {
+      "id": "postgres-dialect_specific-unauthorized-udf-unqualified",
+      "category": "dialect_specific",
+      "sql": "SELECT fn_send_mail(c.customer_id) AS sent FROM retail.customer AS c",
+      "description": "a user-defined function the guard does not recognise as a built-in; its effects (writes, network, sleeps) are unknown, so it is refused unless an operator authorized it",
+      "expected_codes": [
+        "UNAUTHORIZED_FUNCTION"
+      ]
+    },
+    {
+      "id": "postgres-dialect_specific-unauthorized-udf-schema-qualified",
+      "category": "dialect_specific",
+      "sql": "SELECT retail.fn_rate(c.customer_id) AS rate FROM retail.customer AS c",
+      "description": "a schema-qualified call is a user-defined function by construction, refused unless authorized by its qualified name",
+      "expected_codes": [
+        "UNAUTHORIZED_FUNCTION"
+      ]
+    },
+    {
       "id": "postgres-stacked_statement-stacked-ddl",
       "category": "stacked_statement",
       "sql": "SELECT customer_id FROM retail.customer; DROP TABLE retail.customer;",

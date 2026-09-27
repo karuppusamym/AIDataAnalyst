@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { AnalysisRunRead, FleetSummaryRead, MetadataIngestionBatchRead, OutboxEventRead } from "../lib/types";
 import { ApiError } from "../lib/api";
 
@@ -8,7 +9,7 @@ import { ApiError } from "../lib/api";
    (fleet-summary, analysis-runs, outbox-events + requeue) and
    `ingestion_api.py` (metadata-ingestion-batches) -- mocks the API boundary
    the same way every other UX-15/UX-16 screen test does.
-   `fetchOrgDatasources` is left un-mocked (the datasource-name lookup and
+   `listOrgDatasources` is left un-mocked (the datasource-name lookup and
    the drill-down picker's own fixture-mode datasource list), matching
    `NarratedLineageScreen`'s real datasource fixture (`ds_snowflake_prod`).
 --------------------------------------------------------------------------- */
@@ -24,6 +25,13 @@ const requeueOutboxEvent = vi.fn<(eventId: string, signal?: AbortSignal) => Prom
 const fetchIngestionBatches = vi.fn<
   (datasourceId: string, opts: unknown, signal?: AbortSignal) => Promise<{ items: MetadataIngestionBatchRead[]; limit: number; offset: number; total: number }>
 >();
+
+const fetchFootprintGaps = vi.fn();
+const fetchFootprintGapObjects = vi.fn();
+vi.mock("../lib/api/footprintGaps", () => ({
+  fetchFootprintGaps: (...args: unknown[]) => fetchFootprintGaps(...args),
+  fetchFootprintGapObjects: (...args: unknown[]) => fetchFootprintGapObjects(...args),
+}));
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -80,6 +88,27 @@ beforeEach(() => {
   requeueOutboxEvent.mockReset();
   fetchIngestionBatches.mockReset();
   fetchFleetSummary.mockResolvedValue(SUMMARY);
+  fetchFootprintGaps.mockReset();
+  fetchFootprintGapObjects.mockReset();
+  fetchFootprintGaps.mockResolvedValue({
+    organization_id: ORG,
+    generated_at: "2026-09-15T12:00:00Z",
+    datasources: [
+      {
+        datasource_id: "ds_snowflake_prod",
+        datasource_name: "snowflake_prod",
+        oldest_pending_signal_minutes: 30,
+        gaps: [
+          {
+            kind: "CODE_WITHHELD", count: 3, resolution: "SOURCE_ACCESS", owner: "source administrator",
+            explanation: "The source withholds these view definitions or routine bodies.",
+          },
+        ],
+      },
+      { datasource_id: "ds_quiet", datasource_name: "quiet_source", oldest_pending_signal_minutes: null, gaps: [] },
+    ],
+    totals: { CODE_WITHHELD: 3 },
+  });
   fetchAnalysisRuns.mockResolvedValue({ items: [RUN], limit: 200, offset: 0, total: 1 });
   fetchOutboxEvents.mockResolvedValue({ items: [DEAD_LETTER_EVENT], limit: 100, offset: 0, total: 1 });
   vi.resetModules();
@@ -91,6 +120,150 @@ afterEach(() => {
 });
 
 describe("OperationsScreen against the real operational_api.py", () => {
+  it("lists each readable source's knowledge gaps with who closes them, and skips a source with none (R11-FP05)", async () => {
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+    expect(panel).toHaveTextContent("Code withheld by the source");
+    expect(panel).toHaveTextContent("source access");
+    expect(panel).toHaveTextContent("source administrator");
+    expect(panel).toHaveTextContent("waited 30 min");
+    expect(screen.queryByRole("article", { name: "Gaps in quiet_source" })).not.toBeInTheDocument();
+    expect(fetchFootprintGaps).toHaveBeenCalledWith(ORG, expect.anything());
+  });
+
+  it("expands a count into the objects behind it, asked for only when opened (R11-FP05)", async () => {
+    fetchFootprintGapObjects.mockResolvedValue({
+      datasource_id: "ds_snowflake_prod",
+      kind: "CODE_WITHHELD",
+      resolution: "SOURCE_ACCESS",
+      owner: "source administrator",
+      explanation: "The source withholds these view definitions or routine bodies.",
+      objects: [
+        {
+          object_type: "VIEW",
+          object_id: "tbl_1",
+          qualified_name: "bank.sales.v_revenue",
+          detail: null,
+        },
+      ],
+      truncated: false,
+      note: null,
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    // The summary costs one request; the list costs one more, and only on asking.
+    expect(fetchFootprintGapObjects).not.toHaveBeenCalled();
+    await userEvent.click(within(panel).getByRole("button", { name: "3" }));
+
+    expect(await within(panel).findByText("bank.sales.v_revenue")).toBeInTheDocument();
+    expect(fetchFootprintGapObjects).toHaveBeenCalledWith(
+      "ds_snowflake_prod",
+      "CODE_WITHHELD",
+      expect.anything(),
+    );
+  });
+
+  it("says why the objects it never saw cannot be listed, rather than showing none (R11-FP02)", async () => {
+    fetchFootprintGaps.mockResolvedValue({
+      organization_id: ORG,
+      generated_at: "2026-09-16T12:00:00Z",
+      datasources: [
+        {
+          datasource_id: "ds_snowflake_prod",
+          datasource_name: "snowflake_prod",
+          oldest_pending_signal_minutes: null,
+          gaps: [
+            {
+              kind: "SOURCE_OBJECTS_INVISIBLE", count: 412, resolution: "SOURCE_ACCESS",
+              owner: "source administrator", explanation: "Objects the source holds that this login may not see.",
+            },
+          ],
+        },
+      ],
+      totals: { SOURCE_OBJECTS_INVISIBLE: 412 },
+    });
+    fetchFootprintGapObjects.mockResolvedValue({
+      datasource_id: "ds_snowflake_prod",
+      kind: "SOURCE_OBJECTS_INVISIBLE",
+      resolution: "SOURCE_ACCESS",
+      owner: "source administrator",
+      explanation: "Objects the source holds that this login may not see.",
+      objects: [],
+      truncated: false,
+      note: "These objects are not in the catalog: Atlas has no name to show.",
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    await userEvent.click(within(panel).getByRole("button", { name: "412" }));
+
+    expect(await within(panel).findByText(/not in the catalog/)).toBeInTheDocument();
+  });
+
+  it("names the refused-read gap in words rather than printing its kind code (R11-FP02)", async () => {
+    fetchFootprintGaps.mockResolvedValue({
+      organization_id: ORG,
+      generated_at: "2026-09-17T12:00:00Z",
+      datasources: [
+        {
+          datasource_id: "ds_snowflake_prod",
+          datasource_name: "snowflake_prod",
+          oldest_pending_signal_minutes: null,
+          gaps: [
+            {
+              kind: "SOURCE_READS_REFUSED", count: 2, resolution: "SOURCE_ACCESS",
+              owner: "source administrator",
+              explanation: "Facets the source refused to read for the scanning principal.",
+            },
+          ],
+        },
+      ],
+      totals: { SOURCE_READS_REFUSED: 2 },
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    expect(panel).toHaveTextContent("Reads refused by the source");
+    // The kind code itself never reaches the operator: a row headed
+    // SOURCE_READS_REFUSED is a missing label, and reads as an internal leak.
+    expect(panel).not.toHaveTextContent("SOURCE_READS_REFUSED");
+  });
+
+  it("names the trigger-propagation gap in words rather than printing its kind code (R11-FP01)", async () => {
+    fetchFootprintGaps.mockResolvedValue({
+      organization_id: ORG,
+      generated_at: "2026-09-20T12:00:00Z",
+      datasources: [
+        {
+          datasource_id: "ds_snowflake_prod",
+          datasource_name: "snowflake_prod",
+          oldest_pending_signal_minutes: null,
+          gaps: [
+            {
+              kind: "TRIGGER_PROPAGATION_GAPS", count: 3, resolution: "EXPLAINED",
+              owner: "none",
+              explanation: "Triggers with a reviewed lineage edge that classification propagation could not follow to a column.",
+            },
+          ],
+        },
+      ],
+      totals: { TRIGGER_PROPAGATION_GAPS: 3 },
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    expect(panel).toHaveTextContent("Triggers classification cannot follow");
+    // A row headed with the code is a missing label, and reads as an internal leak.
+    expect(panel).not.toHaveTextContent("TRIGGER_PROPAGATION_GAPS");
+  });
+
   it("loads and renders fleet-summary tiles plus the analysis-runs list", async () => {
     const OperationsScreen = await loadScreen();
 

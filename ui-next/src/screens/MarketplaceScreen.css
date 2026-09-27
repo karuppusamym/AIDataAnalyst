@@ -31,6 +31,12 @@
 .mkt__req{margin-top:10px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
 .mkt__err{color:var(--bad);font-size:12px;margin:0}
 
+/* R11-B4: revoking a granted entitlement. Deliberately quiet -- it sits under
+   an "access granted" pill, and the confirmation dialog is what carries the
+   weight of the decision. */
+.mkt__revoke{margin-top:10px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.mkt__revoke_hint{font-size:12px;color:var(--ink-3);margin:0;line-height:1.45}
+
 @media (max-width:1100px){
   .mktscreen{height:auto;min-height:100%}
   .mktscreen__main{flex-direction:column;min-height:0}

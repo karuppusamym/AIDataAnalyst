@@ -32,7 +32,12 @@
  *  by hand until CatalogRowRead/MetadataTableRead are reachable from the
  *  OpenAPI document (see the file banner above). */
 export type { CursorPage } from "./types";
-import type { AssetDescriptionDraftRead, DataProductVersionRead } from "./types";
+import type {
+  AccessPolicyProposalRead,
+  AssetDescriptionDraftRead,
+  DataProductVersionRead,
+  WorkspaceMembershipProposalRead,
+} from "./types";
 
 export type CertificationStatus = "CERTIFIED" | "EXPIRED" | "NONE" | "REVOKED";
 export type QualityState = "PASSING" | "INCIDENT_OPEN" | "STALE" | "UNKNOWN";
@@ -283,21 +288,75 @@ export interface AssetDescriptionDraftListResponse {
   total: number;
 }
 
-/** The five parser-produced lineage edge tables `GET
+/** The parser-produced lineage edge tables `GET
  *  /v1/lineage/parsed-edges/review-queue` spans. The generator emits this
  *  union inline on every field that carries it
  *  (`ParsedLineageEdgeReviewQueueItemRead.edge_type`,
  *  `ParsedLineageEdgeDecisionRequest.edge_type`) but never names it, so a
  *  call site that wants to hold one in a variable needs this alias. Keep the
- *  members identical to what the generated file emits inline. */
+ *  members identical to what the generated file emits inline. `PROCEDURE` is
+ *  pasted procedure SQL; `ROUTINE` is a captured routine's body (2026-09-11);
+ *  `TRIGGER` is a captured trigger's body (2026-09-17, R11-FP01). */
 export type ParsedLineageEdgeType =
   | "VIEW"
   | "PROCEDURE"
+  | "ROUTINE"
   | "DBT"
   | "OPENLINEAGE_TABLE"
-  | "OPENLINEAGE_COLUMN";
+  | "OPENLINEAGE_COLUMN"
+  | "TRIGGER";
 
 /** Same reasoning as `ParsedLineageEdgeType`, for
  *  `ParsedLineageEdgeDecisionRequest.decision`. */
 export type ParsedLineageEdgeDecision = "APPROVED" | "REJECTED";
 
+/** `DocumentSectionRead`, `DocumentMappingRead` and `DocumentClaimRead` --
+ *  `src/aida/document_ingestion_api.py`. Its list routes declare
+ *  `response_model=Page` un-parameterized, so these schemas never reach the
+ *  OpenAPI document and are hand-written here, as `PageOf` is. */
+export interface DocumentSectionRead {
+  id: string;
+  document_id: string;
+  ordinal: number;
+  raw_schema_name: string | null;
+  raw_table_name: string;
+  raw_column_name: string | null;
+  raw_description: string;
+}
+
+export interface DocumentMappingRead {
+  id: string;
+  document_section_id: string;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string | null;
+  mapping_kind: "STRUCTURAL" | "UNMATCHED";
+  confidence: number;
+}
+
+export interface DocumentClaimRead {
+  id: string;
+  document_section_id: string;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string;
+  predicate: string;
+  object_value: string;
+  confidence: number;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  governance_review_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+}
+
+/* ---------------------------------------------------------------------------
+   Access policies and workspace members, as the LIST routes return them.
+
+   The API contract declares only what the create routes answer: `AccessPolicyProposalRead` and
+   `WorkspaceMembershipProposalRead`, each the plain row plus the `governance_review_id` of the
+   review the create opened (R11-AUD02). The list routes return an untyped `Page`, so the list-item
+   types are derived from the proposals rather than restated by hand: they cannot drift from the
+   contract, and a field added to the row lands in both.
+--------------------------------------------------------------------------- */
+
+export type AccessPolicyRead = Omit<AccessPolicyProposalRead, "governance_review_id">;
+export type WorkspaceMembershipRead = Omit<WorkspaceMembershipProposalRead, "governance_review_id">;

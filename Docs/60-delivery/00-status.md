@@ -1,9 +1,95 @@
 # Delivery Status
 
-> Status: **Living document — the single answer to "where are we".** Owner: Engineering lead.
+## Current delivery confirmation, 2026-09-22
+
+[Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current
+work status. The [capability register](20-capability-register.md) keeps implementation separate from
+configuration and real-environment verification, and each row carries the date it was measured.
+This page is a dated summary of both; where they disagree, they win. The evidence for this
+confirmation is the [six-real-code-rows addendum](34-six-real-code-rows-2026-09-23.md), on top of the
+[2026-09-23 FP12 closure](33-fp12-closure-2026-09-23.md) and the
+[2026-09-22 FP08/FP14/FP15 closure](32-fp08-fp14-fp15-closure-2026-09-22.md), on
+top of the [2026-09-22 addendum](31-last-open-items-2026-09-22.md), the
+[2026-09-21 evening session log](30-round-12-review-and-demo-finalization-2026-09-21.md), and the
+morning's [validation log](28-demo-readiness-validation-2026-09-21.md).
+
+Most scheduled implementation has landed: **98 DONE, 21 PARTIAL, 7 BLOCKED, 0 TODO, 22 DEFERRED,
+2 CANCELLED** across 150 unique work packages. Of the 126 that are neither deferred nor cancelled,
+98 are complete; 28 still need implementation, verification or prerequisites. **32 of the 33
+defects (D-series) are DONE**; D17 keeps a parity run in the target environment. The audit rows
+R11-AUD01 to AUD15 are all closed: AUD11's last item, the upload read timeout, was measured and
+set on 2026-09-22. So are the six validation rows: VAL01 to VAL05 (the eight secret-scan findings
+were test-fixture values, and the CI job passed), and VAL06, whose coverage scopes by business
+domain and line of business were built and whose direct bulk-operation screen was dropped as a
+second way to do what the UI's own flows already do. Four more PARTIAL rows closed the same day
+with no code change: FP08, FP14, FP15 and S13 each had nothing left to build — a stale
+cross-reference the code had already resolved (FP08, S13), or a decision against building already
+recorded elsewhere (FP14, FP15). FP12 closed on 2026-09-23 with code: a context product whose
+coverage or pinned meaning moved since publication is flagged on four screens with no click,
+from one batched read the coverage roles alone may make. R11-FP09 closed the same day, the same
+stale-cross-reference way FP08 did. Five further PARTIAL rows (FP01, FP03, FP07, OKF02, REV01)
+each got real, verified fixes for part of their remaining scope and stay PARTIAL with a shorter
+list.
+
+Decisions taken on the product owner's instruction to proceed, each reversible by editing its row
+and worth confirming: the sixteen-role catalog and the compliance-pack roles (AUD01), the acceptance
+of ADR-0030 (AUD06), the stale-key window (AUD10), three older rows deferred (VAL02), where
+Operations shows the scheduler passes (VAL04), the deletion of `auto_lift_on_material_change` (a
+rejected predicate that returns stays suppressed until lifted, VAL05), allowlisting the
+secret-scan fixtures by value rather than by path (VAL01), and not building a direct
+bulk-operation screen (VAL06).
+
+Twelve PARTIAL rows closed since the September 12 confirmation: B2 (execution-match scoring), B8
+(freshness observation), C1 (live ontology publication), C3 (unsafe reviewer evidence), C6, C7
+and C8 (authority and correction remainders), D6 (OIDC-session transitions), X2, X4, X5 and S9.
+
+Remaining priorities: C2 human accessibility acceptance; B9 real WORM-archive evidence; B10 and I1
+notification, Teams and Slack delivery beyond loopback stubs; the R11-FP01 to FP09 and FP12 to FP17
+remainders; and the BLOCKED rows B5, B6, B15, C9, C10, C11 and C13, which wait on customer
+connector, IdP, secrets, security, calibration, model-governance, scale and masking prerequisites.
+Unattended reviewer approvals stay off: production configuration refuses `reviewer_agent_enabled`,
+and the latest recorded benchmark approves 9 of 14 false twins and distinguishes no pairs. Deferred
+expansion is not a release requirement unless its recorded trigger is met.
+
+Re-checked 2026-09-22, after the last two open items (R11-AUD11 and R11-VAL06): the stack was rebuilt from a clean worktree of the source `cf835e7` carries (built as `4f15579`, the same commits before they were replayed onto a peer's documentation commit), and `scripts/check_deployment_parity.py` reported 9 of 9 comparisons matched (source digest `7f50718814af`). On it the role matrix sent 5,547 and 2,405 probes with 0 unexpected answers, the read sweep made 2,496 calls with 0 server errors, the accessibility audit found 0 violations on 40 screens, and the rehearsal opened 50 screens with 0 issues. The deployed nginx waits 300 s on the envelope and upload routes, and the Coverage view read the Customer domain at 25.00% over 4 tables and Retail Banking at 9.65% over 19. The 18 static gates, the whole UI suite (148 files, 2,158 tests) and the 46 browser journeys pass; the confirming full backend run at `b21eb24` gave 15,185 passed and 0 failed.
+
+Fresh checks, 2026-09-21, late evening: the running stack was rebuilt from a clean worktree of
+`9128241` and `scripts/check_deployment_parity.py` reported 9 of 9 comparisons matched (source digest
+`e9d0b82ae652`; the two commits after it change only tests and documents, and parity still matches
+from them). On that stack `scripts/live_role_matrix.py` sent 5,547 probes as each of the sixteen
+platform roles and 2,405 as the seven non-admin demo bundles, and every answer matched the declared
+role contract; `scripts/live_role_sweep.py` made 2,496 read calls with 0 server errors; the live
+accessibility audit (40 screens, both themes, 320 px reflow) reported 0 violations; and opening 50
+screens as the eight demo users gave 0 issues and 5 known conditions. The 18 static CI gates pass
+(at `cb4c767`); the frontend suite is 148 files and 2,147 tests, all passing, and `tsc` is clean. The
+full backend suite at `80ad325` gave 15,177 passed, 184 skipped and 2 failed; both order-dependent test
+problems were fixed in `e1c11b5` and `b21eb24`. The confirming pushed CI run for final commit
+`b357500` completed successfully on 2026-09-22: all 17 executed jobs passed, including the full
+backend suite with coverage, frontend typecheck/build/tests, browser journey, migration/ORM drift,
+connector fixtures, security scans, image build, proxy checks and generated-artifact gates. The
+deployment-parity job was correctly skipped because CI has no deployment target. The pass applied one migration,
+`c4a7e2d9b815` (the scheduler-pass table), changed no production configuration, and put no question
+to a model.
+
+Earlier the same day, on the round-12 tree (HEAD `6c376d0` plus the round-12 changes, uncommitted
+then): the full backend suite gave 15,102 passed, 184 skipped and 0 failed in 42 minutes; a Studio
+change set was taken from creation to submission through the running API on the test organization;
+a killed scheduler leader was replaced by its standby in about 4 seconds; and a Kafka broker stopped
+and started again let the drafter consumer recover with no worker restart. That round's last index
+pass embedded nothing (298 objects unchanged).
+
+## Historical status snapshots
+
+Everything below is dated evidence from earlier passes, not a current verification or execution
+plan. In particular, test counts, invariant limits, open decisions and capability tables have
+not all been rerun against the September 11 tree. Current review findings override them:
+INV-2's native-policy execution bypass (R11-D1) is closed in code as of 2026-09-11; agent safety remainders are R11-C3/C6/C7/C8; C4 now has recorded PostgreSQL concurrency/isolation proof.
+
+
+> Status: **Historical snapshot (2026-09-12 and earlier); tracker section P is the status authority.** Owner: Engineering lead.
 > Consolidated 2026-08-30 from `04-status-matrix.md` and `05-gap-register.md`, both now in
-> `Docs/_superseded/`. If a status claim appears in two places, this one wins; every other
-> document should carry a pointer here rather than its own summary.
+> `Docs/_superseded/`. Historical consolidation rule (superseded): if a status claim appeared in two places, this one won; every other
+> document previously carried a pointer here. The September 11 authority convention above supersedes this historical rule.
 
 **Verified:** 2026-09-02, against the working tree at commit `fd70428`. (This branch has been under
 continuous concurrent push across many parallel sessions since 2026-08-30 — every number below is
@@ -42,7 +128,7 @@ checks, and `03-tracker.md`'s §K for the current item-level DONE/TODO/IN-PROGRE
 >
 > For the four-column implemented / reachable / configured / verified view that D06 asked for, see
 > [`20-capability-register.md`](20-capability-register.md). That register is the current-state
-> document; this page remains the narrative summary.
+> evidence document; current work status is tracker section P.
 
 ## 1. At a glance
 
@@ -99,7 +185,7 @@ named rather than rounded up to a tick.
 | # | Invariant | Test | Limit that remains |
 |:--:|---|---|---|
 | INV-1 | Single authoritative store | `test_inv1_single_authoritative_store.py` (8) | Does **not** prove Neo4j ingests correctly — no Neo4j runs in the suite. The projection-rebuild drill has never been run (E5) |
-| INV-2 | One execution choke point | Type system + import contract + AST scan | None. The statement was narrowed so it is literally true: discovery and profiling touch sources but cannot carry caller SQL |
+| INV-2 | One execution choke point | Type system + import contract + AST scan + driver-connect scan | **Closed 2026-09-11 (R11-D1).** Native-policy sync no longer opens its own source connection; its apply path was removed and preview retained. A fourth layer now fails any driver connect outside `aida.connectors`, which is what the earlier three layers could not see. |
 | INV-3 | Model output is never authority | `test_tier0_invariants.py` | None |
 | INV-4 | Fail closed | `test_tier0_invariants.py` + `test_inv4_authorization_wiring.py` (26) | The decision is now *reached* on the execution path and 5 read surfaces, but every workspace is in `SHADOW` and the unresolved-workspace posture defaults to `SHADOW` — **so nothing is denied**. See §6 decision 3 |
 | INV-5 | Tenant isolation is total | `test_inv5_tenant_isolation.py` (8) + route-table scan | The intended structural mechanism — a repository base class with no unscoped query helper — **does not exist**. Scoping is per-query by convention; the test substitutes for the guarantee (ST-05/06/07) |

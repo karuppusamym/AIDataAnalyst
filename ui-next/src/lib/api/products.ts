@@ -13,30 +13,18 @@
 --------------------------------------------------------------------------- */
 
 import { deleteRequest, demoOr, get, postJson, putJson } from "./transport";
+import { executeGraphQL } from "./graphql";
+import type { GraphQLResponse } from "./graphql";
 import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureCompileContextProductVersion,
-  makeFixtureConsumptionRecords,
-  makeFixtureContextProductBindings,
-  makeFixtureContextProductVersions,
-  makeFixtureContextProducts,
-  makeFixtureCreateContextProduct,
-  makeFixtureDeprecateContextProductVersion,
-  makeFixtureMarketplaceAccessRequest,
-  makeFixtureMarketplaceProducts,
-  makeFixturePortfolioAnalyticsSummary,
-  makeFixturePortfolioAnalyticsTrends,
-  makeFixtureRemoveContextProductBinding,
-  makeFixtureSetContextProductBinding,
-  makeFixtureSubmitContextProductVersion,
-} from "../fixtures";
 import { requestBlob } from "../http";
 import type {
   ConsumptionRecordPage,
   ContextCompilationRead,
+  ContextProductChangesSummaryListRead,
   ContextProductConsumerBindingRead,
   ContextProductCreate,
   ContextProductRead,
+  ContextProductRoutineOptionRead,
   ContextProductScopeRead,
   ContextProductVersionRead,
   GovernanceReviewRead,
@@ -67,7 +55,7 @@ export function fetchMarketplaceProducts(
   signal?: AbortSignal,
 ): Promise<PageOf<MarketplaceProductRead>> {
   return demoOr(
-    async () => makeFixtureMarketplaceProducts(query),
+    async (fixtures) => fixtures.makeFixtureMarketplaceProducts(query),
     async () => {
       const params = new URLSearchParams();
       if (query.q) params.set("q", query.q);
@@ -90,11 +78,67 @@ export function requestMarketplaceAccess(
   signal?: AbortSignal,
 ): Promise<MarketplaceAccessRequestRead> {
   return demoOr(
-    async () => makeFixtureMarketplaceAccessRequest(versionId, body),
+    async (fixtures) => fixtures.makeFixtureMarketplaceAccessRequest(versionId, body),
     async () => {
       return postJson<MarketplaceAccessRequestRead>(
         `/v1/marketplace/products/${versionId}/access-requests`,
         body,
+        signal,
+      );
+    },
+  );
+}
+
+/** `GET /v1/marketplace/access-requests`
+ *  (`product_marketplace_api.py::list_marketplace_access_requests`).
+ *
+ *  Server-scoped, not a client filter: a plain consumer is narrowed to their
+ *  own requests by the handler, while a product owner or auditor sees the
+ *  organization's. The screen needs it because a marketplace row carries an
+ *  `access_status` but not the id of the request behind it, and revoking
+ *  addresses the request. */
+export function fetchMarketplaceAccessRequests(
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<MarketplaceAccessRequestRead>> {
+  return demoOr(
+    // No fixture estate models the access-request ledger, and inventing one
+    // here would make the demo assert access the demo cannot grant.
+    async () => ({ items: [], limit: query.limit ?? 100, offset: query.offset ?? 0, total: 0 }),
+    async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(query.limit ?? 100));
+      params.set("offset", String(query.offset ?? 0));
+      return get<PageOf<MarketplaceAccessRequestRead>>(
+        `/v1/marketplace/access-requests?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `POST /v1/marketplace/access-requests/{request_id}/revoke`
+ *  (`product_marketplace_api.py::revoke_marketplace_access`).
+ *
+ *  Authority is the server's, and it is narrower than who can see the button:
+ *  the route requires a product-author role, so a consumer looking at their
+ *  own granted access gets a 403 whose detail the screen shows verbatim
+ *  rather than guessing at eligibility client-side. Expect:
+ *    - 403 the caller may not revoke this grant
+ *    - 404 no such access request
+ *    - 409 detail === "only approved access can be revoked" */
+export function revokeMarketplaceAccess(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<MarketplaceAccessRequestRead> {
+  return demoOr(
+    async () => {
+      throw new Error("Revoking access is not available in demo mode.");
+    },
+    async () => {
+      return postJson<MarketplaceAccessRequestRead>(
+        `/v1/marketplace/access-requests/${requestId}/revoke`,
+        {},
         signal,
       );
     },
@@ -118,7 +162,7 @@ export function fetchPortfolioAnalyticsSummary(
   signal?: AbortSignal,
 ): Promise<PortfolioAnalyticsSummaryRead> {
   return demoOr(
-    async () => makeFixturePortfolioAnalyticsSummary(query),
+    async (fixtures) => fixtures.makeFixturePortfolioAnalyticsSummary(query),
     async () => {
       const params = new URLSearchParams();
       params.set("window_days", String(query.windowDays ?? 30));
@@ -148,7 +192,7 @@ export function fetchPortfolioAnalyticsTrends(
   signal?: AbortSignal,
 ): Promise<PortfolioAnalyticsTrendsRead> {
   return demoOr(
-    async () => makeFixturePortfolioAnalyticsTrends(query),
+    async (fixtures) => fixtures.makeFixturePortfolioAnalyticsTrends(query),
     async () => {
       const params = new URLSearchParams();
       params.set("window_days", String(query.windowDays ?? 30));
@@ -173,6 +217,8 @@ export function fetchPortfolioAnalyticsTrends(
      - POST   /v1/context-product-versions/{id}/deprecate                 request_context_product_deprecation :887
      - GET    /v1/context-product-versions/{id}/compile                   compile_context_product_version
        (`src/aida/context_compiler_api.py:208`)
+     - POST   /graphql  contextProductCoverage { changedSincePublished }  what moved since publication
+       (`src/aida/graphql_reads.py`, R11-FP12; see `fetchContextProductChangesSincePublished`)
 
    Deliberately not ported: `GET /context-products/{id}/versions` (:445,
    version history — the legacy screen never showed it, only the latest
@@ -188,6 +234,13 @@ export function fetchPortfolioAnalyticsTrends(
 export interface ContextProductQuery {
   limit?: number;
   offset?: number;
+  /** R11-FP12 (F08): only the products this caller could actually *ask through*
+   *  — PUBLISHED, and naming a consumer role the caller holds. The lifecycle
+   *  view a steward needs (drafts included) is the default and is unchanged;
+   *  this is the picker's question, which is a different one. Without it the
+   *  Ask picker offered a steward every draft in the project and the ask came
+   *  back `CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED`. */
+  askable?: boolean;
 }
 
 /** `GET /v1/projects/{project_id}/context-products` (`list_context_products`,
@@ -200,16 +253,36 @@ export function fetchContextProducts(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductRead>> {
   return demoOr(
-    async () => makeFixtureContextProducts(projectId, query),
+    // The demo estate has no role bindings to filter on, so `askable` narrows
+    // nothing here; the caller keeps its own PUBLISHED filter for that reason.
+    async (fixtures) => fixtures.makeFixtureContextProducts(projectId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 200));
       params.set("offset", String(query.offset ?? 0));
+      if (query.askable) params.set("askable", "true");
       return get<PageOf<ContextProductRead>>(
         `/v1/projects/${projectId}/context-products?${params}`,
         signal,
       );
     },
+  );
+}
+
+/** `GET /v1/projects/{project_id}/context-product-routine-options` (R11-FP12) — the ACTIVE
+ *  stored procedures and functions on this project's own datasources: exactly the set the
+ *  create call accepts in `routine_ids`. Demo mode offers none. */
+export function fetchContextProductRoutineOptions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductRoutineOptionRead[]> {
+  return demoOr(
+    async () => [],
+    async () =>
+      get<ContextProductRoutineOptionRead[]>(
+        `/v1/projects/${projectId}/context-product-routine-options?limit=200`,
+        signal,
+      ),
   );
 }
 
@@ -226,7 +299,7 @@ export function createContextProduct(
   signal?: AbortSignal,
 ): Promise<ContextProductRead> {
   return demoOr(
-    async () => makeFixtureCreateContextProduct(projectId, body),
+    async (fixtures) => fixtures.makeFixtureCreateContextProduct(projectId, body),
     async () => {
       return postJson<ContextProductRead>(`/v1/projects/${projectId}/context-products`, body, signal);
     },
@@ -242,7 +315,7 @@ export function submitContextProductVersion(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureSubmitContextProductVersion(versionId),
+    async (fixtures) => fixtures.makeFixtureSubmitContextProductVersion(versionId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/context-product-versions/${versionId}/submit`, {}, signal);
     },
@@ -258,7 +331,7 @@ export function requestContextProductDeprecation(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureDeprecateContextProductVersion(versionId),
+    async (fixtures) => fixtures.makeFixtureDeprecateContextProductVersion(versionId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/context-product-versions/${versionId}/deprecate`, {}, signal);
     },
@@ -276,11 +349,201 @@ export function compileContextProductVersion(
   signal?: AbortSignal,
 ): Promise<ContextCompilationRead> {
   return demoOr(
-    async () => makeFixtureCompileContextProductVersion(versionId, target),
+    async (fixtures) => fixtures.makeFixtureCompileContextProductVersion(versionId, target),
     async () => {
       const params = new URLSearchParams({ target });
       return get<ContextCompilationRead>(
         `/v1/context-product-versions/${versionId}/compile?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Staleness: what a published version covers that moved after it was published
+   (R11-FP12).
+
+   NO LIST OR READ SHAPE CARRIES IT. `ContextProductRead` / `ContextProductVersionRead`
+   are the version's own definition, and a version's definition never changes -- what
+   moves is what it *stands on* (a covered view's or routine's definition, an approved
+   description). HOW MANY moved is one request per screen since 2026-09-22
+   (`fetchContextProductChangesSummary` below, a count per version in a fixed number of
+   queries, for the coverage roles only); WHICH moved is still per version, computed on
+   demand from `load_coverage_changes` in exactly two places: the compiled artifact's
+   `context.coverage`
+   (`changed_since_published`, Atlas-native targets only, inside an opaque `content`
+   string), and GraphQL's `contextProductCoverage`, which renders the same section as a
+   typed connection and is the read used here -- target-independent, nothing parsed out
+   of an artifact, and no `context.product_compiled.v1` outbox event because nothing is
+   compiled.
+
+   COST. One request per version asked about, never on load. Each is recorded as a read
+   (an audit event and, for a PUBLISHED version, a consumption edge on channel
+   `GRAPHQL_COVERAGE`, exactly as a compile records `COMPILER`), which is why a caller
+   should ask only for a version a person asked about rather than probing every row.
+
+   A TABLE RESHAPE IS NOT A CHANGE. A column added or removed is deliberately outside
+   `changed_since_published` (`STRUCTURE_CHANGED` is not one of its definition moves), or
+   every product would read stale whenever a column was added. So a version whose covered
+   table was only reshaped comes back empty here, and this client does not second-guess it.
+--------------------------------------------------------------------------- */
+
+/** One covered thing that moved after publication: an entry of the coverage section
+ *  `changed_since_published`, exactly as GraphQL renders it. */
+export interface ContextProductCoverageChange {
+  /** What moved: VIEW, ROUTINE, TABLE or COLUMN. */
+  readonly subjectKind: string;
+  /** The moved object's id. Always inside the product's own scope. */
+  readonly subjectId: string;
+  /** DEFINITION_CHANGED, DEPRECATED or REACTIVATED (a view or routine), or
+   *  MEANING_RETIRED (an approved description). */
+  readonly change: string;
+  /** STRUCTURAL or LITERAL_ONLY for a definition; MEANING_REPLACED or MEANING_WITHDRAWN
+   *  for a description; SIGNATURE_CHANGED for a routine replaced by a new signature. */
+  readonly changeClass: string | null;
+}
+
+export interface ContextProductChangesSincePublished {
+  /** How many entries the server holds; `changes` may be a first page of them. */
+  readonly total: number;
+  readonly changes: readonly ContextProductCoverageChange[];
+}
+
+const CHANGES_SINCE_PUBLISHED_OPERATION = "ContextProductChangesSincePublished";
+const CHANGES_SINCE_PUBLISHED_PAGE = 20;
+const CHANGES_SINCE_PUBLISHED_QUERY = `query ContextProductChangesSincePublished($versionId: ID!, $first: Int!) {
+  contextProductCoverage(versionId: $versionId) {
+    changedSincePublished(first: $first) {
+      totalCount
+      nodes { subjectKind subjectId change changeClass }
+    }
+  }
+}`;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The answer, or a thrown reason. Every branch that is not a well-formed answer throws:
+ *  a refused field resolves to `null` beside an `errors` entry, and reading that as "no
+ *  changes" would tell a reader a version it could not check is current. */
+function readChangesSincePublished(response: GraphQLResponse): ContextProductChangesSincePublished {
+  const refusal = response.errors?.[0];
+  if (refusal) {
+    const extensions = refusal.extensions ?? {};
+    const rawCode = extensions["code"];
+    const rawReason = extensions["reason"];
+    const code = typeof rawCode === "string" ? rawCode : refusal.message;
+    throw new Error(
+      `The coverage read was refused: ${code}${typeof rawReason === "string" ? ` (${rawReason})` : ""}.`,
+    );
+  }
+  const data: unknown = response.data;
+  const coverage: unknown = isRecord(data) ? data["contextProductCoverage"] : null;
+  const page: unknown = isRecord(coverage) ? coverage["changedSincePublished"] : null;
+  const nodes: unknown = isRecord(page) ? page["nodes"] : null;
+  if (!isRecord(page) || !Array.isArray(nodes)) {
+    throw new Error("The coverage read returned no answer, so this version was not checked.");
+  }
+  const changes = nodes.map((node: unknown): ContextProductCoverageChange => {
+    const subjectKind = isRecord(node) ? node["subjectKind"] : null;
+    const subjectId = isRecord(node) ? node["subjectId"] : null;
+    const change = isRecord(node) ? node["change"] : null;
+    const changeClass = isRecord(node) ? node["changeClass"] : null;
+    if (typeof subjectKind !== "string" || typeof subjectId !== "string" || typeof change !== "string") {
+      throw new Error(
+        "The coverage read returned an entry that could not be read, so this version was not checked.",
+      );
+    }
+    return {
+      subjectKind,
+      subjectId,
+      change,
+      changeClass: typeof changeClass === "string" ? changeClass : null,
+    };
+  });
+  const totalCount = page["totalCount"];
+  const total = typeof totalCount === "number" ? totalCount : 0;
+  return { total: Math.max(total, changes.length), changes };
+}
+
+/** What the version covers that moved after it was published (`contextProductCoverage`'s
+ *  `changedSincePublished`, R11-FP12). Empty means nothing covered moved -- and *only* that:
+ *  a version never published has no baseline and is always empty, and a table reshape is not
+ *  counted (see the block above). Rejects, rather than returning empty, whenever the server
+ *  refused or did not answer, so a caller cannot mistake "could not check" for "not stale".
+ *  Demo mode has no source scans to move under a version and answers empty. */
+export function fetchContextProductChangesSincePublished(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductChangesSincePublished> {
+  return demoOr(
+    async () => ({ total: 0, changes: [] }),
+    async () =>
+      readChangesSincePublished(
+        await executeGraphQL(
+          {
+            query: CHANGES_SINCE_PUBLISHED_QUERY,
+            operationName: CHANGES_SINCE_PUBLISHED_OPERATION,
+            variables: { versionId, first: CHANGES_SINCE_PUBLISHED_PAGE },
+          },
+          signal,
+        ),
+      ),
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   The same reading as a count, for a whole list (R11-FP12, 2026-09-22).
+
+   `GET /v1/projects/{project_id}/context-products/changes-since-published` answers, in one
+   request, how many covered subjects moved since each product's latest version was published
+   -- or, with `productId`, since each of one product's versions was. It is the count of the
+   entries `fetchContextProductChangesSincePublished` would list for that version, computed in
+   a fixed number of queries on the server, so a list can show it without anyone pressing a
+   button per row.
+
+   WHO MAY ASK. `COMPILER_ROLES`, the roles every coverage door admits -- not the product
+   list's readers, which include Viewer, Auditor, Reviewer and SemanticAdmin. So a screen asks
+   only under `readDecision` on `CONTEXT_PRODUCT_COVERAGE_ROLES`, and a session outside them sees
+   no badge rather than a 403.
+
+   `null` IS NOT 0. `changed_subjects` is null for a version never published (no baseline to be
+   stale against) and 0 when it was published and nothing it covers has moved. Demo mode has no
+   source scans to move under a version and answers with no rows, as the per-version read
+   answers empty.
+--------------------------------------------------------------------------- */
+
+/** The roles `GET .../context-products/changes-since-published` admits, from the
+ *  surface-control matrix row for `list_context_product_changes_since_published`
+ *  (`COMPILER_ROLES` in `context_product_read_service.py`). */
+export const CONTEXT_PRODUCT_COVERAGE_ROLES: readonly string[] = [
+  "AgentDeveloper",
+  "Analyst",
+  "DataSteward",
+  "MetadataAdmin",
+  "PlatformAdmin",
+];
+
+export function fetchContextProductChangesSummary(
+  projectId: string,
+  options: { productId?: string | null } = {},
+  signal?: AbortSignal,
+): Promise<ContextProductChangesSummaryListRead> {
+  return demoOr(
+    async () => ({
+      project_id: projectId,
+      generated_at: new Date().toISOString(),
+      truncated: false,
+      items: [],
+    }),
+    async () => {
+      const params = new URLSearchParams();
+      params.set("limit", "200");
+      if (options.productId) params.set("product_id", options.productId);
+      return get<ContextProductChangesSummaryListRead>(
+        `/v1/projects/${projectId}/context-products/changes-since-published?${params}`,
         signal,
       );
     },
@@ -323,7 +586,7 @@ export function fetchContextProductVersions(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductVersionRead>> {
   return demoOr(
-    async () => makeFixtureContextProductVersions(productId),
+    async (fixtures) => fixtures.makeFixtureContextProductVersions(productId),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -345,7 +608,7 @@ export function fetchContextProductBindings(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductConsumerBindingRead>> {
   return demoOr(
-    async () => makeFixtureContextProductBindings(productId),
+    async (fixtures) => fixtures.makeFixtureContextProductBindings(productId),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -369,7 +632,7 @@ export function setContextProductBinding(
   signal?: AbortSignal,
 ): Promise<ContextProductConsumerBindingRead> {
   return demoOr(
-    async () => makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId),
+    async (fixtures) => fixtures.makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId),
     async () =>
       putJson<ContextProductConsumerBindingRead>(
         `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
@@ -388,7 +651,7 @@ export function removeContextProductBinding(
   signal?: AbortSignal,
 ): Promise<void> {
   return demoOr(
-    async () => makeFixtureRemoveContextProductBinding(productId, consumerPrincipalId),
+    async (fixtures) => fixtures.makeFixtureRemoveContextProductBinding(productId, consumerPrincipalId),
     async () => {
       return deleteRequest(
         `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
@@ -470,8 +733,8 @@ export function fetchConsumptionRecords(
   signal?: AbortSignal,
 ): Promise<ConsumptionRecordPage> {
   return demoOr(
-    async () =>
-      makeFixtureConsumptionRecords(
+    async (fixtures) =>
+      fixtures.makeFixtureConsumptionRecords(
         { consumerId: query.consumerId, resourceType: query.resourceType, resourceId: query.resourceId },
         query,
       ),

@@ -79,6 +79,23 @@ const ESTATE: Record<string, { workspaces: WorkspaceRead[]; projects: ProjectRea
 const pending: Record<string, (() => void)[]> = {};
 let gateOrgs = new Set<string>();
 
+/* R11-B11: the three scope axes are authorized separately, so a least-
+   privilege principal routinely holds one and not another. `refused` makes a
+   named axis reject for a named organization, which is what the bootstrap used
+   to turn into a blank picker. */
+const refused: Record<string, Set<string>> = {};
+
+function refuse(orgId: string, ...axes: string[]): void {
+  refused[orgId] = new Set(axes);
+}
+
+async function axis(orgId: string, name: string): Promise<void> {
+  await gate(orgId);
+  if (refused[orgId]?.has(name)) {
+    throw Object.assign(new Error("not permitted"), { status: 403 });
+  }
+}
+
 function gate(orgId: string): Promise<void> {
   if (!gateOrgs.has(orgId)) return Promise.resolve();
   return new Promise<void>((resolve) => {
@@ -94,17 +111,17 @@ function releaseOrg(orgId: string): void {
 
 vi.mock("./api", () => ({
   listOrgWorkspaces: async (orgId: string) => {
-    await gate(orgId);
+    await axis(orgId, "workspaces");
     const items = ESTATE[orgId]?.workspaces ?? [];
     return { items, total: items.length, truncated: false, pagesFetched: 1 };
   },
   listOrgProjects: async (orgId: string) => {
-    await gate(orgId);
+    await axis(orgId, "projects");
     const items = ESTATE[orgId]?.projects ?? [];
     return { items, total: items.length, truncated: false, pagesFetched: 1 };
   },
   listOrgDatasources: async (orgId: string) => {
-    await gate(orgId);
+    await axis(orgId, "datasources");
     const items = ESTATE[orgId]?.datasources ?? [];
     return { items, total: items.length, truncated: false, pagesFetched: 1 };
   },
@@ -139,6 +156,8 @@ function Probe() {
       <span data-testid="project">{scope.projectId}</span>
       <span data-testid="datasource">{scope.datasourceId}</span>
       <span data-testid="sources">{scope.datasources.map((item) => item.id).join(",")}</span>
+      <span data-testid="error">{scope.error ?? ""}</span>
+      <span data-testid="workspaces">{scope.workspaces.map((item) => item.id).join(",")}</span>
       <button onClick={() => scope.setDatasourceId("ds-a")}>pick ds-a</button>
     </div>
   );
@@ -157,6 +176,7 @@ beforeEach(() => {
   currentOrg = ORG_A;
   gateOrgs = new Set();
   for (const key of Object.keys(pending)) pending[key] = [];
+  for (const key of Object.keys(refused)) delete refused[key];
 });
 
 afterEach(() => {
@@ -258,5 +278,38 @@ describe("scope is tied to its organization", () => {
       releaseOrg(ORG_A);
     });
     await waitFor(() => expect(screen.getByTestId("ready")).toHaveTextContent("true"));
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-B11: one refused axis must not empty the other two.
+
+   The bootstrap used `Promise.all`, so a single 403 rejected the whole load
+   and the scope picker rendered blank -- with the two lists the caller could
+   read thrown away along with the one they could not. The browser journey had
+   to widen a least-privilege identity with an extra role just to get past it,
+   which is the opposite of what that suite is for.
+--------------------------------------------------------------------------- */
+
+describe("a partly refused scope is still usable", () => {
+  it("keeps the axes the caller may read and names the one they may not", async () => {
+    refuse(ORG_A, "workspaces");
+    renderScope();
+
+    await waitFor(() => expect(screen.getByTestId("ready")).toHaveTextContent("true"));
+    // The readable axis survived...
+    expect(screen.getByTestId("sources")).toHaveTextContent("ds-a");
+    expect(screen.getByTestId("workspaces")).toHaveTextContent("");
+    // ...and the refusal is named rather than silently rendering as "none".
+    expect(screen.getByTestId("error")).toHaveTextContent("workspaces");
+  });
+
+  it("reports an error only when every axis is refused", async () => {
+    refuse(ORG_A, "workspaces", "projects", "datasources");
+    renderScope();
+
+    await waitFor(() => expect(screen.getByTestId("error")).not.toHaveTextContent(""));
+    expect(screen.getByTestId("ready")).toHaveTextContent("false");
+    expect(screen.getByTestId("sources")).toHaveTextContent("");
   });
 });

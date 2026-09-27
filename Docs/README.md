@@ -9,7 +9,7 @@ Atlas understands the enterprise data estate, enforces policy *before* any actio
 
 Two properties make it usable rather than decorative:
 
-- **Every claim about current state is honest.** `60-delivery/00-status.md` says `Pending` where a module does not exist, and `Not run` where a test has not been run.
+- **Every claim about current state is honest.** `60-delivery/00-status.md` is a dated snapshot, and says so: its status vocabulary is Implemented, Partial, Pending, Retest required and Bank decision, tracker section P owns current work status, and the capability register owns dated verification evidence. Where the snapshot and either of those disagree, they win.
 - **Every decision names its revisit trigger.** An ADR with no revisit trigger is dogma, not a decision.
 
 > **Documentation-truth pass, 2026-08-30.** The first property above was not holding. The
@@ -28,7 +28,7 @@ Two properties make it usable rather than decorative:
 
 ## Start here
 
-For the current agent inventory, automation limits, vendor comparison and open release blockers, read the [2026-09-09 critical architecture review](10-architecture/15-agent-architecture-critical-review.md). Its dated findings supersede conflicting agent-count, reviewer-safety and model-call economics claims in older documents. Its status table is the authority on what has since been fixed: four findings are closed in code, seven are fixed but awaiting the measurement or audit their closure criterion also demands, and enterprise-scale capacity (AR-09) is untouched.
+Start with the [September 11 reconciliation](60-delivery/23-review-reconciliation-2026-09-11.md). The [tracker current queue](60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns work status; the [capability register](60-delivery/20-capability-register.md) owns dated verification evidence. Earlier reviews retain rationale and measurements. The [agent architecture review](10-architecture/15-agent-architecture-critical-review.md) supplies safety evidence carried into the current queue.
 
 | If you are… | Read, in order |
 |---|---|
@@ -38,7 +38,9 @@ For the current agent inventory, automation limits, vendor comparison and open r
 | **Reviewing security** | `50-security/01-security-architecture.md` → `50-security/02-threat-model.md` → `50-security/03-ai-safety-controls.md` |
 | **Planning delivery** | `60-delivery/01-roadmap.md` → `60-delivery/03-tracker.md` → `60-delivery/00-status.md` |
 | **Operating the platform** | `40-engineering/07-local-runbook.md` → `10-architecture/09-deployment-topology.md` |
+| **Deploying, or turning something on** | `40-engineering/16-deployment-alignment-and-enablement-runbook.md` → `40-engineering/13-configuration-inventory.md` → `40-engineering/12-notification-delivery-runbook.md` |
 | **Auditing or assessing risk** | `50-security/04-compliance-and-evidence.md` → `60-delivery/00-status.md` |
+| **Presenting, or reviewing in fifteen minutes** | [`walkthrough/index.html`](walkthrough/index.html): architecture, roles and demo users, demo script and readiness, as dated HTML pages |
 
 ## Structure
 
@@ -52,6 +54,7 @@ Docs/
 ├── 40-engineering/    How to build, test, ship, and run it
 ├── 50-security/       Trust model, threats, AI safety, compliance
 ├── 60-delivery/       Status (00), roadmap, backlog, tracker, history
+├── walkthrough/       Dated HTML pack for a quick walk-through and demo
 └── 90-reference/      Glossary, decision index, research sources
 ```
 
@@ -86,7 +89,7 @@ Docs/
 | [01 Principles and invariants](10-architecture/01-principles-and-invariants.md) | **Nine invariants, each with an enforcement point and a test** |
 | [02 System context](10-architecture/02-system-context.md) | Boundary crossings and their trust posture |
 | [03 Logical architecture](10-architecture/03-logical-architecture.md) | Five layers, two primary flows, the latency budget |
-| [04 Module decomposition](10-architecture/04-module-decomposition.md) | **The anti-monolith document** — the 21-module target and its boundaries. **Target, not current state:** 5 of 21 modules exist under `src/atlas/modules/` (corrected 2026-09-06; each has real models, schemas and routes, and each has a guide under `20-modules/domain-guides/`), and the bulk of the working code is still the flat `src/aida/` package. Read alongside the tracker's section A |
+| [04 Module decomposition](10-architecture/04-module-decomposition.md) | **The anti-monolith document** — the 21-module target and its boundaries. **Target, not current state:** 6 of 21 modules exist under `src/atlas/modules/` (corrected 2026-09-20; five have real models, schemas and routes, `profiling` has models and schemas but no routes, and each has a guide under `20-modules/domain-guides/`), and the bulk of the working code is still the flat `src/aida/` package. Read alongside the tracker's section A |
 | [05 Service extraction plan](10-architecture/05-service-extraction-plan.md) | Why not microservices yet, and the triggers that change that |
 | [06 Data architecture](10-architecture/06-data-architecture.md) | Stores, entities, versioning, projection, retention, partitioning |
 | [07 Event and messaging model](10-architecture/07-event-and-messaging-model.md) | Temporal vs. Kafka, the outbox, envelope, topics |
@@ -95,8 +98,17 @@ Docs/
 | [10 Performance and scale model](10-architecture/10-performance-and-scale-model.md) | Every target, its test, and its current measurement status |
 | [11 Capacity and cost model](10-architecture/11-capacity-and-cost-model.md) | Workload isolation, sizing tiers, backpressure, cost governance, metrics |
 | [12 Runtime sequences](10-architecture/12-runtime-sequences.md) | How the modules compose at runtime, end to end |
+| [13 Connection pool and worker budgets](10-architecture/13-connection-pool-and-worker-budgets.md) | Connection-pool arithmetic per process and per topology, the shared-sweep (tenant fairness) budgets, and how to measure both. A documentation-and-measurement page: no behaviour depends on it |
 | [14 Architecture map](10-architecture/14-generated-architecture-map.md) | **Generated, not drawn.** The module graph aggregated to groups, what each of the five processes reaches, the bounded contexts, and the import-linter contracts actually enforced |
-| [ADR register](10-architecture/adr/README.md) | Seventeen accepted decisions, one superseded (0017 → 0018) |
+| [16 Graph exploration and query review](10-architecture/16-graph-query-review.md) | **Dated evidence, 2026-09-10:** what the unified-lineage and graph-exploration pass implemented, the ontology status, and the review items it says not to overclaim. Not a queue |
+| [17 Column description paths](10-architecture/17-column-description-paths.md) | Where a column description comes from (catalog-evidence drafting, model-assisted drafting), which write paths a user can reach, Excel save-back, and analyst versus source-level placement. A call-graph trace, not a module inventory |
+| [18 Agent capability enforcement matrix](10-architecture/18-agent-capability-enforcement-matrix.md) | For every surface a non-human principal can reach, which parts of an `AgentContract` (tools, context products, write lanes, token and wall-clock caps, kill switch) are actually checked, and where (AR-06) |
+| [19 Embeddings design](10-architecture/19-embeddings-design.md) | **Dated snapshot, 2026-09-12:** what exists for embeddings, why they re-rank rather than discover, the gap that bites a deployment first, and the order of work |
+| [20 Database footprint and agent context](10-architecture/20-database-footprint-and-agent-context.md) | **Proposal, 2026-09-14:** source-specific object discovery, package/routine/code mapping, dbt and ETL flows, evidence-backed context, governed tool candidates, current-code gaps and delivery slices |
+| [21 GraphQL, OKF and workspace design](10-architecture/21-graphql-okf-and-workspace-design.md) | Design and delivery review for items 13–17: what GraphQL queries and how data executes, OKF object documents and bundles, navigation and answer-first layouts, and stewardship merge workflows. The tracker remains the status authority |
+| [22 Context enrichment and review workspace](10-architecture/22-context-enrichment-and-review-workspace.md) | **Assessment, 2026-09-17:** all 22 requests mapped to their current foundation, proposed change and delivery owner; profiling evidence, provenance and ontology, the shared SQL workspace, and review at estate scale. Proposes acceptance criteria; claims nothing shipped |
+| [23 Stewardship action map](10-architecture/23-stewardship-action-map.md) | **Dated evidence, 2026-09-19:** every action the UI offers on the six stewardship destinations mapped to its API route, API roles, UI gate and design home, plus the deep links before and after the slice, so that consolidating screens does not silently drop one. Not a queue |
+| [ADR register](10-architecture/adr/README.md) | 30 records as of 2026-09-21: 23 accepted, 6 proposed (0023, 0025–0029), one superseded (0017 → 0018) |
 
 ### 20-modules — The bounded contexts
 
@@ -141,6 +153,13 @@ Full index with reading orders, **and a per-module map from bounded context to t
 | [08 Experience shell rebuild plan](40-engineering/08-experience-shell-rebuild-plan.md) | The `ui-next/` rebuild, its phases and its exit criteria |
 | [09 Compatibility shim register](40-engineering/09-compatibility-shim-register.md) | **Generated caller counts, hand-written removal conditions.** Every re-export shim, what replaces it, who still calls it, and what must be true before it can go (review D03) |
 | [10 Bounded-context relocation procedure](40-engineering/10-bounded-context-relocation-procedure.md) | The repeatable steps for moving one context's models and DTOs out of `models.py`/`schemas.py`, the four things it may not change and how each is proved, and what went wrong the last time (review R04) |
+| [11 Reviewer-agent oversight runbook](40-engineering/11-reviewer-agent-oversight-runbook.md) | Operating the reviewer agent, and why it is refused in production |
+| [12 Notification delivery runbook](40-engineering/12-notification-delivery-runbook.md) | **Maintained in place, not a snapshot.** Reading the delivery queue, and the live-infrastructure procedure for verifying a real Slack / Teams / SIEM destination |
+| [13 Configuration inventory](40-engineering/13-configuration-inventory.md) | **Generated from the `Settings` class.** Every setting, its default, how many places read it, and the recorded decision for each one that ships off |
+| [14 Acceptance testing guide](40-engineering/14-acceptance-testing-guide.md) | What an acceptance run covers, and what it cannot |
+| [15 End-to-end setup and feature guide](40-engineering/15-end-to-end-setup-and-feature-guide.md) | Bringing a stack up from nothing, seeding an estate, and walking the product |
+| [16 Deployment alignment and enablement runbook](40-engineering/16-deployment-alignment-and-enablement-runbook.md) | **Maintained in place, not a snapshot.** Deploying the reviewed commit (the profile flags and the migration that cannot be separated from it), verifying deployment parity afterwards, and the ordered, consequence-by-consequence procedure for enabling the maintenance loop, discovery cadence, the authorization posture and outbound delivery (review F03/F04/F05) |
+| [17 OKF import enablement acceptance](40-engineering/17-okf-import-enablement-acceptance.md) | **Status 2026-09-19.** OKF import ships off; this is the checklist for the run on a deployed stack by the person who owns the decision to switch it on — preconditions, how to enable, and the journey with a pass condition per step. Nothing in it claims that run has happened |
 
 ### 50-security — Trust
 
@@ -155,10 +174,10 @@ Full index with reading orders, **and a per-module map from bounded context to t
 
 | Document | Contents |
 |---|---|
-| [00 Delivery status](60-delivery/00-status.md) | **Start here.** The single answer to "where are we": capability matrix, invariant status, open gaps, and the decisions waiting on a person |
+| [00 Delivery status](60-delivery/00-status.md) | **A dated snapshot** (last confirmed 2026-09-20), not the status authority: capability matrix, invariant status, open gaps, and the decisions waiting on a person, as they stood then. Current status lives in tracker section P; dated implementation and verification evidence lives in the [capability register](60-delivery/20-capability-register.md) |
 | [01 Roadmap](60-delivery/01-roadmap.md) | Phases 0 and A–E, with exit criteria |
 | [02 Epic backlog](60-delivery/02-epic-backlog.md) | Epics with verifiable acceptance criteria |
-| [03 Tracker](60-delivery/03-tracker.md) | Item-level open work: module IDs, the 2026-08 review's C/N/E items, drill currency, bank decisions |
+| [03 Tracker](60-delivery/03-tracker.md) | **Section [P, "Current execution queue"](60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11), is the only current status authority.** Item-level open work: module IDs, the 2026-08 review's C/N/E items, drill currency, bank decisions |
 | [06 Accomplishment log](60-delivery/06-accomplishment-log.md) | Append-only ledger of verified outcomes |
 | [07 Connector implementation backlog](60-delivery/07-connector-implementation-backlog.md) | Code-level backlog for framework hardening, Oracle, and BigQuery |
 
@@ -186,12 +205,12 @@ If you read nothing else:
 | Document | Update when |
 |---|---|
 | `60-delivery/03-tracker.md` | Every increment |
-| `60-delivery/00-status.md` | Every increment |
+| `60-delivery/20-capability-register.md` | Whenever a capability is re-measured; every row carries its date |
 | `60-delivery/06-accomplishment-log.md` | Append on every material outcome — never edit |
 | `20-modules/NN` | When that module's capability or open work changes |
 | `10-architecture/adr/` | New ADR for a new decision; **never edit an accepted one** |
 | `00-product/03,04,05` | Quarterly, or after a major vendor announcement |
 | `30-contracts/04-event-catalog.md` | Before publishing any new event |
-| `60-delivery/00-status.md` | When a gap opens, closes, or changes its safe default |
+| `60-delivery/00-status.md` | A dated snapshot (last confirmed 2026-09-20), not updated per increment |
 
-**The rule that keeps this honest.** A document that claims a capability the status matrix does not support is a defect. When they disagree, the status matrix wins and the other document gets corrected.
+**The rule that keeps this honest.** A document that claims a capability the [capability register](60-delivery/20-capability-register.md)'s dated evidence does not support is a defect. When they disagree about what is implemented or verified, the register wins; when anything disagrees about what is open or done, tracker section P wins. Either way the other document gets corrected. `60-delivery/00-status.md` is a dated snapshot, not a tie-breaker.

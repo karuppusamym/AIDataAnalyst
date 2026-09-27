@@ -40,20 +40,27 @@ connector_certification_run, certification_check_result
 connector_agent (registration, mTLS identity, heartbeat)
 ```
 
+> **Implementation status (2026-09-20).** There is no per-module database schema: the models in `src/atlas/modules/connectivity/models.py` declare no `schema=` and live in the one shared PostgreSQL schema, so "Schema `connectivity`" in the header names the bounded context, not a database schema. Two entities above are tables: `datasource` (which carries `connector_type`, `dialect`, `network_zone`, `credential_reference`, `status` and the declared `capabilities` JSON) and `connector_certification_run` (its per-check results are a JSON `checks` column, not a `certification_check_result` table). `datasource_connection`, `connector_implementation`, `connector_capability`, `connector_version` and `connector_agent` are not tables: implementation, version and capability facts are code (`ConnectorRegistry` in `src/aida/connectors/registry.py`), and there is no connector-agent entity at all.
+
 ## 6. Connector interface
 
 ```text
-list_catalogs()            list_schemas()          list_tables()
-list_columns()             get_constraints()       get_indexes()
-get_partitions()           get_table_statistics()  get_view_definition()
-get_query_history()        describe_capabilities()
-# execution surface — callable ONLY by module 16
-_execute_read(...)         _explain(...)           _cancel(...)
+# Connector (src/aida/connectors/base.py) — structured arguments only, no SQL
+capabilities (property)    test_connection()       discover()
+scope_discovery(...)       discover_streaming()    count_invisible_objects()
+profile_table(...)         profile_column_values(...)
+get_query_history(...)
+# execution surface (SqlExecutor, src/aida/connectors/sql_execution.py) — callable ONLY by module 16
+estimate_read_query(sql)   execute_read_query(sql)
 ```
+
+Catalogs, schemas, tables, columns, constraints, indexes, partitions, views, routines and grants come back from one `discover()` call as a `DiscoveredCatalog` graph rather than from per-object list methods. `discover_streaming`, `profile_column_values` and `get_query_history` are optional: the base class declines with a named error unless an adapter overrides them. No connector implements a cancel operation (tracker QG-4).
 
 Capability flags are **derived from certification results**, never hand-declared.
 
 ## 7. Public interface
+
+> **Implementation status (2026-09-20).** The signatures below are the design target. `src/atlas/modules/connectivity/api.py` today only re-exports the module's `router`; `register_datasource`, `test_connection`, `get_capabilities`, `run_certification`, `get_capability_matrix` and `acquire_connection` do not exist as functions. The behaviour lives in the HTTP handlers in `src/atlas/modules/connectivity/router.py` and in `aida.connectors.registry.connector_registry`.
 
 ```python
 # connectivity/api.py
@@ -70,15 +77,22 @@ def acquire_connection(datasource_id: DatasourceId) -> ConnectionHandle   # gate
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/v1/connectors/capability-matrix` | Honest implementation, maturity, transport, version inventory |
-| POST | `/v1/datasources` | Register |
-| POST | `/v1/datasources/{id}/test-connection` | Verify |
-| POST | `/v1/datasources/{id}/connector-certifications` | Run certification |
-| GET | `/v1/datasources/{id}/connector-certifications` | History |
-| POST | `/v1/connector-agents` | Register a source-side agent |
+| POST | `/v1/projects/{project_id}/datasources` | Register |
+| POST | `/v1/projects/{project_id}/datasources/bulk-onboard` | Register many at once |
+| POST | `/v1/datasources/{datasource_id}/test` | Verify: opens the connection, sets `CONNECTION_VERIFIED` (unless the source is already `ACTIVE`) or, on failure, `CONNECTION_FAILED` with a 424, and refreshes the declared capabilities |
+| POST | `/v1/datasources/{datasource_id}/connector-certifications` | Run certification |
+| GET | `/v1/datasources/{datasource_id}/connector-certifications` | History |
+| GET | `/v1/datasources/{datasource_id}/health` | Per-connector health score (tracker CN-7) |
+
+Route shapes are read from `Docs/90-reference/openapi-baseline.json`. `POST /v1/datasources` and `POST /v1/datasources/{id}/test-connection` were the original design names and do not exist.
+
+> **Implementation status (2026-09-20).** `POST /v1/connector-agents` (register a source-side agent) is design only: there is no connector-agent route, model or heartbeat in `src/`, so restricted-zone sources cannot use an agent today (CN-4, Phase B).
 
 ## 9. Events
 
-Emits `datasource.registered`, `datasource.connection_verified`, `datasource.disabled`, `certification.completed`, `connector_agent.registered`, `connector_agent.heartbeat_lost`.
+Emits `datasource.registered.v1`, `datasource.updated.v1`, `scan_policy.updated.v1` and `connector.certification.completed.v1` (`src/atlas/modules/connectivity/router.py`, `src/atlas/modules/ingestion/router.py`). The connection test writes an audit event (`datasource.test`) rather than an outbox event.
+
+> **Implementation status (2026-09-20).** `datasource.connection_verified`, `datasource.disabled`, `connector_agent.registered` and `connector_agent.heartbeat_lost` are design targets that no code emits. Their catalog rows stay in [04-event-catalog.md](../30-contracts/04-event-catalog.md) as target names.
 
 ## 10. Dependencies
 
@@ -105,7 +119,7 @@ Certification v1 records six deterministic control-plane checks: implementation 
 | Oracle | `BETA` — native async adapter (`python-oracledb` thin mode), `ALL_TAB_COLUMNS`/`ALL_CONSTRAINTS` discovery, real session-ID capture, LOB-aware bounded profiling, compose fixture. `explain=False` (least-privilege `PLAN_TABLE` path uncertified). Live container verification outstanding | Live container verification, certified EXPLAIN path, delegated identity |
 | BigQuery | `BETA` — discovery via region-qualified INFORMATION_SCHEMA (primary keys; foreign keys honestly omitted, uncertified), dry-run byte estimation gated by a dedicated gateway byte budget, bounded profiling, governed query. Live GCP verification outstanding | Live project verification, multi-region projects, delegated/workload-identity certification |
 | Snowflake | `BETA` — multi-database INFORMATION_SCHEMA discovery, partition-pruned EXPLAIN-JSON cost estimate, approximate-distinct bounded profiling, real `sfqid` capture. Live account verification outstanding | Live account verification, certification, version fixtures |
-| Databricks | `PLANNED` — no adapter code | Phase A |
+| Databricks | `BETA` — Unity Catalog discovery, `EXPLAIN COST` estimate, bounded profiling, PAT auth only; fixture-certified, never run against a live workspace; view/procedure lineage parsing refused (`src/aida/connectors/databricks.py`) | Live workspace verification, delegated identity, lineage parser dialect |
 | Teradata, Db2 | `PLANNED` | Phase B |
 | Files / APIs / BI | `PLANNED` | Phase B |
 | Connector agents | Not implemented | Phase B — required for restricted zones (whitespace W9) |
@@ -116,11 +130,11 @@ Certification v1 records six deterministic control-plane checks: implementation 
 |---|---|---|
 | CN-1 | Oracle and BigQuery adapters to certified state (code done; live verification outstanding) | P0 |
 | CN-2a | Snowflake adapter to certified state (code done; live verification outstanding) | P0 |
-| CN-2b | Databricks adapter (no code yet) | P0 |
+| CN-2b | Databricks adapter to certified state (code done and registered `BETA`; live workspace verification outstanding) | P0 |
 | CN-3 | Executable vendor/version certification fixtures | P0 |
 | CN-4 | Source-side connector agent with mTLS | P1 |
 | CN-5 | Delegated / read-only source identities | P0 |
 | CN-6 | Public connector SDK + docs (whitespace W6) | P1 |
-| CN-7 | Per-connector health scoring in the fleet view | P1 |
+| CN-7 | Per-connector health scoring in the fleet view (delivered 2026-09-01: `GET /v1/datasources/{datasource_id}/health` and `GET /v1/organizations/{organization_id}/fleet-health`; tracker CN-7 DONE) | P1 |
 | CN-8 | Index and partition extraction across adapters | P1 |
-| CN-9 | `Connector.get_query_history()` for Snowflake/BigQuery/Databricks -- the input `aida.query_history_miner` (AT-12) already consumes but that no connector produces yet. Certification (§11) proves a live end-to-end call before `query_history` flips from `False` (AT-D3) | P1 |
+| CN-9 | `Connector.get_query_history()` for Snowflake/BigQuery/Databricks -- the input `aida.query_history_miner` (AT-12) consumes. BigQuery (`JOBS_BY_PROJECT`) and Snowflake (`ACCOUNT_USAGE.QUERY_HISTORY`) implement it and are unit-tested against fixtures; Databricks does not. Nothing has called it against a live account, so `query_history` stays `False` for every connector: certification (§11) must prove a live end-to-end call before it flips (AT-D3) | P1 |

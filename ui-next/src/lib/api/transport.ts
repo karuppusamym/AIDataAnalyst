@@ -26,9 +26,9 @@
    `../lib/api`, and every name it used to export it still exports.
 --------------------------------------------------------------------------- */
 
-import { identityHeaders as configuredIdentityHeaders, USE_FIXTURES } from "../appConfig";
+import { identityHeaders as configuredIdentityHeaders } from "../appConfig";
 import { authorizationHeaders } from "../authSession";
-import { decodeError, request, setHeaderProvider } from "../http";
+import { request, setHeaderProvider } from "../http";
 import { getCurrentOrgId } from "../org-context";
 
 export { ApiError, requestBlob } from "../http";
@@ -80,7 +80,18 @@ export async function deleteRequest(path: string, signal?: AbortSignal): Promise
 }
 
 /**
- * The demo-data adapter (R05).
+ * Everything `lib/fixtures.ts` exports, as a type only.
+ *
+ * `typeof import(...)` is erased at compile time, so naming the demo estate
+ * here costs the bundle nothing: the demo arms below are still checked against
+ * the real generators' signatures without a single module in this client
+ * holding a static import of them.
+ */
+export type DemoData = typeof import("../fixtures");
+
+/**
+ * The demo-data adapter (R05), and the client's one door to the fixtures
+ * (R11-X1).
  *
  * `if (USE_FIXTURES) return makeFixtureX(); return get(...)` was repeated in
  * every function in the client. Stated once, the rule is: in demo mode a
@@ -89,14 +100,60 @@ export async function deleteRequest(path: string, signal?: AbortSignal): Promise
  * answer and the live call as two halves of one decision instead of an `if`
  * they have to re-read in every function.
  *
+ * WHY THE DEMO ARM IS HANDED ITS FIXTURES rather than closing over them:
+ * `lib/fixtures.ts` is ~189 kB of minified demo estate -- a fifth of all the
+ * JavaScript this client used to ship -- and it reached production users
+ * because fifteen API modules imported the generators statically, every one of
+ * them a module a live build loads. A static import is unconditional
+ * -- there is no build in which the bundler may drop it. Routing every demo
+ * answer through one dynamic `import()` here leaves exactly one reference to
+ * the module in the whole client, in one branch, so:
+ *
+ *   - a production build folds the condition below to `live()` and Rollup
+ *     drops `lib/fixtures.ts` from the graph entirely; and
+ *   - a demo build emits it as its own chunk, fetched the first time a screen
+ *     actually asks for data rather than preloaded with the shell.
+ *
+ * The condition reads `import.meta.env` directly instead of `appConfig`'s
+ * `USE_FIXTURES`, which holds the identical comparison. That is deliberate and
+ * load-bearing: `appConfig` lands in a different chunk, and Rollup cannot fold
+ * a constant it has to reach across a chunk boundary to read -- an imported
+ * flag would leave this `import()` live and the fixture chunk shipped. The one
+ * source of truth is the literal `vite.config.ts` defines; both sites read it.
+ *
  * A handful of functions keep an inline branch, and each is one where the two
  * arms are not the same shape: the demo arm refuses (a write with no fixture
  * to return), or the branch sits mid-function after work both arms share.
  * Forcing those into this adapter would restructure the function rather than
- * name its decision.
+ * name its decision. Those branches answer from `USE_FIXTURES` and touch no
+ * fixture, so they cost a live build nothing.
  */
-export function demoOr<T>(demo: () => Promise<T>, live: () => Promise<T>): Promise<T> {
-  return USE_FIXTURES ? demo() : live();
+export function demoOr<T>(
+  demo: (fixtures: DemoData) => Promise<T>,
+  live: () => Promise<T>,
+): Promise<T> {
+  return import.meta.env.VITE_USE_FIXTURES === "0"
+    ? live()
+    : import("../fixtures").then(demo);
+}
+
+/**
+ * What a module's own demo-store loader answers in a build that carries no demo data.
+ *
+ * `demoOr` folds away `lib/fixtures.ts`, but not a SECOND demo module that an API module
+ * loads inside its demo arm (`studioAuthoringDemo`, `ownershipFixtures`, ...): the arm is a
+ * function handed to `demoOr`, and Rollup keeps a function it cannot prove is never called,
+ * with the `import()` inside it -- so each of those modules was emitted as a chunk of a live
+ * build that nothing loads. The loaders therefore test the same literal themselves, in their
+ * own module, where it folds:
+ *
+ *     const demo = () => import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../x");
+ *
+ * In a live build the `import()` is in a dead branch and the chunk is not emitted. This
+ * branch is never taken at run time either: in a live build `demoOr` never calls a demo arm.
+ */
+export function noDemoData(): Promise<never> {
+  return Promise.reject(new Error("This build carries no demo data."));
 }
 
 /**
@@ -125,24 +182,8 @@ export function requestWithInit<T>(
 }
 
 /**
- * The one raw-byte upload in this client.
- *
- * `request` JSON-stringifies its body, so a `File` cannot go through it: an
- * octet-stream upload has to hand `fetch` the `File` itself. That is a real
- * gap in `http.ts`, not a licence for a second transport -- so the exception
- * lives here, once, and uses the same header provider and the same
- * `decodeError` as every other verb. `./columnDocumentation.ts` hand-rolled
- * five `fetch` calls, of which this is the only one that has to: three were
- * plain JSON POSTs and one was a download `requestBlob` already covers. Each
- * carried a private decoder that understood only `{"detail": ...}`, so the
- * error code, correlation id and 422 field errors F14 preserves were dropped
- * on all five.
- *
- * KNOWN GAP, deliberately not hidden: an outcome here does not reach
- * `observeRequests`, because `http.ts` does not export its notifier. So a
- * failed workbook upload is invisible to the shell's connection state (F13).
- * Closing it means a raw-body verb in `http.ts`; this module cannot fix it
- * from the outside.
+ * Upload bytes through the same identity, error decoder and outcome observers
+ * as JSON requests. Passing rawBody preserves the File without JSON encoding.
  */
 export async function requestRawBody<T>(
   method: "POST" | "PUT",
@@ -151,13 +192,9 @@ export async function requestRawBody<T>(
   contentType: string,
   signal?: AbortSignal,
 ): Promise<T> {
-  const res = await fetch(path, {
-    method,
+  return request<T>(method, path, {
     signal,
-    body,
-    headers: { Accept: "application/json", "Content-Type": contentType, ...requestHeaders() },
-    credentials: "same-origin",
+    rawBody: body,
+    headers: { "Content-Type": contentType },
   });
-  if (!res.ok) throw await decodeError(res);
-  return (await res.json()) as T;
 }

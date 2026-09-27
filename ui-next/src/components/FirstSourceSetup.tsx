@@ -5,7 +5,7 @@ import {
   fetchAgentRuns,
   fetchCatalogRows,
   fetchDatasourceAnalysisRuns,
-  fetchOrgDatasources,
+  listOrgDatasources,
   fetchOrgWorkspaces,
 } from "../lib/api";
 import { ApiError } from "../lib/http";
@@ -427,7 +427,7 @@ export function FirstSourceSetup({
   const datasources = useAsyncResource(
     (signal) =>
       readSignal(async () => {
-        const page = await fetchOrgDatasources(organizationId, signal);
+        const page = await listOrgDatasources(organizationId, signal);
         return page.items as readonly DataSourceRead[];
       }),
     [organizationId],

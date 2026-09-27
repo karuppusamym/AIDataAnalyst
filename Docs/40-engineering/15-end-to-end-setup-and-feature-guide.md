@@ -1,0 +1,632 @@
+# End-to-end setup and feature guide
+
+*Written 2026-09-12 against the Docker Desktop stack on this machine. Every
+number and command below was run, not recalled. A dated snapshot; status lives
+in [tracker section P](../60-delivery/03-tracker.md).*
+
+This is the front door. It takes a machine with Docker Desktop and nothing
+else, and walks every capability the platform has — including the agents and
+what to configure for each.
+
+**Three documents, and what each is for.** Use this one to set up and to see
+the product work. Use the [local runbook](07-local-runbook.md) for day-to-day
+operation and failure triage. Use the
+[acceptance testing guide](14-acceptance-testing-guide.md) to run the test and
+gate layers and to record findings. This guide does not repeat either of them;
+where they own a procedure, it links.
+
+---
+
+## 1. Setup, in five commands
+
+```bash
+docker compose --profile full up -d --build
+./.venv/Scripts/alembic.exe upgrade head
+AIDA_ENVIRONMENT=development ./.venv/Scripts/python.exe scripts/seed_sample_estate.py
+./.venv/Scripts/python.exe scripts/seed_model_route.py --route-key gemini-bank-sql \
+  --provider GOOGLE_GEMINI --model-id gemini-3.6-flash --credential env://GEMINI_API_KEY
+./.venv/Scripts/python.exe scripts/verify_end_to_end.py --json scratch/e2e.json
+```
+
+The last command is the one that tells you whether it worked: 17 HTTP checks
+against the running deployment. It verifies and never fixes, so a failure is a
+finding about the deployment rather than about the script.
+
+`.env` at the repository root holds the configuration. It is gitignored; keep
+it that way and never paste a key into a file git tracks. Section 3 says what
+goes in it.
+
+---
+
+## 2. Why a fresh `up -d` looks half-empty
+
+**Read this before concluding anything was removed.** `compose.yaml` defines
+**19 services and 7 volumes**, and a plain `docker compose up -d` starts
+**ten** of the nineteen. The other nine are behind Compose *profiles*, so they
+do not start unless you ask for them:
+
+| Profile | Services it starts |
+|---|---|
+| *(default — no flag)* | `postgres`, `temporal`, `sample-source`, `sample-mssql-source`, `sample-mssql-source-init`, `migrate`, `api`, `ui-next`, `metadata-worker`, `fleet-scheduler` |
+| `cache` | `redis` |
+| `archive` | `minio` |
+| `events` | `redpanda`, `redpanda-console`, `outbox-publisher` |
+| `graph` | `neo4j`, `redpanda`, `outbox-publisher`, `graph-projector` |
+| `temporal-ui` | `temporal-ui` |
+| `seed` | `seed` |
+| `full` | every one of the above except `seed` |
+
+So `--profile full` is what you want while testing. Naming a service
+explicitly also enables its profile, so `docker compose up -d redis` works
+without the flag.
+
+**Three services are meant to exit.** `migrate` runs Alembic and stops.
+`sample-mssql-source-init` seeds the SQL Server fixture and stops.
+`seed` is opt-in. All three exiting `0` is success, not failure — `docker
+compose ps` hides them because it lists running containers only. Use
+`docker compose ps -a` to see them.
+
+### Redpanda, MinIO, Redis and Neo4j are used, and here is the evidence
+
+The question is fair — running is not the same as used — so this was measured
+rather than assumed, on 2026-09-12:
+
+| Service | What it holds | Measured |
+|---|---|---|
+| Redpanda | `aida.platform.events.v1`, the domain event log | **465 events**; the newest two were `query.execution.completed.v1` and `agent.analysis.completed.v1` from that afternoon's Ask journey |
+| Neo4j | the lineage and catalog graph | 196 `Column`, 43 `Constraint`, 30 `UnifiedLineageNode`, 27 `Table`, 25 `Schema`, 12 `Catalog` |
+| MinIO | the audit archive | **264 per-organization prefixes** in `aida-audit-archive-objectlock-test`, last written the same afternoon |
+| Redis | MCP budget counters and the lineage cache | 26,890 commands served; **0 keys at rest**, which is correct — the keys are short-TTL counters, so an idle stack holds none |
+
+Redis holding nothing is the one that looks alarming and is not. If you want
+to see keys, enable `AIDA_MCP_BUDGET_ENABLED=true` and make a few agent calls.
+
+### Ports
+
+| Service | URL |
+|---|---|
+| API | http://localhost:8000 (`/docs` for the OpenAPI UI) |
+| UI | http://localhost:3001 |
+| Redpanda console | http://localhost:8081 |
+| Temporal UI | http://localhost:8080 |
+| MinIO console | http://localhost:9001 |
+| Neo4j browser | http://localhost:7474 |
+| PostgreSQL | `localhost:5432` |
+| Sample Postgres source | `localhost:55432` |
+| Sample SQL Server source | `localhost:14330` |
+
+---
+
+## 3. Configuration
+
+### 3.1 The minimum `.env`
+
+```
+AIDA_ENVIRONMENT=development
+GEMINI_API_KEY=<your key>
+
+# Generation
+AIDA_MODEL_GENERATION_ENABLED=true
+AIDA_MODEL_ROUTE=gemini-bank-sql
+AIDA_MODEL_ROUTE_FALLBACKS=openai-bank-sql
+
+# Embeddings and the vector re-ranking stage
+AIDA_EMBEDDING_PROVIDER=gemini
+AIDA_EMBEDDING_CREDENTIAL_REFERENCE=env://GEMINI_API_KEY
+AIDA_EMBEDDING_MODEL_ID=gemini-embedding-001
+AIDA_EMBEDDING_DIMENSIONS=768
+```
+
+`env://` is a development-only credential scheme and the platform refuses it
+outright under `AIDA_ENVIRONMENT=production`, so this cannot follow the
+repository into a deployment.
+
+### 3.2 Fifteen of twenty-four feature flags ship off
+
+This is the other reason a fresh install looks like it does less than it does.
+Nothing here is broken or unfinished by virtue of being off — off is the
+shipped posture for anything that talks to the outside world or spends money.
+
+| Flag | Default | What turning it on gets you |
+|---|---|---|
+| `AIDA_MODEL_GENERATION_ENABLED` | off | Ask answers by model generation when no governed tool matches |
+| `AIDA_DELIVERY_WORKER_ENABLED` | off | notifications actually leave the process (otherwise they queue) |
+| `AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED` | off | review and approval events produce notifications to deliver |
+| `AIDA_MCP_BUDGET_ENABLED` | off | per-agent call budgets, counted in Redis |
+| `AIDA_GRAPHQL_BUDGET_ENABLED` | off | per-caller GraphQL request and execution budgets, counted in Redis; a refused request answers 429 `RATE_LIMITED` |
+| `AIDA_AGENT_QUERY_MEMORY_ENABLED` | off | Ask reuses prior authorized query shapes |
+| `AIDA_LINEAGE_CACHE_ENABLED` | off | lineage reads served from Redis |
+| `AIDA_LINEAGE_NEO4J_READ_ENABLED` | off | lineage reads served from the graph rather than SQL |
+| `AIDA_PRINCIPAL_RECONCILIATION_ENABLED` | off | the scheduler reconciles principals against the IdP |
+| `AIDA_QUALITY_CERTIFICATION_EXPIRY_ENABLED` | off | certifications expire and warn |
+| `AIDA_QUALITY_SEASONAL_THRESHOLDS_ENABLED` | off | seasonal DQ thresholds |
+| `AIDA_QUALITY_SEASONAL_MONTH_END_ENABLED` | off | month-end DQ variance handling |
+| `AIDA_DQ_ITSM_WEBHOOK_URL` | unset | DQ incidents raise ITSM tickets once it is set |
+| `AIDA_AUDIT_ARCHIVE_LEGAL_HOLD_ENABLED` | off | object-lock legal hold on archived audit |
+| `AIDA_REVIEWER_AGENT_ENABLED` | off | **leave it off.** See section 5.5 |
+| `AIDA_REVIEWER_AGENT_SUSPENDED` | off | the kill switch's resting position |
+
+The nine that ship **on**: `audit_archive`, `business_rollup_rebuild`,
+`model_route_health`, `otel_metrics`, `otel_tracing`, `reaper`, `siem`,
+`temporal`, `vector_index_rebuild`.
+
+To see everything except the reviewer agent, add this block to `.env` and
+recreate `api` and `fleet-scheduler`:
+
+```
+AIDA_DELIVERY_WORKER_ENABLED=true
+AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED=true
+AIDA_MCP_BUDGET_ENABLED=true
+AIDA_AGENT_QUERY_MEMORY_ENABLED=true
+AIDA_LINEAGE_CACHE_ENABLED=true
+AIDA_LINEAGE_NEO4J_READ_ENABLED=true
+AIDA_PRINCIPAL_RECONCILIATION_ENABLED=true
+AIDA_QUALITY_CERTIFICATION_EXPIRY_ENABLED=true
+```
+
+```bash
+docker compose up -d api fleet-scheduler
+```
+
+**A running container keeps the image and environment it started with.** An
+edit to `.env` does nothing until you recreate the container. This has bitten twice: a stack
+ten hours old silently lacked a whole feature's code and every embedding
+variable, while looking perfectly healthy.
+
+**If you are on a build from before 2026-09-12, none of that worked.**
+`compose.yaml` had no `env_file` and each app service declared an explicit
+list of about thirty-five variables, so a setting reached the container only
+if it happened to be on that list. Of the fifteen flags above, five were:
+generation, the MCP budget, both lineage flags and the vector rebuild.
+`AIDA_DELIVERY_WORKER_ENABLED`, `AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED`, the
+Slack and Teams webhook URLs, the reviewer-agent controls and **every task
+agent's interval** were not, so setting them in `.env` did nothing at all
+while the configuration looked perfectly correct. Found the hard way, trying
+to produce a single delivery attempt. Every app service now reads `.env`, with
+the container-internal addresses still pinned in `compose.yaml` so a
+host-side `.env` cannot redirect a container at localhost -- and
+`tests/test_compose_environment.py` fails if one of them stops being pinned.
+
+### 3.3 A model route is a governed object, not a setting
+
+`AIDA_MODEL_ROUTE` names a route that must exist and be APPROVED in the
+database, through maker-checker by two different identities:
+
+```bash
+./.venv/Scripts/python.exe scripts/seed_model_route.py --route-key gemini-bank-sql \
+  --provider GOOGLE_GEMINI --model-id gemini-3.6-flash --credential env://GEMINI_API_KEY
+```
+
+It asks the provider whether it serves that model before drafting anything.
+That pre-flight exists because it was missed once: a route was approved for
+`gemini-2.0-flash`, which Google had retired, and it looked entirely healthy
+while every generated answer failed with a 404 that pointed at nothing.
+
+- `--same-identity` shows the maker-checker control refusing a self-approval.
+- `--new-version` supersedes a route; the old version stays SUPERSEDED with
+  its approval intact.
+
+---
+
+## 4. Seed the estate
+
+```bash
+AIDA_ENVIRONMENT=development ./.venv/Scripts/python.exe scripts/seed_sample_estate.py
+```
+
+This registers three sample datasources across two PostgreSQL databases and
+SQL Server, runs the platform's own connector discovery against them, requests
+and approves cross-boundary grants, and publishes one parameterised governed
+tool through draft → submit → independent approval. Every decision is taken by
+a second identity from the one that requested it, because the API enforces
+that. Safe to re-run.
+
+It produces 19 catalog objects as of 2026-09-20 — 15 base tables, 3 views and
+1 materialized view across the three datasources. **Nothing in this guide says
+anything about scale** — the estate is a fixture, not a benchmark.
+
+---
+
+## 5. Walk the capabilities
+
+Open http://localhost:3001. Switch the organization in the scope picker to
+**Northwind Retail Bank (sample)** — the shell may default to a leftover
+verification organization.
+
+### 5.1 Catalog and discovery
+
+- [ ] **Sources** lists the three seeded datasources with connection state.
+- [ ] **Catalog** lists discovered tables and columns. These came from the
+      platform's own connector discovery, not from a fixture file.
+- [ ] Open a column. Classification, ownership and description are separate
+      facts with separate lifecycles — a blank description never means
+      "delete", it means nobody has published one.
+- [ ] **Lineage** has three views: Explain (narrated, one datasource), Graph
+      (merged foreign-key, dbt, OpenLineage, view and procedure edges;
+      crossing datasources needs a grant per read) and Impact. The old
+      `#/unified-lineage` link opens Graph.
+
+### 5.2 Governance: maker-checker
+
+The invariant worth testing by hand is that nobody approves their own work.
+
+- [ ] Propose a description change. Submit it.
+- [ ] Try to approve it as the same identity. It must refuse, naming why: the
+      review queue shows "You proposed this change. Another reviewer must
+      approve or reject it." in place of an Approve button, and the server
+      answers a self-approval with 409.
+- [ ] Watch a second identity decide. Every UI action in the default stack is
+      performed by one principal, `local-ui-admin`; the persona dropdown does
+      not change it. So approve a proposal raised by another principal (a task
+      agent's, once one is running — 5.4), or run one UI per identity
+      (`scripts/demo-users.ps1`, see "Running several users at once" at the
+      end of section 7), or use the OIDC overlay and sign in as two subjects.
+      The decision records both identities.
+- [ ] **Review queues** show pending items with their evidence.
+
+### 5.3 Ask — the interactive agent
+
+Go to Ask Atlas and ask: **"Which accounts are booked at a branch?"**
+
+- [ ] It **refuses, and the refusal names the input it needs** — a form appears
+      asking for `branch_code`. A refusal that does not say what is missing is
+      a failure.
+- [ ] The status badge stays **CONNECTED**. A governed refusal is an answer,
+      not a broken connection.
+- [ ] Answer `BR-101` and submit. You get governed rows, a statement of which
+      columns were masked, and a note that the rows are not stored.
+
+Then ask something no approved tool matches, e.g. **"How many customers are
+there?"**
+
+- [ ] It answers by model generation, attributed to the model gateway rather
+      than to a tool.
+
+**What "semantic search" does and does not do here.** Embeddings *re-rank* the
+candidates policy has already authorized; they do not discover. A table that
+keyword matching never surfaced will not be found by similarity — measured on
+five such questions, none found. The reasoning is in
+[the embeddings design](../10-architecture/19-embeddings-design.md).
+
+### 5.4 The three task agents
+
+The platform runs three task agents, registered in one list per ADR-0029:
+**steward**, **lineage** and **quality**. Each proposes; none decides. Each has
+four controls:
+
+```
+AIDA_STEWARD_AGENT_INTERVAL_MINUTES     AIDA_STEWARD_AGENT_PRINCIPAL_ID
+AIDA_STEWARD_AGENT_MAX_PROPOSALS_PER_RUN
+AIDA_STEWARD_AGENT_MAX_PENDING_PROPOSALS
+```
+
+…and the same four for `LINEAGE_` and `QUALITY_`.
+
+**All three ship disabled**, so out of the box they do nothing and that is not
+a fault. An interval of `0` disables an agent and the pass returns before
+opening a session. The shipped defaults:
+
+| Agent | Interval | Per run | Max pending | Principal |
+|---|---|---|---|---|
+| steward | `0` (off) | 25 | 100 | `agent:steward` |
+| lineage | `0` (off) | 25 | 500 | `agent:lineage` |
+| quality | `0` (off) | 25 | 50 | `agent:quality` |
+
+**An interval alone does not start an agent, and this is the step that was
+missing.** `registered_organizations` starts a task agent only where its
+workload identity holds an agent contract whose AI asset version is APPROVED.
+A freshly seeded estate has no AI asset versions and no contracts, so all
+three agents are correctly and silently inert. Register one first:
+
+```bash
+AIDA_ENVIRONMENT=development ./.venv/Scripts/python.exe scripts/seed_task_agent.py   --org sample-bank --agent steward
+```
+
+That drives the real path with three identities — create the asset and its
+v1, have a steward author the evaluation-gate corpus, submit, approve as a
+**different** identity, then write the contract as the version's registered
+owner. Two flags exist to watch the controls refuse:
+
+- `--same-identity` → `REFUSED, as it must be: maker-checker separation is required`
+- `--fail-one` → the evaluation gate holds the approval back, and no contract
+  is written for an unapproved version
+
+Then:
+
+- [ ] Set `AIDA_STEWARD_AGENT_INTERVAL_MINUTES=1` in `.env` and recreate
+      `fleet-scheduler`.
+- [ ] Confirm it ran: `steward_agent.run` appears in the audit ledger with a
+      `proposed` count. `docker compose logs fleet-scheduler` shows the
+      scheduler iterating but **logs nothing per agent run**, so the ledger is
+      the evidence, not the log.
+- [ ] **Expect `proposed: 0` on the sample estate, and that is correct.** The
+      seeded estate already carries an open description draft for every one of
+      its 19 catalog objects (19 drafts in `DRAFT`, one per object, as of
+      2026-09-20), and the worklist excludes a table whose description is
+      already proposed — so the steward agent has nothing to propose, and says
+      so. To see it propose, resolve some of those drafts in the review queue
+      first, or discover a datasource with undocumented tables.
+- [ ] When it does propose, the proposals land in the review queue **as
+      proposals**, attributed to the agent's own workload identity — not to
+      you, and not applied.
+- [ ] `MAX_PENDING_PROPOSALS` is a back-pressure ceiling: once that many of its
+      proposals are unresolved, it stops proposing rather than burying the
+      queue. Verify by setting it to `2`.
+
+Authority is resolved by **identity comparison against configuration**, never
+by a match on a name or a key. That is why each agent has a `PRINCIPAL_ID`.
+
+### 5.5 The reviewer agent — leave this off
+
+`AIDA_REVIEWER_AGENT_ENABLED` ships off and should stay off. This is not
+caution about an unknown; it was measured. Against independently authored
+labels, **9 of 14 deliberately-false proposals were approved, and 0 pairs were
+told apart.** Both twins in a pair score identically because the
+recommendation function takes no proposal content.
+
+Its oversight controls exist and work — ceiling (`MAX_TIER`), sampling
+(`SAMPLING_RATE`), confidence floor (`APPROVE_CONFIDENCE`), evidence age, and
+a suspension kill switch — and are documented in the
+[reviewer agent oversight runbook](11-reviewer-agent-oversight-runbook.md).
+Exercise them if you want to see the controls. Do not use it to approve real
+work.
+
+The kill switch is worth one test on its own, because it silently did nothing
+once: at REPEATABLE READ, 47 decisions went through past suspension and 48
+approvals became durable. The isolation level is now enforced.
+
+### 5.6 The profile-gated four
+
+- [ ] **Events** — open http://localhost:8081, topic
+      `aida.platform.events.v1`. Ask a question in the UI, then watch two new
+      events arrive: `query.execution.completed.v1` and
+      `agent.analysis.completed.v1`.
+- [ ] **Graph** — http://localhost:7474, then
+      `MATCH (n) RETURN labels(n)[0], count(*)`. The projector fills this from
+      the event log, so it is only populated under the `graph` profile.
+- [ ] **Archive** — http://localhost:9001. The audit archive task writes
+      per-organization prefixes. Enabling legal hold adds object-lock.
+- [ ] **Cache** — enable `MCP_BUDGET` or `LINEAGE_CACHE`, exercise them, then
+      `docker compose exec redis redis-cli DBSIZE`.
+
+### 5.7 Delivery
+
+Queue and worker are separate on purpose. With
+`AIDA_DELIVERY_WORKER_ENABLED=false` (the default) notifications accumulate
+and nothing leaves the process — visible in `/health/ready` as
+`delivery_backlog.detail = failed=0;queued=0;worker=disabled`.
+
+Turn the worker on to drain it. Where it drains *to* needs an account you own;
+see section 7. But you can exercise the whole path with no account at all, by
+pointing it at a port nothing is listening on:
+
+```
+AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED=true
+AIDA_DELIVERY_WORKER_ENABLED=true
+AIDA_SLACK_WEBHOOK_URL=http://127.0.0.1:9/services/T0/B0/deadend
+```
+
+Port 9 is the discard port, so nothing leaves the machine and every attempt
+fails with a connection error -- which is the history worth reading:
+
+```bash
+AIDA_ENVIRONMENT=development ./.venv/Scripts/python.exe scripts/delivery_history.py
+```
+
+That prints each intent with its full attempt history: how many times, how far
+apart, with what status code, and whether the destination ever answered. Note
+that the destination comes back as `scheme://host/#digest` -- a webhook URL is
+a bearer credential in its path, so the path is never stored.
+
+Two readings to know. **An intent with no attempt rows was never tried**,
+which is almost always the worker being off, and is a different problem from
+having been tried and refused. And for Teams the output says so explicitly: a
+2xx there is the Workflows *trigger* answering, not a posted card.
+
+---
+
+### 5.8 Keeping context current when the source changes
+
+Discovery, review and publication get context in place once. Keeping it right
+when the database changes is a separate loop, and **every part of it ships
+off**, so a fresh stack notices nothing: a rescan records what changed, and
+there it stops.
+
+Four switches turn it on, all `0` by default:
+
+```
+AIDA_CHANGE_SIGNAL_PROCESSING_INTERVAL_MINUTES   # signals -> holds
+AIDA_CONTEXT_REBUILD_INTERVAL_MINUTES            # holds -> drafts in the review queues
+AIDA_LINEAGE_AGENT_INTERVAL_MINUTES              # re-parse definitions that moved
+AIDA_STEWARD_AGENT_INTERVAL_MINUTES              # describe what is newly missing meaning
+```
+
+They are opt-in rather than on by default because the first two open holds and
+draft reviews: an estate that has never been reviewed would wake up to a queue
+nobody asked for. Turning them on is a deliberate act, and the two agent
+intervals still need their contract registered first (5.4).
+
+**Nothing rescans on its own either.** A source change reaches Atlas only when
+a scan runs, so give the datasource a scan policy —
+`PUT /v1/datasources/{id}/scan-policy` — or start a run by hand. Without one,
+the rest of the loop has nothing to consume.
+
+With those set, one source change walks this path unattended:
+
+1. the scan records a **change signal** per object that moved;
+2. the change-signal pass turns a redefined view or a retired table into a
+   **CRITICAL hold**, and warns the views that read it — tools over the changed
+   object stop answering, the ones downstream keep running and say why they
+   might have moved;
+3. the **lineage agent** re-parses what changed structurally;
+4. the **rebuild pass** drafts the replacements — a tool regenerated from the
+   current definition, a description written against it, a context product
+   re-pinned to the new version — into the review queues. It publishes nothing;
+5. a **reviewer approves** each draft, as for any other governed change;
+6. the hold is released once nothing standing on the object is stale, and Ask
+   answers again from the rebuilt context.
+
+Two things still need a person by design, and the pass names both rather than
+retrying: a rebuilt description a reviewer **rejects** is reported as
+`DESCRIPTION_AWAITING_AUTHOR`, because every redraft would be the same words on
+the same evidence; and a proposal rejected for a retired table is not made
+again until the source changes again.
+
+To watch the whole chain once without waiting on intervals,
+`tests/test_footprint_journey.py` runs it end to end against the local
+PostgreSQL and SQL Server sample containers — discover, review, publish, ask
+(150), change the view, refuse under the hold, rebuild, approve, ask again
+(160), with the question asked through the published context product.
+
+---
+
+## 6. The fleet scheduler
+
+One polling loop drives nineteen passes. Each is independently gated and each
+logs its own outcome, so `docker compose logs fleet-scheduler` is the single
+place to see background work:
+
+`certification_expiry_warning`, `classification_propagation`,
+`custom_rule_pack`, `delivery_worker`, `due_playbooks`, `due_rule_packs`,
+`entitlement_fulfilment`, `freshness_evaluation`, `graph_reconciliation`,
+`graph_reconciliation_scheduler`, `model_route_reachability`, `owner_routing`,
+`ownership_expiry`, `principal_reconciliation`, `reaper_scheduler`,
+`review_notification`, `rollup_rebuild`, `task_agent_schedule`,
+`vector_index_rebuild`.
+
+Two are worth watching specifically:
+
+- **`model_route_reachability`** reports through `/health/ready` as
+  `model_routes.detail = approved=N;unreachable=N;never_checked=N;sweep=enabled`.
+  A provider can retire a model under an approved route at any time. It
+  **lists** models and never generates, never changes a route's `status`, and
+  reports UNKNOWN as its own answer rather than collapsing it into
+  UNREACHABLE. REACHABLE means the model exists — **not** that generation
+  works; an account with a billing problem lists its models perfectly well.
+- **`vector_index_rebuild`** keeps the embedding index current. Before it
+  existed nothing scheduled a rebuild, and the persisted index silently
+  dropped a whole candidate type.
+
+---
+
+## 7. What needs an account you own
+
+I cannot create accounts or enter credentials on your behalf, so these four
+stay unverified until you do.
+
+| Capability | What it needs |
+|---|---|
+| Slack delivery | a Slack workspace and an Incoming Webhook app → `AIDA_SLACK_WEBHOOK_URL`. Procedure: [notification delivery runbook](12-notification-delivery-runbook.md) §3.1 |
+| Teams delivery | a Microsoft tenant. **Office 365 connectors in Teams are retired** (rolled out 2026-05-18 to 2026-05-22), so the old "incoming webhook" instructions produce nothing that works. Use a **Workflows** webhook; the platform sends an Adaptive Card by default. Runbook §3.2 |
+| Audit archive to real object storage | an AWS bucket with object lock. [Destination verification](../50-security/audit-archive-destination-verification.md) |
+| A corporate IdP | your real IdP. The mock issuer proves the protocol — real RS256, real JWKS, real expiry — and nothing about directory, MFA, consent or revocation |
+
+**The one thing to know about verifying Teams:** a Workflows webhook answers
+`202 Accepted` from its *trigger*, before the post-card action runs. A flow
+that then fails — bad payload, deleted channel, orphaned flow — fails
+invisibly: the platform records DELIVERED with status 202 and no card was ever
+posted. For Teams, **a 2xx is not evidence anyone saw the message.** The only
+real evidence is the Power Automate run history. Add a co-owner to the flow; a
+workflow belongs to a person, and an orphaned one goes silent.
+
+### Authentication is worth doing even without an IdP
+
+```bash
+docker compose -f compose.yaml -f compose.oidc.yaml up -d --build
+```
+
+This is authorization-code + PKCE against a real local issuer. Section 5.4 of
+the [acceptance testing guide](14-acceptance-testing-guide.md) has the
+checklist, including the escalation check you should not skip — an
+authorization defect was found there by running the flow rather than by any
+test, and a token whose roles claim merely contained the string
+`PlatformAdmin` was granted it.
+
+**Running several users at once.** The shipped UI on http://localhost:3001 has
+one development identity baked in at build time: `local-ui-admin`, holding all
+16 roles as of 2026-09-21, exactly the platform catalog (`ui-next/src/lib/appConfig.ts`), so it cannot show
+two different users. `scripts/demo-users.ps1` starts one Vite dev server per
+demo user instead, on ports 5181 to 5188, each sending that user's
+`X-Principal-Id` and `X-Roles`, so the backend decides what each may do and
+nothing is faked in the browser. `-Action Start` starts them, `-Action Check`
+confirms each serves its own identity, `-Action Stop` ends them, and no
+`-Action` lists the roster. It needs `ui-next/node_modules` (it never installs)
+and the development-identity stack, not the OIDC overlay. Each UI also opens
+as that user's persona in the Northwind organization (`VITE_DEV_PERSONA` and
+`VITE_DEV_ORG_ID`, set by the launcher), so nothing has to be picked or pasted:
+a user who cannot list organizations, such as a Viewer or Reviewer, has no
+picker to choose one with. `e2e/scripts/demo-rehearsal.mjs` opens every screen
+in each user's own menu from an empty browser and reports anything refused or
+broken. The walkthrough pack has the roster and a demo order:
+[roles and users](../walkthrough/roles-and-users.html) and
+[demo script](../walkthrough/demo-script.html).
+
+---
+
+## 8. Closing the remaining work: what needs you
+
+*A dated snapshot taken 2026-09-13 against 5 PARTIAL rows. Status lives in
+[tracker section P](../60-delivery/03-tracker.md), not here — if the two
+disagree, section P is right and this list is stale.*
+
+Every remaining row falls into one of three groups, and only the last two need
+anything from you.
+
+### 8.1 Engineering — being closed without you
+
+| Row | What is left |
+|---|---|
+| R11-D6 | **Done.** Every session transition was exercised in a browser under real OIDC. It found that a *rejected* token was reported as *expired* — now told apart, so a misconfigured identity provider no longer sends you into a sign-in loop |
+| R11-B2 | **Done.** Ask no longer picks a tool for an input the question never mentions. Re-measured live: 7 of 7 answered questions matched, none wrongly refused |
+| R11-C1 | **Done.** Run it yourself: `./.venv/Scripts/python.exe scripts/verify_ontology_lifecycle.py` — draft, a refused self-approval, independent approval, publication. It publishes a new version each run |
+| R11-C6 | **Done.** Every door checks the agent's contract, including a new per-agent allowlist over the native MCP tools. Existing contracts reach no native tool until an amendment names them, and that amendment goes to review |
+| R11-C8 | **Done:** every decision the reviewer agent can make can be corrected from its sample -- bulk operations and workbook imports reversed, annotations and descriptions withdrawn -- always decided by someone other than whoever asked; a correction nobody decides keeps its sample open; and *Answers that relied on it* lists the answers the change reached while it stood |
+| R11-B8 | **Done.** Freshness is measured: an approved contract's watermark is read on the schedule through the query gateway, and the table is judged on it ([ADR-0014 addendum](../10-architecture/adr/ADR-0014-value-free-control-plane.md)) |
+| R11-C3 | **Done.** Unattended reviewer approvals stay off for good, and production now refuses the setting |
+| R11-C7 | **Done.** INV-3 is accepted as the control for rows a tool call returns |
+| R11-X5 | **Done.** Every backend capability still without a screen has an owner and a date on the tracker; four had gained one since the triage |
+| R11-S9 | **Done.** Every setting that ships switched off has a recorded decision, checked by a test; one redundant switch was retired and none was turned on to shrink the count |
+| R11-X2 | **Done.** Five tables nothing used are retired. ADR-0018's unenforced hard wall and assignment rules wait until they are built with their enforcement (API version 2.0.0) |
+| R11-X4 | **Done.** The module relocation does not go ahead (R11-S6 cancelled), so the 32 empty scaffold files that were waiting for it are removed |
+
+### 8.2 Decisions only you can make
+
+*None open.* Every decision this section listed was taken on 2026-09-13 on your
+delegation, and each is recorded on its tracker row and summarised in 8.1.
+
+### 8.3 Things only you can provide
+
+I cannot create accounts, enter credentials, or be a person with a screen
+reader. Each of these has a step-by-step document already:
+
+| Row | You need | Follow |
+|---|---|---|
+| R11-I1, R11-B10 | A Slack workspace, and a Microsoft tenant with Teams | [Notification delivery runbook](12-notification-delivery-runbook.md) §3.1 (Slack) and §3.2 (Teams) |
+| R11-B9 | An AWS S3 bucket with object lock | [Audit archive destination verification](../50-security/audit-archive-destination-verification.md) |
+| R11-C2 | A person using NVDA or VoiceOver, plus contrast, zoom and multi-screen checks | [Accessibility acceptance](../60-delivery/24-accessibility-acceptance-2026-09-12.md) |
+
+Before any of section 8.3, you can already exercise the whole delivery path
+with no account at all by pointing the webhook at a dead local port — see
+section 5.7. That proves everything except the vendor's end.
+
+---
+
+## 9. Reporting back
+
+For anything that fails: what you did, what you expected, what happened, and
+the correlation id if the UI showed one.
+
+Four classes of finding are worth more than the rest:
+
+1. **Any refusal that does not tell you what to do.** A blank screen, an
+   endless spinner, or "something went wrong" is a defect even when the
+   underlying denial is correct.
+2. **Anything attributed to the wrong identity** — an agent's proposal
+   credited to you, an approval that took one identity where it should take
+   two.
+3. **Any value that reached a place it should not.** The control plane is
+   value-free by design; a source value in a log, an event or a catalog field
+   is a serious finding.
+4. **Anything this guide told you to expect that did not happen.** That is a
+   defect in the guide, and I would rather hear it than have you work around
+   it.

@@ -28,12 +28,14 @@ because they answer different questions:
   provider call takes; the provider call has its own timeout
   (`Settings.model_timeout_seconds`, `route.timeout_seconds`).
 
-**What this does not do, stated plainly.** Every number here is an
-*estimate*, by the same 4-bytes-per-token heuristic the gateway uses. No
-provider adapter in this codebase reports billable usage, so these caps bound
-a modelled quantity. When an adapter starts returning real usage, the
-reconciliation step below is the single place that has to change: pass the
-provider's number to `reconcile_run_budget` instead of the estimate.
+**What is estimated, stated plainly.** Everything checked *before* a call is
+an estimate, by the same 4-bytes-per-token heuristic the gateway uses, because
+nothing has been billed yet. After the call, the OpenAI and Gemini adapters
+report what the provider billed (`model_gateway.ProviderUsage`), and the
+orchestrator passes that to `reconcile_run_budget` for the attempt that
+answered. Attempts that failed before it report nothing and are still charged
+their input estimate, and a provider that reports no usage leaves the whole run
+on the estimate. The run's `budget_evidence.basis` says which.
 """
 
 from __future__ import annotations
@@ -64,10 +66,18 @@ class BudgetReservation:
     and therefore what `reconcile_run_budget` must give back. `window_id` is
     `None` when the contract declares no daily cap -- there is nothing to
     reserve against, and no row is created for an agent nobody has budgeted.
+
+    `known_input_tokens` is the part of the reservation the platform can still
+    account for when a generation fails: the payload it demonstrably sent,
+    across every attempt it planned. The rest of `amount` is an allowance for
+    output that a failed run never produced. `settle_unresolved_run_budget`
+    uses the split.
     """
 
     window_id: UUID | None
     amount: int
+    daily_cap: int | None = None
+    known_input_tokens: int = 0
 
     @property
     def is_reserved(self) -> bool:
@@ -167,6 +177,7 @@ async def reserve_run_budget(
     contract: AgentContract | None,
     *,
     estimated_input_tokens: int,
+    estimated_output_tokens: int = 0,
     now: datetime | None = None,
 ) -> BudgetReservation:
     """Take this run's worst case out of the agent's daily window, or refuse.
@@ -183,7 +194,13 @@ async def reserve_run_budget(
     """
     if contract is None or contract.daily_token_cap is None:
         return BudgetReservation(window_id=None, amount=0)
-    amount = max(1, contract.per_run_token_cap or estimated_input_tokens)
+    if estimated_input_tokens < 0 or estimated_output_tokens < 0:
+        raise ValueError("token estimates must be nonnegative")
+    planned = estimated_input_tokens + estimated_output_tokens
+    violation = per_run_violation(contract, tokens=planned)
+    if violation:
+        raise AgentBudgetExceeded(violation)
+    amount = max(1, contract.per_run_token_cap or planned)
     if amount > contract.daily_token_cap:
         # A single run that cannot fit inside the whole day never will; refuse
         # before touching the ledger rather than leaving a row at its cap.
@@ -213,7 +230,12 @@ async def reserve_run_budget(
     # predicate refused -- this reservation would take the day past its cap.
     if cast("CursorResult[Any]", result).rowcount == 0:
         raise AgentBudgetExceeded(REASON_DAILY_TOKEN_CAP)
-    return BudgetReservation(window_id=window_id, amount=amount)
+    return BudgetReservation(
+        window_id=window_id,
+        amount=amount,
+        daily_cap=contract.daily_token_cap,
+        known_input_tokens=estimated_input_tokens,
+    )
 
 
 async def reconcile_run_budget(
@@ -224,13 +246,17 @@ async def reconcile_run_budget(
 ) -> None:
     """Replace a reservation with what the run actually cost.
 
-    Called on every exit path a reserved run can take, including failure: a
-    run that refused after reserving spent nothing, and leaving its
-    reservation standing would let a handful of refusals exhaust a day.
+    Called on the paths where the run's cost is *known*. A generation that
+    failed does not know its cost, and goes through
+    `settle_unresolved_run_budget` instead -- which calls this function with
+    the input estimate rather than with zero, because a timeout can follow
+    work the provider already billed.
 
-    `actual_tokens` is an estimate today (see this module's docstring). It is
-    the single place a provider-reported figure would enter.
+    `actual_tokens` is what the provider reported it billed where it reported
+    that, and the estimate otherwise (see this module's docstring).
     """
+    if actual_tokens < 0:
+        raise ValueError("actual tokens must be nonnegative")
     if not reservation.is_reserved:
         return
     delta = actual_tokens - reservation.amount
@@ -248,6 +274,52 @@ async def reconcile_run_budget(
             reserved_tokens=case((adjusted < 0, literal(0)), else_=adjusted)
         )
     )
+    # Preserve overage evidence instead of hiding already-incurred spend.
+    # Admission reserves the complete planned route chain before any call;
+    # unexpected provider/estimator overruns must still fail visibly.
+    used = await session.scalar(
+        select(AgentBudgetWindow.reserved_tokens).where(
+            AgentBudgetWindow.id == reservation.window_id
+        )
+    )
+    if reservation.daily_cap is not None and int(used or 0) > reservation.daily_cap:
+        raise AgentBudgetExceeded(REASON_DAILY_TOKEN_CAP)
+
+
+async def settle_unresolved_run_budget(
+    session: AsyncSession, reservation: BudgetReservation
+) -> int:
+    """Close out a reservation whose provider usage will never be known.
+
+    The generation-failure path. A timeout or an unparseable response can
+    follow work the provider already billed, so releasing the reservation in
+    full would treat failure as free -- but *holding* it in full is worse than
+    it looks: nothing ever reconciles it, so a run of provider timeouts
+    consumes the whole day and the agent is locked out until the UTC window
+    rolls over, having produced nothing. Both extremes are wrong for the same
+    reason: they substitute a guess for the number the platform actually has.
+
+    That number is the input. The payload was serialized and sent, once per
+    planned attempt, and `estimate_payload_tokens` measured it -- so
+    `known_input_tokens` is charged. The remainder of the reservation is an
+    allowance for output the failed run never produced, and it is released.
+
+    Returns what was charged, for the caller's evidence. Never raises: it runs
+    while an exception is already unwinding, and masking that exception with a
+    budget error would lose the reason the run failed. Charging can only lower
+    the window -- `known_input_tokens` is always <= `amount`, since a reservation
+    holds the per-run cap or input+output, and a run whose input alone broke the
+    per-run cap was refused before it reserved -- so there is no overage to
+    detect here.
+    """
+    if not reservation.is_reserved:
+        return 0
+    charged = max(0, min(reservation.known_input_tokens, reservation.amount))
+    try:
+        await reconcile_run_budget(session, reservation, actual_tokens=charged)
+    except Exception:  # noqa: BLE001 -- never mask the failure being unwound
+        return charged
+    return charged
 
 
 async def daily_reserved_tokens(

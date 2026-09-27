@@ -14,23 +14,6 @@
 
 import { demoOr, get, postJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureBulkCertifyCatalogTables,
-  makeFixtureBulkClassifyCatalogColumns,
-  makeFixtureBulkOwnCatalogTables,
-  makeFixtureBulkReaffirmOwnershipAssignments,
-  makeFixtureBulkTagCatalogTables,
-  makeFixtureBusinessAnnotations,
-  makeFixtureBusinessMap,
-  makeFixtureCatalog,
-  makeFixtureDocumentationWorklist,
-  makeFixtureEvidence,
-  makeFixtureOwnershipAssignments,
-  makeFixtureReaffirmOwnershipAssignment,
-  makeFixtureRouteUnownedAssetBacklog,
-  makeFixtureTableBusinessAnnotation,
-  makeFixtureUnownedAssetBacklog,
-} from "../fixtures";
 import { ApiError } from "../http";
 import type {
   AssetCertificationRead as _AssetCertificationRead_p208,
@@ -46,6 +29,7 @@ import type {
   GovernanceReviewRead,
   MetadataBusinessAnnotationRead,
   Page,
+  TableProfileRead,
   UnownedAssetBacklogRouteRequest,
   UnownedAssetBacklogRouteResult,
   UnownedAssetEscalationRead,
@@ -99,7 +83,7 @@ export function fetchCatalogRows(
   signal?: AbortSignal,
 ): Promise<CursorPage<CatalogRowRead>> {
   return demoOr(
-    async () => makeFixtureCatalog(query),
+    async (fixtures) => fixtures.makeFixtureCatalog(query),
     async () => {
       const params = new URLSearchParams();
       if (query.datasourceId) params.set("datasource_id", query.datasourceId);
@@ -146,10 +130,41 @@ export function fetchAssetEvidence(
   signal?: AbortSignal,
 ): Promise<AssetEvidenceRead> {
   return demoOr(
-    async () => makeFixtureEvidence(tableId),
+    async (fixtures) => fixtures.makeFixtureEvidence(tableId),
     async () => {
       return get<AssetEvidenceRead>(`/v1/metadata/tables/${tableId}/evidence`, signal);
     },
+  );
+}
+
+/** `GET /v1/tables/{table_id}/profile` (R11-FP04) — the latest value-free
+ *  profile of one table: counts, uniqueness, distribution shape, and the
+ *  observation scope those statistics were measured under.
+ *
+ *  The route has existed and been gated for a long time and its response type
+ *  has been in `types.ts` all along, but nothing in this app ever called it,
+ *  so a statistic this platform computes on every discovery run had no way to
+ *  reach a screen. FP-04's own acceptance (module 05 §16.3) is that
+ *  "Catalog/Quality show statistical evidence **and sampling limitations**" —
+ *  which is one requirement, not two: `observation_scope` travels in the same
+ *  payload as the numbers it qualifies, and `ProfilePanel` refuses to render
+ *  the numbers without it.
+ *
+ *  No fixture branch, deliberately, unlike `fetchAssetEvidence` above: a
+ *  demo-mode profile would be invented statistics about invented data, and a
+ *  reader cannot tell those from measured ones. A 404 (no profile yet) is a
+ *  first-class state this panel renders, so the demo build shows that instead.
+ *
+ *  Resolves by `tableId` alone for the same reason `fetchAssetEvidence` does —
+ *  the pane it renders in is a permalink target.
+ */
+export function fetchTableProfile(
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<TableProfileRead> {
+  return get<TableProfileRead>(
+    `/v1/tables/${encodeURIComponent(tableId)}/profile`,
+    signal,
   );
 }
 
@@ -187,7 +202,7 @@ export function fetchBusinessAnnotations(
   signal?: AbortSignal,
 ): Promise<PageOf<MetadataBusinessAnnotationRead>> {
   return demoOr(
-    async () => makeFixtureBusinessAnnotations(query),
+    async (fixtures) => fixtures.makeFixtureBusinessAnnotations(query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -212,7 +227,7 @@ export function fetchTableBusinessAnnotation(
   signal?: AbortSignal,
 ): Promise<MetadataBusinessAnnotationRead> {
   return demoOr(
-    async () => makeFixtureTableBusinessAnnotation(tableId),
+    async (fixtures) => fixtures.makeFixtureTableBusinessAnnotation(tableId),
     async () => {
       return get<MetadataBusinessAnnotationRead>(
         `/v1/metadata/tables/${tableId}/business-annotation`,
@@ -235,7 +250,7 @@ export function fetchBusinessMap(
   signal?: AbortSignal,
 ): Promise<BusinessMapRead> {
   return demoOr(
-    async () => makeFixtureBusinessMap(query),
+    async (fixtures) => fixtures.makeFixtureBusinessMap(query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 500));
@@ -287,7 +302,7 @@ export function bulkTagCatalogTables(
   signal?: AbortSignal,
 ): Promise<CatalogBulkActionRunRead> {
   return demoOr(
-    async () => makeFixtureBulkTagCatalogTables(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureBulkTagCatalogTables(organizationId, body),
     async () => {
       return postJson<CatalogBulkActionRunRead>(
         `/v1/organizations/${organizationId}/tables/bulk-tag`,
@@ -309,7 +324,7 @@ export function bulkClassifyCatalogColumns(
   signal?: AbortSignal,
 ): Promise<CatalogBulkActionRunRead> {
   return demoOr(
-    async () => makeFixtureBulkClassifyCatalogColumns(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureBulkClassifyCatalogColumns(organizationId, body),
     async () => {
       return postJson<CatalogBulkActionRunRead>(
         `/v1/organizations/${organizationId}/tables/bulk-classify`,
@@ -329,7 +344,7 @@ export function bulkAssignCatalogOwnership(
   signal?: AbortSignal,
 ): Promise<CatalogBulkActionRunRead> {
   return demoOr(
-    async () => makeFixtureBulkOwnCatalogTables(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureBulkOwnCatalogTables(organizationId, body),
     async () => {
       return postJson<CatalogBulkActionRunRead>(
         `/v1/organizations/${organizationId}/tables/bulk-own`,
@@ -349,7 +364,7 @@ export function bulkCertifyCatalogTables(
   signal?: AbortSignal,
 ): Promise<CatalogBulkActionRunRead> {
   return demoOr(
-    async () => makeFixtureBulkCertifyCatalogTables(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureBulkCertifyCatalogTables(organizationId, body),
     async () => {
       return postJson<CatalogBulkActionRunRead>(
         `/v1/organizations/${organizationId}/tables/bulk-certify`,
@@ -362,6 +377,10 @@ export function bulkCertifyCatalogTables(
 
 export interface UnownedAssetBacklogQuery {
   status?: string | null;
+  /** Sent as `candidate_owner`: an exact, case-sensitive match on the candidate
+   *  owner as stored (`list_unowned_asset_backlog`). The server applies it
+   *  before paging, so `total` counts the matches and not the whole backlog. */
+  candidateOwner?: string | null;
   limit?: number;
   offset?: number;
 }
@@ -377,10 +396,11 @@ export function fetchUnownedAssetBacklog(
   signal?: AbortSignal,
 ): Promise<PageOf<UnownedAssetEscalationRead>> {
   return demoOr(
-    async () => makeFixtureUnownedAssetBacklog(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureUnownedAssetBacklog(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
+      if (query.candidateOwner) params.set("candidate_owner", query.candidateOwner);
       params.set("limit", String(query.limit ?? 100));
       params.set("offset", String(query.offset ?? 0));
       return get<PageOf<UnownedAssetEscalationRead>>(
@@ -408,7 +428,7 @@ export function fetchDocumentationWorklist(
   signal?: AbortSignal,
 ): Promise<PageOf<DocumentationWorklistEntryRead>> {
   return demoOr(
-    async () => makeFixtureDocumentationWorklist(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureDocumentationWorklist(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -436,7 +456,7 @@ export function routeUnownedAssetBacklog(
   signal?: AbortSignal,
 ): Promise<UnownedAssetBacklogRouteResult> {
   return demoOr(
-    async () => makeFixtureRouteUnownedAssetBacklog(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureRouteUnownedAssetBacklog(organizationId, body),
     async () => {
       return postJson<UnownedAssetBacklogRouteResult>(
         `/v1/organizations/${organizationId}/stewardship/unowned-backlog/route`,
@@ -685,7 +705,7 @@ export function reaffirmOwnershipAssignment(
   signal?: AbortSignal,
 ): Promise<OwnershipAssignmentRead> {
   return demoOr(
-    async () => makeFixtureReaffirmOwnershipAssignment(assignmentId),
+    async (fixtures) => fixtures.makeFixtureReaffirmOwnershipAssignment(assignmentId),
     async () => {
       return postJson<OwnershipAssignmentRead>(
         `/v1/ownership-assignments/${assignmentId}/reaffirm`,
@@ -703,7 +723,7 @@ export function bulkReaffirmOwnershipAssignments(
   signal?: AbortSignal,
 ): Promise<OwnershipAssignmentBulkReaffirmResult> {
   return demoOr(
-    async () => makeFixtureBulkReaffirmOwnershipAssignments(assignmentIds),
+    async (fixtures) => fixtures.makeFixtureBulkReaffirmOwnershipAssignments(assignmentIds),
     async () => {
       return postJson<OwnershipAssignmentBulkReaffirmResult>(
         `/v1/ownership-assignments/bulk-reaffirm`,
@@ -731,7 +751,7 @@ export function fetchOwnershipAssignments(
   signal?: AbortSignal,
 ): Promise<PageOf<OwnershipAssignmentRead>> {
   return demoOr(
-    async () => makeFixtureOwnershipAssignments(query),
+    async (fixtures) => fixtures.makeFixtureOwnershipAssignments(query),
     async () => {
       const params = new URLSearchParams();
       if (query.subject_type) params.set("subject_type", query.subject_type);

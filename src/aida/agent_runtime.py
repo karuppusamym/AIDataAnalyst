@@ -1,6 +1,6 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any
 
 
 class RuntimeStage(StrEnum):
@@ -52,26 +52,3 @@ class RuntimeState:
             raise ValueError(f"invalid runtime transition: {self.stage} -> {target}")
         return replace(self, stage=target, step_count=self.step_count + 1, **updates)
 
-
-class ModelGateway(Protocol):
-    async def structured_completion(
-        self,
-        *,
-        route: str,
-        system_instruction: str,
-        payload: dict[str, Any],
-        output_schema: type[Any],
-    ) -> Any: ...
-
-
-class DisabledModelGateway:
-    async def structured_completion(
-        self,
-        *,
-        route: str,
-        system_instruction: str,
-        payload: dict[str, Any],
-        output_schema: type[Any],
-    ) -> Any:
-        del route, system_instruction, payload, output_schema
-        raise RuntimeError("no policy-approved model route is configured")

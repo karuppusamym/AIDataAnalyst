@@ -3,9 +3,11 @@
 .aud__h1{margin:0;font-size:22px;letter-spacing:-.015em}
 .aud__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch}
 .aud__lede code{font-family:var(--mono);font-size:12px;background:var(--sunk);border:1px solid var(--line);border-radius:3px;padding:1px 4px}
-.aud__stats{font-size:12.5px;color:var(--ink-3)}
+.aud__stats{font-size:12.5px;color:var(--ink-3);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .aud__stats b{color:var(--ink);font-weight:600;font-family:var(--mono)}
 .tnum{font-variant-numeric:tabular-nums}
+/* An export's SHA-256 is 64 unbroken characters; let it wrap rather than push the page sideways. */
+.aud .statusstrip{overflow-wrap:anywhere}
 
 .aud__filters{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
 .aud__filters .field:nth-child(1){width:220px}

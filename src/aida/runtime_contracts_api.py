@@ -22,11 +22,11 @@ from aida.models import (
     TableProfile,
 )
 from aida.runtime_contracts import (
+    compute_sla_status,
     contract_from_db,
     enforce_at_query_time,
     evaluate_contract,
     persist_violations,
-    record_sla_status,
 )
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -84,7 +84,7 @@ class SlaStatusResponse(ApiModel):
 async def evaluate_data_contract(
     contract_id: UUID,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> EvaluationResponse:
@@ -199,7 +199,7 @@ async def list_contract_violations(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -238,7 +238,7 @@ async def get_sla_status(
     contract_id: UUID,
     period_days: int = Query(default=30, ge=1, le=365),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> SlaStatusResponse:
@@ -254,7 +254,7 @@ async def get_sla_status(
     period_start = now - timedelta(days=period_days)
     period_end = now
 
-    sla_record = await record_sla_status(
+    sla = await compute_sla_status(
         session, org_id, contract_id, period_start, period_end
     )
     record_audit(
@@ -270,10 +270,10 @@ async def get_sla_status(
 
     return SlaStatusResponse(
         contract_id=contract_id,
-        compliant=sla_record.uptime_percent >= (contract_row.availability_sla_percent or 99.0),
-        uptime_percent=sla_record.uptime_percent,
-        violations_in_period=sla_record.violations_count,
-        breach_minutes=sla_record.breach_minutes,
+        compliant=sla.uptime_percent >= (contract_row.availability_sla_percent or 99.0),
+        uptime_percent=sla.uptime_percent,
+        violations_in_period=sla.violations_count,
+        breach_minutes=sla.breach_minutes,
         period_start=period_start,
         period_end=period_end,
     )

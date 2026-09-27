@@ -22,14 +22,23 @@ the change (INV-7), and every grant of source access is maker-checker separated
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.access_change_review import (
+    ACCESS_POLICY_REVIEW_TYPE,
+    MEMBERSHIP_PENDING,
+    MEMBERSHIP_REJECTED,
+    POLICY_DRAFT,
+    WORKSPACE_MEMBERSHIP_REVIEW_TYPE,
+    open_access_review,
+)
 from aida.api import _commit_or_conflict
+from aida.authorization_posture import describe_configured_posture
 from aida.business_graph import (
     assign,
     build_hierarchy,
@@ -41,6 +50,7 @@ from aida.business_graph import (
     rollup_freshness,
     tree,
 )
+from aida.config import get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.domain_service import ensure_default_domain, resolve_domain
@@ -66,6 +76,7 @@ from aida.policy_engine import Resource, Subject
 from aida.policy_engine import simulate as simulate_policy
 from aida.schemas import (
     AccessPolicyCreate,
+    AccessPolicyProposalRead,
     AccessPolicyRead,
     AgentEvaluationRunRead,
     AuthorizationProbeRead,
@@ -81,6 +92,7 @@ from aida.schemas import (
     CrossBoundaryGrantRead,
     DataDomainCreate,
     DataDomainRead,
+    EnforcementReadinessRead,
     LineOfBusinessCreate,
     LineOfBusinessRead,
     OrganizationCreate,
@@ -88,17 +100,22 @@ from aida.schemas import (
     Page,
     ProjectCreate,
     ProjectRead,
+    ReasonCodeCount,
     SimulatedDecision,
     SourceBindingCreate,
     SourceBindingDecision,
     SourceBindingRead,
+    UnresolvedDatasourceRead,
     WorkspaceCreate,
     WorkspaceMembershipCreate,
+    WorkspaceMembershipProposalRead,
     WorkspaceMembershipRead,
     WorkspaceRead,
+    WorkspaceReadinessRead,
 )
 from aida.scope_search import search_predicate
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.workspace_access import enforcement_readiness, unresolved_scope
 from aida.workspace_service import (
     BindingApprovalError,
     approve_binding,
@@ -110,7 +127,16 @@ from aida.workspace_service import (
 router = APIRouter(prefix="/v1", tags=["workspaces"])
 
 _ADMIN = ("PlatformAdmin", "OrganizationAdmin", "DataAdmin")
-_ANY_MEMBER = ("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Steward", "Analyst", "Reviewer")
+# R11-AUD01: this said `Steward`, the persona's name, which is not a role: no token can carry it, so
+# a DataSteward was refused workspaces and business nodes while the ungrantable name was admitted.
+_ANY_MEMBER = (
+    "PlatformAdmin",
+    "OrganizationAdmin",
+    "DataAdmin",
+    "DataSteward",
+    "Analyst",
+    "Reviewer",
+)
 
 # F15: the picker search parameter's contract, stated once so both routes in
 # this file that take it describe it identically in `openapi.json`.
@@ -158,7 +184,6 @@ async def create_workspace_route(
         slug=body.slug,
         purpose=body.purpose,
         owner_principal=context.principal_id,
-        isolation_boundary_id=body.isolation_boundary_id,
         monthly_cost_ceiling=body.monthly_cost_ceiling,
     )
     record_audit(
@@ -237,7 +262,7 @@ async def get_workspace(
 
 @router.post(
     "/workspaces/{workspace_id}/members",
-    response_model=WorkspaceMembershipRead,
+    response_model=WorkspaceMembershipProposalRead,
     status_code=201,
 )
 async def add_member(
@@ -246,40 +271,91 @@ async def add_member(
     context: SecurityContext = Depends(require_roles(*_ADMIN)),
     session: AsyncSession = Depends(get_session),
     correlation_id: str = Depends(get_correlation_id),
-) -> WorkspaceMembership:
+) -> WorkspaceMembershipProposalRead:
+    """Propose a workspace member (INV-8, R11-AUD02).
+
+    Any role, `workspace_owner` included, is proposed rather than granted: the membership is
+    created `PENDING_APPROVAL`, grants nothing, and takes effect only when a *different*
+    principal approves the `WORKSPACE_MEMBERSHIP` review named in the response
+    (`POST /v1/governance/reviews/{id}/decision`). The response is still 201 and still the
+    membership; it now also carries `governance_review_id`.
+
+    A principal whose earlier proposal was rejected can be proposed again -- the rejected row
+    is reused, because `(workspace, principal)` is unique and a rejection must not be
+    permanent. Any other existing membership, pending or active, is a 409.
+    """
     workspace = await _load_workspace(session, workspace_id)
     enforce_organization(context, workspace.organization_id)
+    # Locked when it exists: two concurrent re-proposals of one rejected row would otherwise
+    # each open a review for it, and the second review could then never be decided -- its
+    # target would no longer be pending, so approving and rejecting it would both be a 409.
     existing = await session.scalar(
-        select(WorkspaceMembership).where(
+        select(WorkspaceMembership)
+        .where(
             WorkspaceMembership.workspace_id == workspace_id,
             WorkspaceMembership.principal_id == body.principal_id,
         )
+        .with_for_update()
     )
+    if existing is not None and existing.status != MEMBERSHIP_REJECTED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "principal already has a membership awaiting approval"
+                if existing.status == MEMBERSHIP_PENDING
+                else "principal already has a membership"
+            ),
+        )
     if existing is not None:
-        raise HTTPException(status_code=409, detail="principal already has a membership")
-    membership = WorkspaceMembership(
+        membership = existing
+        membership.principal_kind = body.principal_kind
+        membership.role = body.role
+        membership.granted_by = context.principal_id
+        membership.expires_at = body.expires_at
+        membership.status = MEMBERSHIP_PENDING
+    else:
+        membership = WorkspaceMembership(
+            id=uuid4(),
+            organization_id=workspace.organization_id,
+            workspace_id=workspace_id,
+            principal_id=body.principal_id,
+            principal_kind=body.principal_kind,
+            role=body.role,
+            granted_by=context.principal_id,
+            expires_at=body.expires_at,
+            status=MEMBERSHIP_PENDING,
+        )
+        session.add(membership)
+    review = open_access_review(
+        session,
         organization_id=workspace.organization_id,
-        workspace_id=workspace_id,
-        principal_id=body.principal_id,
-        principal_kind=body.principal_kind,
-        role=body.role,
-        granted_by=context.principal_id,
-        expires_at=body.expires_at,
+        object_type=WORKSPACE_MEMBERSHIP_REVIEW_TYPE,
+        object_id=membership.id,
+        requested_action="GRANT",
+        requested_by=context.principal_id,
     )
-    session.add(membership)
+    review_id = review.id
     record_audit(
         session,
         context,
-        action="WORKSPACE_MEMBER_ADDED",
+        action="WORKSPACE_MEMBER_PROPOSED",
         resource_type="WORKSPACE",
         resource_id=str(workspace_id),
         outcome="SUCCESS",
         correlation_id=correlation_id,
-        details={"role": body.role, "principal_kind": body.principal_kind},
+        details={
+            "role": body.role,
+            "principal_kind": body.principal_kind,
+            "member_principal_id": body.principal_id,
+            "governance_review_id": str(review_id),
+        },
     )
-    await session.commit()
+    await _commit_or_conflict(session, "principal already has a membership")
     await session.refresh(membership)
-    return membership
+    return WorkspaceMembershipProposalRead(
+        **WorkspaceMembershipRead.model_validate(membership).model_dump(),
+        governance_review_id=review_id,
+    )
 
 
 @router.get("/workspaces/{workspace_id}/members", response_model=Page)
@@ -448,7 +524,7 @@ async def list_source_bindings(
 async def create_business_node(
     organization_id: UUID,
     body: BusinessNodeCreate,
-    context: SecurityContext = Depends(require_roles(*_ADMIN, "Steward")),
+    context: SecurityContext = Depends(require_roles(*_ADMIN, "DataSteward")),
     session: AsyncSession = Depends(get_session),
     correlation_id: str = Depends(get_correlation_id),
 ) -> BusinessNode:
@@ -523,7 +599,7 @@ async def get_business_tree(
 async def create_business_assignment(
     organization_id: UUID,
     body: BusinessAssignmentCreate,
-    context: SecurityContext = Depends(require_roles(*_ADMIN, "Steward")),
+    context: SecurityContext = Depends(require_roles(*_ADMIN, "DataSteward")),
     session: AsyncSession = Depends(get_session),
     correlation_id: str = Depends(get_correlation_id),
 ) -> BusinessAssignment:
@@ -604,7 +680,7 @@ async def list_access_policies(
 
 @router.post(
     "/organizations/{organization_id}/access-policies",
-    response_model=AccessPolicyRead,
+    response_model=AccessPolicyProposalRead,
     status_code=201,
 )
 async def create_access_policy(
@@ -613,14 +689,35 @@ async def create_access_policy(
     context: SecurityContext = Depends(require_roles("PlatformAdmin", "OrganizationAdmin")),
     session: AsyncSession = Depends(get_session),
     correlation_id: str = Depends(get_correlation_id),
-) -> AccessPolicy:
+) -> AccessPolicyProposalRead:
+    """Propose an access policy (INV-8, R11-AUD02).
+
+    The policy is always created `DRAFT`, which the policy engine never loads, and an
+    `ACCESS_POLICY` review is opened for it; it becomes `ACTIVE` only when a *different*
+    principal approves that review (`POST /v1/governance/reviews/{id}/decision`), and
+    `REJECTED` if one rejects it. The response is still 201 and still the policy; it now also
+    carries `governance_review_id`.
+
+    A body asking for `status: ACTIVE` is refused with 422 rather than quietly created as a
+    draft: a caller who believes a DENY or MASK policy is in force when it is not has been
+    told something false, and this is the one field where that is worse than an error.
+    """
     enforce_organization(context, organization_id)
+    if body.status != POLICY_DRAFT:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "an access policy cannot be created ACTIVE: it is created as a DRAFT and "
+                "becomes ACTIVE when a different principal approves its governance review"
+            ),
+        )
     latest = await session.scalar(
         select(AccessPolicy)
         .where(AccessPolicy.organization_id == organization_id, AccessPolicy.code == body.code)
         .order_by(AccessPolicy.version.desc())
     )
     policy = AccessPolicy(
+        id=uuid4(),
         organization_id=organization_id,
         code=body.code,
         version=(latest.version + 1) if latest else 1,
@@ -633,10 +730,19 @@ async def create_access_policy(
         action_match=body.action_match,
         transform=body.transform,
         condition=body.condition,
-        status=body.status,
+        status=POLICY_DRAFT,
         created_by=context.principal_id,
     )
     session.add(policy)
+    review = open_access_review(
+        session,
+        organization_id=organization_id,
+        object_type=ACCESS_POLICY_REVIEW_TYPE,
+        object_id=policy.id,
+        requested_action="ACTIVATE",
+        requested_by=context.principal_id,
+    )
+    review_id = review.id
     record_audit(
         session,
         context,
@@ -645,11 +751,19 @@ async def create_access_policy(
         resource_id=body.code,
         outcome="SUCCESS",
         correlation_id=correlation_id,
-        details={"effect": body.effect, "status": body.status, "version": policy.version},
+        details={
+            "effect": body.effect,
+            "status": POLICY_DRAFT,
+            "version": policy.version,
+            "governance_review_id": str(review_id),
+        },
     )
-    await session.commit()
+    await _commit_or_conflict(session, "an access policy with this code and version already exists")
     await session.refresh(policy)
-    return policy
+    return AccessPolicyProposalRead(
+        **AccessPolicyRead.model_validate(policy).model_dump(),
+        governance_review_id=review_id,
+    )
 
 
 # --- authorization probe ----------------------------------------------------
@@ -745,7 +859,6 @@ async def simulate_authorization(
             roles=frozenset(simulated.roles),
             workspace_id=workspace_id,
             purpose=simulated.purpose,
-            isolation_boundary_id=workspace.isolation_boundary_id,
         )
         for index, simulated in enumerate(body.subjects)
     )
@@ -768,6 +881,139 @@ async def simulate_authorization(
         ],
     )
 
+
+@router.get(
+    "/organizations/{organization_id}/enforcement-readiness",
+    response_model=EnforcementReadinessRead,
+)
+async def get_enforcement_readiness(
+    organization_id: UUID,
+    window_days: int = Query(default=7, ge=1, le=90),
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "Auditor", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> EnforcementReadinessRead:
+    """R11-D9: what would break if workspace authorization were switched on.
+
+    `aida.workspace_access.enforcement_readiness` has existed since the
+    ADR-0018 rollout and `Settings.workspace_authorization_posture` tells
+    operators to run it before flipping a workspace to ENFORCE -- but nothing
+    called it except tests, so the instruction named a function no operator
+    could reach. This is that function, reachable, joined to the half it never
+    had.
+
+    The two halves answer different questions and are deliberately not summed
+    into one score:
+
+    * **Per workspace, what did traffic show?** Recorded shadow divergences --
+      requests a SHADOW workspace allowed and an ENFORCE one would have
+      refused. This is evidence of real breakage, and it is silent about
+      anything nobody exercised in the window.
+    * **Across the estate, what does the inventory imply?** Which datasources
+      cannot resolve a workspace at all. These break the moment
+      `unresolved_workspace_posture` flips to DENY *whether or not* anyone has
+      queried them, so no amount of quiet traffic makes them safe. This is the
+      blocker a divergence report structurally cannot show.
+
+    `ready` is the conjunction, and `blockers` says in sentences what has to
+    change. Value-free (INV-6): counts, reason codes and object names, never a
+    policy body and never anything about the data itself.
+    """
+    enforce_organization(context, organization_id)
+    settings = get_settings()
+    configured = describe_configured_posture(settings)
+
+    workspaces = (
+        await session.scalars(
+            select(Workspace)
+            .where(
+                Workspace.organization_id == organization_id,
+                Workspace.status == "ACTIVE",
+            )
+            .order_by(Workspace.name)
+        )
+    ).all()
+    since = datetime.now(UTC) - timedelta(days=window_days)
+    workspace_reports = [
+        (workspace, await enforcement_readiness(session, workspace, since=since))
+        for workspace in workspaces
+    ]
+    scope = await unresolved_scope(session, organization_id=organization_id, limit=limit)
+
+    observing = [w for w in workspaces if w.authorization_mode != "ENFORCE"]
+    diverging = [(w, r) for w, r in workspace_reports if r.would_be_denials]
+
+    blockers: list[str] = []
+    if scope.unbound:
+        blockers.append(
+            f"{scope.unbound} datasource(s) have no live source binding, so a workspace "
+            "cannot be resolved for them; queries against them are refused once "
+            "unresolved scope is set to DENY"
+        )
+    if scope.ambiguous:
+        blockers.append(
+            f"{scope.ambiguous} datasource(s) have more than one live source binding, so "
+            "the workspace is ambiguous; callers must name a workspace before unresolved "
+            "scope is set to DENY"
+        )
+    if configured.unresolved_scope_outcome != "DENIED":
+        blockers.append(
+            "unresolved-workspace requests still proceed undecided "
+            "(unresolved_workspace_posture is not DENY)"
+        )
+    for workspace, report in diverging:
+        blockers.append(
+            f"workspace {workspace.name} recorded {report.would_be_denials} would-be "
+            f"denial(s) affecting {report.distinct_principals_affected} principal(s) in "
+            f"the last {window_days} day(s)"
+        )
+    if observing:
+        blockers.append(
+            f"{len(observing)} ACTIVE workspace(s) are still in SHADOW and enforce nothing"
+        )
+
+    return EnforcementReadinessRead(
+        organization_id=organization_id,
+        window_days=window_days,
+        declared_posture=configured.declared_posture,
+        unresolved_scope_outcome=configured.unresolved_scope_outcome,
+        workspaces_total=len(workspaces),
+        workspaces_enforcing=len(workspaces) - len(observing),
+        workspaces_observing=len(observing),
+        datasources_total=scope.datasources_total,
+        datasources_resolvable=scope.resolvable,
+        datasources_unbound=scope.unbound,
+        datasources_ambiguous=scope.ambiguous,
+        unresolved_datasources=[
+            UnresolvedDatasourceRead(
+                datasource_id=item.datasource_id,
+                name=item.name,
+                reason_code=item.reason_code,
+                live_bindings=item.live_bindings,
+            )
+            for item in scope.datasources
+        ],
+        unresolved_datasources_truncated=scope.truncated,
+        workspaces=[
+            WorkspaceReadinessRead(
+                workspace_id=report.workspace_id,
+                name=workspace.name,
+                authorization_mode=report.mode,
+                would_be_denials=report.would_be_denials,
+                distinct_principals_affected=report.distinct_principals_affected,
+                top_reason_codes=[
+                    ReasonCodeCount(reason_code=code, count=hits)
+                    for code, hits in report.top_reason_codes
+                ],
+                ready=report.ready,
+            )
+            for workspace, report in workspace_reports
+        ],
+        blockers=blockers,
+        ready=not blockers,
+    )
 
 # ---- Moved from aida.api ST-07 identity_tenancy Commit C (2026-09-03) ----
 # The 7 required endpoints (per session addendum's identity_tenancy TODO row) plus
@@ -1249,7 +1495,7 @@ async def request_cross_boundary_grant(
 async def create_project(
     lob_id: UUID,
     body: ProjectCreate,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "ProjectAdmin")),
+    context: SecurityContext = Depends(require_roles("PlatformAdmin")),
     session: AsyncSession = Depends(get_session),
 ) -> Project:
     lob = await session.get(LineOfBusiness, lob_id)

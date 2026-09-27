@@ -25,6 +25,7 @@ from sqlalchemy.pool import StaticPool
 
 from aida.db import Base
 from aida.models import (
+    AccessPolicy,
     DataDomain,
     DataSource,
     GlossaryTerm,
@@ -39,6 +40,8 @@ from aida.models import (
     SemanticMetric,
     SemanticMetricVersion,
     SemanticModelVersion,
+    Workspace,
+    WorkspaceMembership,
 )
 from aida.review_queue_read_model import compose_review_queue, summarize_review_queue
 
@@ -257,6 +260,63 @@ class _Estate:
         await db.flush()
         return review
 
+    async def access_policy_review(self, index: int) -> GovernanceReview:
+        policy = AccessPolicy(
+            organization_id=self.organization.id,
+            code=f"deny-export-{index}-{uuid4().hex[:6]}",
+            version=1,
+            name=f"Deny export {index}",
+            effect="DENY",
+            priority=500 + index,
+            subject_match={"principal_kind": ["AGENT"]},
+            resource_match={"classification": ["RESTRICTED"]},
+            action_match=["EXPORT"],
+            created_by="policy-maker",
+            status="DRAFT",
+        )
+        self.db.add(policy)
+        await self.db.flush()
+        review = GovernanceReview(
+            organization_id=self.organization.id,
+            object_type="ACCESS_POLICY",
+            object_id=str(policy.id),
+            requested_action="ACTIVATE",
+            requested_by="policy-maker",
+        )
+        self.db.add(review)
+        await self.db.flush()
+        return review
+
+    async def workspace_membership_review(self, index: int) -> GovernanceReview:
+        workspace = Workspace(
+            organization_id=self.organization.id,
+            name=f"Workspace {index}",
+            slug=f"workspace-{index}-{uuid4().hex[:6]}",
+        )
+        self.db.add(workspace)
+        await self.db.flush()
+        membership = WorkspaceMembership(
+            organization_id=self.organization.id,
+            workspace_id=workspace.id,
+            principal_id=f"person-{index}@example.com",
+            principal_kind="HUMAN",
+            role="analyst",
+            granted_by="membership-maker",
+            status="PENDING_APPROVAL",
+        )
+        self.db.add(membership)
+        await self.db.flush()
+        review = GovernanceReview(
+            organization_id=self.organization.id,
+            object_type="WORKSPACE_MEMBERSHIP",
+            object_id=str(membership.id),
+            requested_action="GRANT",
+            requested_by="membership-maker",
+        )
+        self.db.add(review)
+        await self.db.flush()
+        return review
+
 
 async def test_composition_query_count_does_not_grow_with_page_size(
     session: AsyncSession, counted: _Counter
@@ -312,6 +372,38 @@ async def test_composition_query_count_is_bounded_across_mixed_types(
     # The absolute ceiling matters too: "constant" at 500 statements would still
     # be a bad endpoint. Five per diffable type is the batched shape.
     assert large_cost <= 15
+
+
+async def test_access_diff_query_count_is_flat_across_both_target_types(
+    session: AsyncSession, counted: _Counter
+) -> None:
+    """AUD12 adds one batched target read per access type, never one per review."""
+    estate = await _Estate(session).build()
+    small = [
+        await estate.access_policy_review(0),
+        await estate.workspace_membership_review(0),
+    ]
+    large = small + [
+        review
+        for index in range(1, 17)
+        for review in (
+            await estate.access_policy_review(index),
+            await estate.workspace_membership_review(index),
+        )
+    ]
+
+    counted.statements.clear()
+    small_rows = await compose_review_queue(session, small)
+    small_cost = len(counted)
+
+    counted.statements.clear()
+    large_rows = await compose_review_queue(session, large)
+    large_cost = len(counted)
+
+    assert all(row.diff.diffable for row in [*small_rows, *large_rows])
+    assert small_cost == large_cost == 2, (
+        f"two access reviews cost {small_cost} statements, {len(large)} cost {large_cost}"
+    )
 
 
 async def test_summary_answers_a_count_in_one_statement_composing_nothing(

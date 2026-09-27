@@ -23,11 +23,11 @@ below identify as squarely part of this domain):
 * `LineOfBusiness`, `DataDomain`, `CrossBoundaryGrant` -- pre-ADR-0018 and
   ADR-0017 governance-domain hierarchy, still authoritative until the
   ADR-0018 cutover completes.
-* `IsolationBoundary`, `Workspace`, `WorkspaceMembership`,
+* `Workspace`, `WorkspaceMembership`,
   `WorkspaceAccessRule`, `AuthorizationShadowRecord`, `SourceBinding` --
   ADR-0018 axis 1 (access: organization -> workspace) and its supporting
   grant/audit records.
-* `BusinessNode`, `BusinessAssignment`, `BusinessAssignmentRule`,
+* `BusinessNode`, `BusinessAssignment`,
   `BusinessNodeClosure`, `BusinessNodeRollup` -- ADR-0018 axis 2
   (classification).
 * `Project` -- scoped inside a line of business / data domain.
@@ -50,7 +50,6 @@ modules (e.g. `aida.envelope_models`), not identity-tenancy-owned.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -199,31 +198,6 @@ class CrossBoundaryGrant(Base, TimestampMixin):
 # transition. See Docs/10-architecture/adr/ADR-0018-*.md for the migration steps.
 
 
-class IsolationBoundary(Base, TimestampMixin):
-    """A hard wall that no grant can cross (ADR-0018).
-
-    The escape hatch for genuine Chinese walls -- an advisory desk that must not
-    see a trading desk. Deliberately rare and explicit: a bank has a handful, not
-    one per line of business, because everything softer is better expressed as an
-    access policy. `mode="STRICT"` admits no cross-boundary grant by any
-    mechanism, including administrator action; `ADVISORY` records the boundary
-    for reporting but lets an approved grant cross it.
-    """
-
-    __tablename__ = "isolation_boundary"
-    __table_args__ = (UniqueConstraint("organization_id", "code"),)
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    code: Mapped[str] = mapped_column(String(50), nullable=False)
-    mode: Mapped[str] = mapped_column(String(20), default="STRICT", nullable=False)
-    description: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-
-
 class Workspace(Base, TimestampMixin):
     """The unit of grant, membership, budget and blast radius (ADR-0018).
 
@@ -231,8 +205,6 @@ class Workspace(Base, TimestampMixin):
     membership list, the source bindings that decide which datasources it may
     reach and how, and the projects that scope analysis inside it. Tenancy scope
     on governed records becomes `(organization_id, workspace_id)`.
-
-    `isolation_boundary_id` is normally NULL -- most workspaces need no hard wall.
     """
 
     __tablename__ = "workspace"
@@ -241,9 +213,6 @@ class Workspace(Base, TimestampMixin):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    isolation_boundary_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("isolation_boundary.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -492,13 +461,11 @@ class BusinessAssignment(Base, TimestampMixin):
     )
     target_type: Mapped[str] = mapped_column(String(40), nullable=False)
     target_id: Mapped[str] = mapped_column(String(120), nullable=False)
-    # MANUAL: a steward said so. RULE: produced by an assignment rule.
+    # MANUAL: a steward said so. RULE: reserved for rule-driven assignment, which
+    # ADR-0018's 2026-09-13 addendum defers until it is built with its evaluator.
     # INFERRED: proposed by analysis, never authoritative until confirmed.
     # MIGRATED: generated from the pre-ADR-0018 tenancy columns.
     assignment_kind: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
-    rule_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("business_assignment_rule.id", ondelete="SET NULL"), nullable=True
-    )
     confidence: Mapped[float | None] = mapped_column(Float)
     assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
     confirmed_by: Mapped[str | None] = mapped_column(String(255))
@@ -507,34 +474,6 @@ class BusinessAssignment(Base, TimestampMixin):
     )
     effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-
-
-class BusinessAssignmentRule(Base, TimestampMixin):
-    """A governed rule that proposes assignments (`schema LIKE 'rtl_%' -> Retail Banking`).
-
-    Re-evaluated on catalog drift. Produces *proposals*, never silent
-    reassignment -- a rule that quietly moved assets between domains would make
-    the classification tree untrustworthy exactly when it matters.
-    """
-
-    __tablename__ = "business_assignment_rule"
-    __table_args__ = (UniqueConstraint("organization_id", "code"),)
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    business_node_id: Mapped[UUID] = mapped_column(
-        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    code: Mapped[str] = mapped_column(String(80), nullable=False)
-    target_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    # Deterministic match spec, e.g. {"schema_like": "rtl_%", "datasource_id": "..."}.
-    # Never a free-form expression -- see the tool-parameter reasoning in module 14.
-    match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class BusinessNodeClosure(Base):

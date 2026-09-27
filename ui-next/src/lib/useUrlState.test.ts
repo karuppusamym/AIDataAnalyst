@@ -29,7 +29,7 @@ describe("useUrlState", () => {
     act(() => result.current[1]({ type: "TABLE" }));
 
     expect(location.search).toBe("?q=orders&type=TABLE");
-    expect(location.hash).toBe("#/catalog");
+    expect(location.hash).toBe("#/analyst/catalog");
   });
 
   it("deletes a key when the patch value is null or empty", () => {

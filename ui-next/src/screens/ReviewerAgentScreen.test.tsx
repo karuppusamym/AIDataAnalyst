@@ -18,6 +18,7 @@ const resumeReviewerAgent = vi.fn();
 const fetchDisagreementRates = vi.fn();
 const fetchReviewerAgentSamples = vi.fn();
 const resolveAuditSample = vi.fn();
+const fetchSampleDownstreamImpact = vi.fn();
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -31,6 +32,7 @@ vi.mock("../lib/api", async () => {
     fetchDisagreementRates: (...args: unknown[]) => fetchDisagreementRates(...args),
     fetchReviewerAgentSamples: (...args: unknown[]) => fetchReviewerAgentSamples(...args),
     resolveAuditSample: (...args: unknown[]) => resolveAuditSample(...args),
+    fetchSampleDownstreamImpact: (...args: unknown[]) => fetchSampleDownstreamImpact(...args),
   };
 });
 
@@ -160,6 +162,15 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
       minimum_resolved_for_signal: 20,
       breaching_object_types: [],
       by_object_type: [],
+      by_risk_tier: [],
+      resolution: {
+        resolved: 0,
+        median_hours: null,
+        p90_hours: null,
+        max_hours: null,
+        pending: 0,
+        oldest_pending_hours: null,
+      },
     });
     render(<ReviewerAgentScreen />);
 
@@ -173,6 +184,29 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Agree" }).length).toBeGreaterThan(0));
     expect(screen.getAllByRole("button", { name: "Disagree" }).length).toBeGreaterThan(0);
+  });
+
+  /* R11-C8: a correction undoes the change; the answers it reached are listed
+     on the disputed sample, loaded only when asked for. */
+  it("lists the answers a disputed decision reached while it stood", async () => {
+    const { makeFixtureSampleDownstreamImpact } = await import("../lib/fixtures");
+    const sampleId = "ffffffff-4444-4444-4444-444444444444";
+    fetchReviewerAgentSamples.mockResolvedValue(
+      makeFixtureReviewerAgentSamples({ outcome: "DISAGREED" }),
+    );
+    fetchSampleDownstreamImpact.mockResolvedValue(makeFixtureSampleDownstreamImpact(sampleId));
+    render(<ReviewerAgentScreen />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Answers that relied on it" }));
+
+    expect(await screen.findByText("1 answer")).toBeInTheDocument();
+    expect(fetchSampleDownstreamImpact).toHaveBeenCalledWith(ORG, sampleId);
+    expect(screen.getByRole("link", { name: "Answer aaaaaaaa" })).toHaveAttribute(
+      "href",
+      "?run=aaaaaaaa-7777-7777-7777-777777777777#/analyst",
+    );
+    expect(screen.getByText(/cited the exact version/)).toBeInTheDocument();
+    expect(screen.getByText(/relied on it while it stood/)).toBeInTheDocument();
   });
 
   async function openAgreeDialog() {
@@ -208,5 +242,38 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
     expect(await screen.findByText(/marked the .* sample as agreed/i)).toBeInTheDocument();
     expect(fetchReviewerAgentSamples).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  /* AR-11: the oversight the agent's licence depends on, where an operator
+     looks. */
+  it("shows the unread audit sample against its bound, and says when it has stopped the agent", async () => {
+    fetchReviewerAgentState.mockResolvedValue({
+      ...makeFixtureReviewerAgentState(ORG),
+      unresolved_samples: 50,
+      audit_backlog_exceeded: true,
+    });
+    render(<ReviewerAgentScreen />);
+
+    expect(await screen.findByText("50 of 50")).toBeInTheDocument();
+    expect(screen.getByText("stopped: audit sample unread")).toBeInTheDocument();
+  });
+
+  it("shows the false-approval rate by risk tier and how long the sample waits", async () => {
+    render(<ReviewerAgentScreen />);
+
+    expect(await screen.findByText("By risk tier")).toBeInTheDocument();
+    expect(screen.getAllByText(/false-approval rate/)).toHaveLength(2);
+    expect(screen.getByText("15%")).toBeInTheDocument(); // T1, 4 of 27
+    expect(screen.getByText("6.5h")).toBeInTheDocument(); // median
+    expect(screen.getByText("3d")).toBeInTheDocument(); // oldest unread, 71 hours
+  });
+
+  it("links each sampled decision to the review it decided", async () => {
+    render(<ReviewerAgentScreen />);
+
+    const links = await screen.findAllByRole("link", { name: "Open the review" });
+    expect(links[0]!.getAttribute("href")).toBe(
+      "?review=bbbbbbbb-1111-1111-1111-111111111111#/governance",
+    );
   });
 });

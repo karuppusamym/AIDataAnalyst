@@ -8,14 +8,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
-import {
-  makeFixtureCreateDbtProject,
-  makeFixtureDbtArtifactImports,
-  makeFixtureDbtLineage,
-  makeFixtureDbtProjects,
-  makeFixtureDbtResources,
-  makeFixtureImportDbtManifest,
-} from "../fixtures";
 import type {
   DbtArtifactImportRead,
   DbtArtifactImportRequest,
@@ -49,7 +41,7 @@ export function fetchDbtProjects(
   signal?: AbortSignal,
 ): Promise<PageOf<DbtProjectRead>> {
   return demoOr(
-    async () => makeFixtureDbtProjects(projectId),
+    async (fixtures) => fixtures.makeFixtureDbtProjects(projectId),
     async () => {
       return get<PageOf<DbtProjectRead>>(`/v1/projects/${projectId}/dbt-projects?limit=500`, signal);
     },
@@ -66,7 +58,7 @@ export function createDbtProject(
   signal?: AbortSignal,
 ): Promise<DbtProjectRead> {
   return demoOr(
-    async () => makeFixtureCreateDbtProject(projectId, body),
+    async (fixtures) => fixtures.makeFixtureCreateDbtProject(projectId, body),
     async () => {
       return postJson<DbtProjectRead>(`/v1/projects/${projectId}/dbt-projects`, body, signal);
     },
@@ -81,7 +73,7 @@ export function fetchDbtArtifactImports(
   signal?: AbortSignal,
 ): Promise<PageOf<DbtArtifactImportRead>> {
   return demoOr(
-    async () => makeFixtureDbtArtifactImports(dbtProjectId),
+    async (fixtures) => fixtures.makeFixtureDbtArtifactImports(dbtProjectId),
     async () => {
       return get<PageOf<DbtArtifactImportRead>>(
         `/v1/dbt-projects/${dbtProjectId}/artifact-imports?limit=100`,
@@ -106,7 +98,7 @@ export function importDbtManifest(
   signal?: AbortSignal,
 ): Promise<DbtArtifactImportRead> {
   return demoOr(
-    async () => makeFixtureImportDbtManifest(dbtProjectId, body),
+    async (fixtures) => fixtures.makeFixtureImportDbtManifest(dbtProjectId, body),
     async () => {
       return postJson<DbtArtifactImportRead>(
         `/v1/dbt-projects/${dbtProjectId}/artifact-imports`,
@@ -170,7 +162,7 @@ export function fetchDbtResources(
   signal?: AbortSignal,
 ): Promise<PageOf<DbtResourceRead>> {
   return demoOr(
-    async () => makeFixtureDbtResources(artifactImportId, query),
+    async (fixtures) => fixtures.makeFixtureDbtResources(artifactImportId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.resourceType) params.set("resource_type", query.resourceType);
@@ -197,7 +189,7 @@ export function fetchDbtLineage(
   signal?: AbortSignal,
 ): Promise<DbtLineageRead> {
   return demoOr(
-    async () => makeFixtureDbtLineage(artifactImportId),
+    async (fixtures) => fixtures.makeFixtureDbtLineage(artifactImportId),
     async () => {
       return get<DbtLineageRead>(`/v1/dbt-artifact-imports/${artifactImportId}/lineage?limit=2000`, signal);
     },

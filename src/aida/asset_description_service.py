@@ -17,6 +17,8 @@ are pure, deterministic functions of that evidence.
 """
 
 import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -27,6 +29,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
+from aida.envelope_models import AVAILABLE, MetadataTrigger, MetadataViewDefinition
+from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
     AssetDescriptionDraft,
     AssetDocumentation,
@@ -40,7 +44,12 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     OpenLineageTableEdge,
+    ProcedureLineageEdge,
+    ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
+from aida.refusal import RefusalDetail
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 # Below this overall score a draft carries too little evidence to be worth an
 # independent reviewer's time. A draft below this line stays in DRAFT and can
@@ -75,10 +84,38 @@ class AssetEvidence:
     grain_statement: str | None
     bound_term_names: tuple[str, ...]
     bound_term_ids: tuple[UUID, ...]
+    #: ADR-0026's parsed lineage -- a view's definition, pasted procedure SQL, a
+    #: captured routine -- as (edge type, edge id), the identifiers the per-edge
+    #: review queue uses. One edge per neighbouring table; the table's name is
+    #: in `upstream_table_names`/`downstream_table_names` beside OpenLineage's.
+    upstream_parsed_edges: tuple[tuple[str, UUID], ...] = ()
+    downstream_parsed_edges: tuple[tuple[str, UUID], ...] = ()
+    #: R11-FP08: TABLE, VIEW or MATERIALIZED_VIEW -- a view is described as a view.
+    object_kind: str = "TABLE"
+    #: For a view, how much of its definition Atlas holds: CAPTURED, TRUNCATED, QUARANTINED,
+    #: WITHHELD or NOT_CAPTURED. Never the definition itself, and never one of its constants.
+    definition_state: str | None = None
+    #: SHA-256 of the stored value-free definition the draft was written against.
+    definition_digest: str | None = None
+    #: R11-FP16: for a table, SHA-256 of the active columns' names, types and nullability the
+    #: draft was written against, so a later check can tell its shape moved.
+    column_digest: str | None = None
+    #: R11-FP01: (trigger name, firing table, trigger id) for each enabled trigger whose
+    #: reviewed lineage writes this table. Catalog facts only -- never the trigger's body.
+    writing_triggers: tuple[tuple[str, str, UUID], ...] = ()
+
+    @property
+    def is_view(self) -> bool:
+        return self.object_kind != "TABLE"
 
     @property
     def lineage_edge_count(self) -> int:
-        return len(self.upstream_edge_ids) + len(self.downstream_edge_ids)
+        return (
+            len(self.upstream_edge_ids)
+            + len(self.downstream_edge_ids)
+            + len(self.upstream_parsed_edges)
+            + len(self.downstream_parsed_edges)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +158,10 @@ def score_evidence(evidence: AssetEvidence) -> ConfidenceBreakdown:
     """
     categories = (
         evidence.column_count > 0,
-        bool(evidence.primary_key_columns) or evidence.foreign_key_count > 0,
+        # A view rarely declares keys; a captured definition is its structural evidence.
+        bool(evidence.primary_key_columns)
+        or evidence.foreign_key_count > 0
+        or evidence.definition_state == "CAPTURED",
         evidence.lineage_edge_count > 0,
         bool(evidence.dbt_description),
         bool(evidence.business_description),
@@ -166,13 +206,38 @@ def score_evidence(evidence: AssetEvidence) -> ConfidenceBreakdown:
     )
 
 
+_KIND_NOUNS = {"TABLE": "table", "VIEW": "view", "MATERIALIZED_VIEW": "materialized view"}
+#: R11-FP08: what a view's definition state lets a reader rely on. Each sentence describes the
+#: definition's availability; none quotes it, so no redacted constant is ever put back in prose.
+_DEFINITION_SENTENCES = {
+    "CAPTURED": (
+        "Its definition was captured from the source, so its lineage is read from the "
+        "definition itself."
+    ),
+    "TRUNCATED": (
+        "The source gave only part of its definition, so lineage read from it may be incomplete."
+    ),
+    "QUARANTINED": (
+        "Its captured definition was set aside by prompt-risk screening and is not read for "
+        "lineage."
+    ),
+    "WITHHELD": (
+        "The source withholds its definition from the scanning principal, so what it reads "
+        "from cannot be confirmed here."
+    ),
+    "NOT_CAPTURED": "Its definition has not been captured from the source.",
+}
+
+
 def compose_draft_text(evidence: AssetEvidence) -> str:
     """Assemble readable prose entirely from evidence fields. No model call."""
     column_word = "column" if evidence.column_count == 1 else "columns"
     sentences = [
-        f"{evidence.table_name} is a table in the {evidence.schema_name} schema with "
-        f"{evidence.column_count} {column_word}."
+        f"{evidence.table_name} is a {_KIND_NOUNS.get(evidence.object_kind, 'table')} in the "
+        f"{evidence.schema_name} schema with {evidence.column_count} {column_word}."
     ]
+    if evidence.is_view and evidence.definition_state in _DEFINITION_SENTENCES:
+        sentences.append(_DEFINITION_SENTENCES[evidence.definition_state])
     if evidence.primary_key_columns:
         sentences.append("It is keyed by " + ", ".join(evidence.primary_key_columns) + ".")
     if evidence.foreign_key_count:
@@ -182,9 +247,20 @@ def compose_draft_text(evidence: AssetEvidence) -> str:
             "catalog tables."
         )
     if evidence.upstream_table_names:
-        sentences.append(
+        lead = "Lineage shows it reads from " if evidence.is_view else (
             "Lineage shows it is populated from "
-            + ", ".join(evidence.upstream_table_names[:_LINEAGE_PROSE_LIMIT])
+        )
+        sentences.append(
+            lead + ", ".join(evidence.upstream_table_names[:_LINEAGE_PROSE_LIMIT]) + "."
+        )
+    if evidence.writing_triggers:
+        # R11-FP01: a trigger's write is a path no job or view explains, so it is
+        # named as what it is. Names only; the body is never quoted.
+        shown = evidence.writing_triggers[:_LINEAGE_PROSE_LIMIT]
+        trigger_word = "trigger" if len(shown) == 1 else "triggers"
+        sentences.append(
+            f"It is written by database {trigger_word} "
+            + ", ".join(f"{name} (fires on {firing_table})" for name, firing_table, _ in shown)
             + "."
         )
     if evidence.downstream_table_names:
@@ -213,14 +289,144 @@ def text_fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# --- R11-FP10: a refused proposal does not come back unchanged ------------------------------
+
+#: The keys `evidence_payload` writes: the signals a table draft stands on. Who drafted it, the
+#: run, the rank and any edit history are not evidence, so they never make two otherwise
+#: identical proposals look different.
+TABLE_EVIDENCE_SIGNALS = frozenset(
+    {
+        "column_count",
+        "primary_key_columns",
+        "foreign_key_count",
+        "upstream_edge_ids",
+        "downstream_edge_ids",
+        "upstream_parsed_edges",
+        "downstream_parsed_edges",
+        "lineage_edge_count",
+        "dbt_description_present",
+        "dbt_documented_column_count",
+        "business_annotation_id",
+        "bound_term_ids",
+        "object_kind",
+        "definition_state",
+        "definition_digest",
+        "writing_trigger_ids",
+    }
+)
+#: This exact text -- or the machine text it was edited from -- was rejected.
+REFUSED_TEXT = "TEXT"
+#: A proposal standing on exactly this evidence was rejected, whatever its wording.
+REFUSED_EVIDENCE = "EVIDENCE"
+#: This exact text was approved once and then withdrawn (R11-C8).
+REFUSED_WITHDRAWN = "WITHDRAWN"
+
+
+def _canonical(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return sorted(
+            (_canonical(item) for item in value),
+            key=lambda item: json.dumps(item, sort_keys=True, default=str),
+        )
+    return value
+
+
+def signals_fingerprint(payload: Mapping[str, Any], signal_keys: Iterable[str]) -> str | None:
+    """A digest of the evidence signals only, independent of list order. `None` when the
+    payload carries none of them -- a draft recorded without evidence matches nothing."""
+    keys = set(signal_keys)
+    signals = {key: _canonical(payload[key]) for key in sorted(keys) if key in payload}
+    if not signals:
+        return None
+    canonical = json.dumps(signals, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def refusal_reason(
+    *,
+    drafted_text: str,
+    payload: Mapping[str, Any],
+    refused: Iterable[tuple[str, Mapping[str, Any] | None]],
+    signal_keys: Iterable[str],
+) -> str | None:
+    """Why a new proposal is one a reviewer already refused, or `None`.
+
+    Three ways a rejected proposal used to come back. Its text matched only on
+    `text_fingerprint`, which an edit rewrites, so rejecting an edited draft let the original
+    machine text return; the machine text's fingerprint is kept as `original_fingerprint`
+    and is now matched too. A change in wording alone -- a better sentence template, the same
+    facts -- produced a "new" draft; the evidence fingerprint catches that, so a refused
+    proposal returns only when what it stands on changes.
+    """
+    keys = frozenset(signal_keys)
+    text_digest = text_fingerprint(drafted_text)
+    evidence_digest = signals_fingerprint(payload, keys)
+    for refused_fingerprint, refused_evidence in refused:
+        evidence = refused_evidence or {}
+        if text_digest in (refused_fingerprint, evidence.get("original_fingerprint")):
+            return REFUSED_TEXT
+        if evidence_digest is not None and signals_fingerprint(evidence, keys) == evidence_digest:
+            return REFUSED_EVIDENCE
+    return None
+
+
+async def table_refusal(
+    session: AsyncSession, table_id: UUID, *, drafted_text: str, payload: Mapping[str, Any]
+) -> str | None:
+    """`refusal_reason` against this table's REJECTED drafts, then its WITHDRAWN descriptions."""
+    rejected = (
+        await session.execute(
+            select(AssetDescriptionDraft.text_fingerprint, AssetDescriptionDraft.evidence).where(
+                AssetDescriptionDraft.table_id == table_id,
+                AssetDescriptionDraft.status == "REJECTED",
+            )
+        )
+    ).all()
+    reason = refusal_reason(
+        drafted_text=drafted_text,
+        payload=payload,
+        refused=[(fingerprint, evidence) for fingerprint, evidence in rejected],
+        signal_keys=TABLE_EVIDENCE_SIGNALS,
+    )
+    if reason is not None:
+        return reason
+    withdrawn = (
+        await session.scalars(
+            select(AssetDocumentationVersion.readme)
+            .join(
+                AssetDocumentation,
+                AssetDocumentation.id == AssetDocumentationVersion.documentation_id,
+            )
+            .where(
+                AssetDocumentation.table_id == table_id,
+                AssetDocumentationVersion.status == "WITHDRAWN",
+            )
+        )
+    ).all()
+    digest = text_fingerprint(drafted_text)
+    if any(text_fingerprint(readme) == digest for readme in withdrawn):
+        return REFUSED_WITHDRAWN
+    return None
+
+
 def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
     """JSON-safe evidence record: the raw signals a draft was built from."""
-    return {
+    payload: dict[str, Any] = {
         "column_count": evidence.column_count,
         "primary_key_columns": list(evidence.primary_key_columns),
         "foreign_key_count": evidence.foreign_key_count,
         "upstream_edge_ids": [str(value) for value in evidence.upstream_edge_ids],
         "downstream_edge_ids": [str(value) for value in evidence.downstream_edge_ids],
+        "upstream_parsed_edges": [
+            {"edge_type": edge_type, "edge_id": str(edge_id)}
+            for edge_type, edge_id in evidence.upstream_parsed_edges
+        ],
+        "downstream_parsed_edges": [
+            {"edge_type": edge_type, "edge_id": str(edge_id)}
+            for edge_type, edge_id in evidence.downstream_parsed_edges
+        ],
         "lineage_edge_count": evidence.lineage_edge_count,
         "dbt_description_present": bool(evidence.dbt_description),
         "dbt_documented_column_count": evidence.dbt_documented_column_count,
@@ -229,6 +435,184 @@ def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
         ),
         "bound_term_ids": [str(value) for value in evidence.bound_term_ids],
     }
+    if evidence.is_view:
+        # R11-FP08: which kind of object the draft describes, and the definition it was written
+        # against -- a digest of the stored value-free text, so a later check can tell it moved.
+        payload["object_kind"] = evidence.object_kind
+        payload["definition_state"] = evidence.definition_state
+        payload["definition_digest"] = evidence.definition_digest
+    elif evidence.column_digest is not None:
+        payload["column_digest"] = evidence.column_digest
+    if evidence.writing_triggers:
+        # R11-FP01: only when there are some, so a table no trigger writes records
+        # exactly the evidence -- and the refusal fingerprint -- it always did.
+        payload["writing_trigger_ids"] = [
+            str(trigger_id) for _name, _firing_table, trigger_id in evidence.writing_triggers
+        ]
+    return payload
+
+
+async def column_shape_digest(session: AsyncSession, table_id: UUID) -> str:
+    """SHA-256 of a table's active columns: names, types and nullability. Never a value."""
+    rows = (
+        await session.execute(
+            select(
+                MetadataColumn.name, MetadataColumn.physical_type, MetadataColumn.nullable
+            ).where(MetadataColumn.table_id == table_id, MetadataColumn.status == "ACTIVE")
+        )
+    ).all()
+    shape = sorted(
+        f"{name.lower()}\t{physical_type}\t{int(bool(nullable))}"
+        for name, physical_type, nullable in rows
+    )
+    return hashlib.sha256("\n".join(shape).encode("utf-8")).hexdigest()
+
+
+def _object_kind(object_type: str) -> str:
+    normalized = object_type.strip().replace(" ", "_").upper()
+    return normalized if normalized in ("VIEW", "MATERIALIZED_VIEW") else "TABLE"
+
+
+def _definition_facts(definition: MetadataViewDefinition | None) -> tuple[str, str | None]:
+    if definition is None:
+        return "NOT_CAPTURED", None
+    stored = definition.definition_sql_redacted
+    if definition.availability != AVAILABLE or stored is None:
+        return "WITHHELD", None
+    digest = (
+        hashlib.sha256(stored.encode("utf-8")).hexdigest()
+        if definition.redaction_status in VALUE_FREE_REDACTION_STATUSES
+        else None
+    )
+    if not is_eligible_for_model_context(definition.screening_status):
+        return "QUARANTINED", digest
+    return ("TRUNCATED" if definition.truncated else "CAPTURED"), digest
+
+
+#: ADR-0026's parsed-edge tables whose rows name two catalog tables. R11-FP01: a
+#: trigger's reviewed lineage is one of them -- the edge type is the review queue's
+#: own `TRIGGER` -- so a table a trigger writes is described as populated from the
+#: table the trigger fires on, exactly as a routine's target is.
+_PARSED_EDGE_MODELS: tuple[tuple[str, Any], ...] = (
+    ("VIEW", ViewLineageEdge),
+    ("PROCEDURE", ProcedureLineageEdge),
+    ("ROUTINE", DeepProcedureLineageEdge),
+    ("TRIGGER", TriggerLineageEdge),
+)
+#: The two whose rows can be a hop into a routine-local temp table.
+_BODY_EDGE_MODELS: tuple[Any, ...] = (DeepProcedureLineageEdge, TriggerLineageEdge)
+
+#: A neighbouring table's name, the edge type, and one edge that names it.
+_ParsedNeighbour = tuple[str, str, UUID]
+
+
+async def _parsed_lineage_neighbours(
+    session: AsyncSession, table: MetadataTable
+) -> tuple[list[_ParsedNeighbour], list[_ParsedNeighbour]]:
+    """The tables `table` is parsed as populated from, and those it feeds.
+
+    Only ACTIVE edges -- approved by a person, or activated by a person's own
+    parse -- between two catalog tables of this datasource. A PROPOSED edge,
+    such as every edge the lineage agent writes until someone approves it, is
+    not evidence yet, and a REJECTED one is evidence of nothing. A parser writes
+    one row per column pair, so one edge per neighbouring table is kept.
+    """
+    upstream: dict[str, tuple[str, UUID]] = {}
+    downstream: dict[str, tuple[str, UUID]] = {}
+    for edge_type, model in _PARSED_EDGE_MODELS:
+        filters: list[Any] = [
+            model.review_status == "ACTIVE",
+            MetadataTable.datasource_id == table.datasource_id,
+        ]
+        if model in _BODY_EDGE_MODELS:
+            # A hop into a temp table is the procedure's own plumbing.
+            filters.append(model.is_intermediate.is_(False))
+        if model is TriggerLineageEdge:
+            # INV-5, stated on the edge row itself rather than inferred from the
+            # joined table: the trigger axis restates both on every read.
+            filters.extend(
+                [
+                    model.organization_id == table.organization_id,
+                    model.datasource_id == table.datasource_id,
+                ]
+            )
+        for this_side, other_side, found in (
+            (model.target_table_id, model.source_table_id, upstream),
+            (model.source_table_id, model.target_table_id, downstream),
+        ):
+            ranked = (
+                select(
+                    model.id.label("edge_id"),
+                    MetadataTable.name.label("name"),
+                    func.row_number()
+                    .over(partition_by=other_side, order_by=model.id)
+                    .label("neighbour_rank"),
+                )
+                .join(MetadataTable, MetadataTable.id == other_side)
+                .where(this_side == table.id, other_side != table.id, *filters)
+                .subquery()
+            )
+            rows = (
+                await session.execute(
+                    select(ranked.c.edge_id, ranked.c.name)
+                    .where(ranked.c.neighbour_rank == 1)
+                    .order_by(ranked.c.name)
+                    .limit(_LINEAGE_QUERY_LIMIT)
+                )
+            ).all()
+            for edge_id, name in rows:
+                found.setdefault(name, (edge_type, edge_id))
+    return (
+        [(name, edge_type, edge_id) for name, (edge_type, edge_id) in upstream.items()],
+        [(name, edge_type, edge_id) for name, (edge_type, edge_id) in downstream.items()],
+    )
+
+
+async def _writing_triggers(
+    session: AsyncSession, table: MetadataTable
+) -> tuple[tuple[str, str, UUID], ...]:
+    """R11-FP01: the triggers whose reviewed lineage writes `table`, as
+    (trigger name, firing table, trigger id).
+
+    The fact a table's description should state and nothing else carries: its rows
+    are written by a trigger whenever another table changes, so no job, view or
+    call site explains them. Stated from the trigger's own catalog facts -- its name
+    and the table it fires on -- and never from its body, which is evidence to read
+    through the screening gate, not text to quote. Only ACTIVE edges (an agent's
+    proposal is not yet a fact), only a trigger the source still has and has not
+    disabled (a description is about what happens now), and INV-5 on both rows.
+    """
+    rows = (
+        await session.execute(
+            select(MetadataTrigger.id, MetadataTrigger.name, MetadataTrigger.table_name)
+            .join(TriggerLineageEdge, TriggerLineageEdge.trigger_id == MetadataTrigger.id)
+            .where(
+                TriggerLineageEdge.organization_id == table.organization_id,
+                TriggerLineageEdge.datasource_id == table.datasource_id,
+                TriggerLineageEdge.target_table_id == table.id,
+                TriggerLineageEdge.review_status == "ACTIVE",
+                TriggerLineageEdge.is_write.is_(True),
+                TriggerLineageEdge.is_intermediate.is_(False),
+                MetadataTrigger.organization_id == table.organization_id,
+                MetadataTrigger.datasource_id == table.datasource_id,
+                MetadataTrigger.status == "ACTIVE",
+                MetadataTrigger.is_enabled.is_not(False),
+            )
+            .distinct()
+            .order_by(MetadataTrigger.name, MetadataTrigger.id)
+            .limit(_LINEAGE_QUERY_LIMIT)
+        )
+    ).all()
+    return tuple((name, firing_table, trigger_id) for trigger_id, name, firing_table in rows)
+
+
+def _with_parsed_names(names: list[str], parsed: list[_ParsedNeighbour]) -> tuple[str, ...]:
+    """OpenLineage's names first, then each parsed neighbour not already named."""
+    merged = list(names)
+    for name, _edge_type, _edge_id in parsed:
+        if name not in merged:
+            merged.append(name)
+    return tuple(merged)
 
 
 async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetEvidence:
@@ -260,11 +644,20 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         1 for constraint in constraints if constraint.constraint_type == "FOREIGN_KEY"
     )
 
+    # Only same-source lineage a reviewer has not rejected is evidence. A draft
+    # is text anyone who can read this table will read, and naming a table in
+    # another datasource would disclose it past the per-read cross-source grant
+    # check (ADR-0017) -- the line `column_description_service` already draws.
+    # An edge a reviewer rejected (ADR-0026) is evidence of nothing.
+    lineage_filters = (
+        OpenLineageTableEdge.review_status == "ACTIVE",
+        MetadataTable.datasource_id == table.datasource_id,
+    )
     upstream_rows = (
         await session.execute(
             select(OpenLineageTableEdge.id, MetadataTable.name)
             .join(MetadataTable, MetadataTable.id == OpenLineageTableEdge.input_table_id)
-            .where(OpenLineageTableEdge.output_table_id == table.id)
+            .where(OpenLineageTableEdge.output_table_id == table.id, *lineage_filters)
             .limit(_LINEAGE_QUERY_LIMIT)
         )
     ).all()
@@ -272,10 +665,13 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         await session.execute(
             select(OpenLineageTableEdge.id, MetadataTable.name)
             .join(MetadataTable, MetadataTable.id == OpenLineageTableEdge.output_table_id)
-            .where(OpenLineageTableEdge.input_table_id == table.id)
+            .where(OpenLineageTableEdge.input_table_id == table.id, *lineage_filters)
             .limit(_LINEAGE_QUERY_LIMIT)
         )
     ).all()
+    # ADR-0026's parsed lineage, on the same terms -- see the helper.
+    upstream_parsed, downstream_parsed = await _parsed_lineage_neighbours(session, table)
+    writing_triggers = await _writing_triggers(session, table)
 
     # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
     # not on `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
@@ -303,6 +699,22 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
 
     dbt_description, dbt_documented_column_count = await _latest_dbt_evidence(session, table.id)
 
+    object_kind = _object_kind(table.object_type)
+    definition_state: str | None = None
+    definition_digest: str | None = None
+    if object_kind != "TABLE":
+        definition_state, definition_digest = _definition_facts(
+            await session.scalar(
+                select(MetadataViewDefinition).where(
+                    MetadataViewDefinition.table_id == table.id,
+                    MetadataViewDefinition.status == "ACTIVE",
+                )
+            )
+        )
+    column_digest = (
+        await column_shape_digest(session, table.id) if object_kind == "TABLE" else None
+    )
+
     return AssetEvidence(
         table_id=table.id,
         table_name=table.name,
@@ -310,9 +722,13 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         column_count=column_count,
         primary_key_columns=primary_key_columns,
         foreign_key_count=foreign_key_count,
-        upstream_table_names=tuple(name for _, name in upstream_rows),
+        upstream_table_names=_with_parsed_names(
+            [name for _, name in upstream_rows], upstream_parsed
+        ),
         upstream_edge_ids=tuple(edge_id for edge_id, _ in upstream_rows),
-        downstream_table_names=tuple(name for _, name in downstream_rows),
+        downstream_table_names=_with_parsed_names(
+            [name for _, name in downstream_rows], downstream_parsed
+        ),
         downstream_edge_ids=tuple(edge_id for edge_id, _ in downstream_rows),
         dbt_description=dbt_description,
         dbt_documented_column_count=dbt_documented_column_count,
@@ -322,6 +738,17 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         grain_statement=annotation.grain_statement if annotation else None,
         bound_term_names=tuple(name for name, _ in term_rows),
         bound_term_ids=tuple(term_id for _, term_id in term_rows),
+        upstream_parsed_edges=tuple(
+            (edge_type, edge_id) for _, edge_type, edge_id in upstream_parsed
+        ),
+        downstream_parsed_edges=tuple(
+            (edge_type, edge_id) for _, edge_type, edge_id in downstream_parsed
+        ),
+        object_kind=object_kind,
+        definition_state=definition_state,
+        definition_digest=definition_digest,
+        column_digest=column_digest,
+        writing_triggers=writing_triggers,
     )
 
 
@@ -412,6 +839,58 @@ async def publish_asset_documentation_version(
     return version
 
 
+#: R11-FP08: a view's definition moved after its description was drafted.
+DEFINITION_MOVED = "DEFINITION_MOVED"
+#: R11-FP16: a table's columns moved after its description was drafted.
+COLUMNS_MOVED = "COLUMNS_MOVED"
+
+
+async def definition_moved(
+    session: AsyncSession, draft: AssetDescriptionDraft
+) -> RefusalDetail | None:
+    """Why a draft no longer describes its view or table as it is, or `None`.
+
+    A view's draft records the state and digest of the definition it was written against,
+    and a table's the digest of its columns (`evidence_payload`). A draft recording neither,
+    written before either was recorded, is never refused here.
+    """
+    evidence = draft.evidence or {}
+    if "column_digest" in evidence:
+        if evidence.get("column_digest") == await column_shape_digest(session, draft.table_id):
+            return None
+        return RefusalDetail(
+            code=COLUMNS_MOVED,
+            message=(
+                "The table's columns changed after this description was drafted, so the draft "
+                "may describe columns the table no longer has, or miss ones it now has. Reject "
+                "it and draft again from the current columns."
+            ),
+        )
+    if "definition_state" not in evidence:
+        return None
+    state, digest = _definition_facts(
+        await session.scalar(
+            select(MetadataViewDefinition).where(
+                MetadataViewDefinition.table_id == draft.table_id,
+                MetadataViewDefinition.status == "ACTIVE",
+            )
+        )
+    )
+    drafted = (evidence.get("definition_state"), evidence.get("definition_digest"))
+    if drafted == (state, digest):
+        return None
+    return RefusalDetail(
+        code=DEFINITION_MOVED,
+        message=(
+            "The view's definition changed after this description was drafted, so the draft "
+            "may describe a view that no longer exists. Reject it and draft again from the "
+            "current definition."
+        ),
+        drafted_definition_state=drafted[0],
+        current_definition_state=state,
+    )
+
+
 async def apply_asset_description_draft(
     session: AsyncSession,
     draft: AssetDescriptionDraft,
@@ -428,6 +907,10 @@ async def apply_asset_description_draft(
     """
     if draft.status != "PENDING_APPROVAL":
         raise HTTPException(status_code=409, detail="draft is no longer pending review")
+    # R11-FP08: a view's draft is published only while the definition it describes stands.
+    moved = await definition_moved(session, draft)
+    if moved is not None:
+        raise HTTPException(status_code=409, detail=moved)
     version = await publish_asset_documentation_version(
         session,
         organization_id=draft.organization_id,

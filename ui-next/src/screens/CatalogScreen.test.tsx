@@ -207,3 +207,52 @@ describe("CatalogScreen -- P1-04 draft generation wiring", () => {
     expect((ids as string[]).length).toBe(2);
   });
 });
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (17B) — a Catalog row selection feeds Stewardship's Bulk actions
+   through the existing write path.
+
+   "Send to Bulk actions…" does not call any endpoint itself: it only opens
+   `#/steward/stewardship` with the checked ids and the chosen action as an
+   explicit selection (`?ids=`), which `StewardshipBulkActions`
+   (`StewardshipScreen.test.tsx`) turns into a `table_ids` request body on
+   submit there. This file proves the link Catalog builds; the receiving
+   side is proven separately.
+--------------------------------------------------------------------------- */
+describe("CatalogScreen -- 17B row selection feeds Bulk actions", () => {
+  it("retires the disabled Certify stub: selecting rows and sending Certify opens Bulk actions with those ids", async () => {
+    const { CatalogScreen } = await import("./CatalogScreen");
+    render(<CatalogScreen />);
+
+    fireEvent.click(await screen.findByTestId("check-t1"));
+    fireEvent.click(await screen.findByTestId("check-t2"));
+
+    // Default action is Certify -- what the old disabled stub promised.
+    fireEvent.click(screen.getByRole("button", { name: "Send to Bulk actions…" }));
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/stewardship"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("view")).toBe("bulk");
+    expect(params.get("action")).toBe("certify");
+    expect(params.get("ids")?.split(",").sort()).toEqual(["t1", "t2"]);
+  });
+
+  it("sends whichever bulk action is selected, not only certify", async () => {
+    const { CatalogScreen } = await import("./CatalogScreen");
+    render(<CatalogScreen />);
+
+    fireEvent.click(await screen.findByTestId("check-t1"));
+    fireEvent.change(screen.getByLabelText("Bulk action"), { target: { value: "tag" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to Bulk actions…" }));
+
+    await waitFor(() => expect(new URLSearchParams(location.search).get("action")).toBe("tag"));
+  });
+
+  it("offers no bulk toolbar -- and so no way to send a selection -- until a row is checked", async () => {
+    const { CatalogScreen } = await import("./CatalogScreen");
+    render(<CatalogScreen />);
+    await screen.findByTestId("check-t1");
+
+    expect(screen.queryByRole("button", { name: "Send to Bulk actions…" })).toBeNull();
+  });
+});

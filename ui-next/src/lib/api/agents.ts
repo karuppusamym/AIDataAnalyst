@@ -14,34 +14,9 @@
 
 import { demoOr, get, postJson, putJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureAgentAnalysis,
-  makeFixtureAgentContractRequests,
-  makeFixtureAgentEvaluations,
-  makeFixtureAgentInbox,
-  makeFixtureAgentRoster,
-  makeFixtureAgentRun,
-  makeFixtureAgentRunGroundingReceipts,
-  makeFixtureAgentRuns,
-  makeFixtureAiAssessmentTemplates,
-  makeFixtureAiAssets,
-  makeFixtureAiRemediations,
-  makeFixtureAiRuntimeStatus,
-  makeFixtureAiTrust,
-  makeFixtureCreateModelRoute,
-  makeFixtureDisagreementRates,
-  makeFixtureModelRoutes,
-  makeFixtureReviewerAgentPreReview,
-  makeFixtureReviewerAgentRun,
-  makeFixtureReviewerAgentSamples,
-  makeFixtureReviewerAgentState,
-  makeFixtureRunAgentEvaluation,
-  makeFixtureSubmitAgentContractRequest,
-  makeFixtureSubmitModelRoute,
-  makeFixtureUpdateAiRemediation,
-} from "../fixtures";
-import { ApiError } from "../http";
+import { ApiError, requestEventStream, streamedApiError } from "../http";
 import type {
+  AnalysisToolBlueprintRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
   AgentContractRequestCreate,
@@ -51,6 +26,7 @@ import type {
   AgentRosterRead,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
+  QueryLineageRead,
   AiAssessmentTemplateRead,
   AiAssetVersionRead,
   AiRemediationRead,
@@ -59,11 +35,18 @@ import type {
   AiTrustScoreRead,
   DisagreementReportRead,
   GovernanceReviewRead,
+  KillSwitchEngageRequest,
+  KillSwitchReleaseRequest,
+  KillSwitchStateRead,
   ModelRouteConfigurationCreate,
   ModelRouteConfigurationRead,
+  ModelRouteOutcomesRead,
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
+  SampleDownstreamImpactRead,
+  TaskAgentRunRead,
+  TaskAgentStateRead,
 } from "../types";
 import type { PageOf } from "../ui-types";
 
@@ -96,20 +79,49 @@ import type { PageOf } from "../ui-types";
  *         or query layer refused the request or the generated query.
  *    503  `ModelRouteUnavailable` -- no model route could serve the request.
  *    502  anything unhandled -- `"agent analysis execution failed"`.
+ *
+ *  R11-MP06: pass `onStage` to be told each governed stage as the run reaches
+ *  it. The call then goes to `POST .../agent-analyses/stream`, the same run
+ *  with server-sent events, and still resolves to the same response or
+ *  rejects with the same `ApiError` status and `detail` -- so every caller and
+ *  `classifyAgentAskError` read it unchanged. Without `onStage`, nothing changes.
  */
 export function runAgentAnalysis(
   datasourceId: string,
   body: AgentAnalysisRequest,
   signal?: AbortSignal,
+  onStage?: (stage: string) => void,
 ): Promise<AgentAnalysisResponse> {
   return demoOr(
-    async () => makeFixtureAgentAnalysis(datasourceId, body),
+    async (fixtures) => fixtures.makeFixtureAgentAnalysis(datasourceId, body),
     async () => {
-      return postJson<AgentAnalysisResponse>(
-        `/v1/datasources/${datasourceId}/agent-analyses`,
+      if (!onStage) {
+        return postJson<AgentAnalysisResponse>(
+          `/v1/datasources/${datasourceId}/agent-analyses`,
+          body,
+          signal,
+        );
+      }
+      let result: AgentAnalysisResponse | null = null;
+      let failure: { status: number; detail: unknown } | null = null;
+      await requestEventStream(
+        `/v1/datasources/${datasourceId}/agent-analyses/stream`,
         body,
+        (event, data) => {
+          if (event === "stage") onStage((data as { stage: string }).stage);
+          else if (event === "result") result = data as AgentAnalysisResponse;
+          else if (event === "error") failure = data as { status: number; detail: unknown };
+        },
         signal,
       );
+      if (failure) {
+        const { status, detail } = failure as { status: number; detail: unknown };
+        throw await streamedApiError(status, detail);
+      }
+      if (result) return result;
+      throw new ApiError(502, "the answer stream ended without a result", {
+        code: "STREAM_INCOMPLETE",
+      });
     },
   );
 }
@@ -135,7 +147,7 @@ export function fetchAgentRuns(
   signal?: AbortSignal,
 ): Promise<PageOf<AgentRunRead>> {
   return demoOr(
-    async () => makeFixtureAgentRuns(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureAgentRuns(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -153,7 +165,7 @@ export function fetchAgentRun(
   signal?: AbortSignal,
 ): Promise<AgentRunRead> {
   return demoOr(
-    async () => makeFixtureAgentRun(agentRunId),
+    async (fixtures) => fixtures.makeFixtureAgentRun(agentRunId),
     async () => {
       return get<AgentRunRead>(`/v1/agent-runs/${agentRunId}`, signal);
     },
@@ -172,7 +184,7 @@ export function fetchAgentRunGroundingReceipts(
   signal?: AbortSignal,
 ): Promise<AgentRunGroundingReceiptsRead> {
   return demoOr(
-    async () => makeFixtureAgentRunGroundingReceipts(agentRunId),
+    async (fixtures) => fixtures.makeFixtureAgentRunGroundingReceipts(agentRunId),
     async () => {
       return get<AgentRunGroundingReceiptsRead>(
         `/v1/agent-runs/${agentRunId}/grounding-receipts`,
@@ -180,6 +192,21 @@ export function fetchAgentRunGroundingReceipts(
       );
     },
   );
+}
+
+/** `GET /v1/query-executions/{id}/lineage` (`get_query_lineage`) -- R11-UX16: what a past
+ *  run executed, for its Query view once the response that carried it is gone: the
+ *  statement's shape as the gateway stored it (literals already replaced), the tables and
+ *  columns it read, and its row count. Never the values. Fixture mode has no executions,
+ *  so it refuses rather than inventing one. */
+export function fetchQueryExecutionLineage(
+  executionId: string,
+  signal?: AbortSignal,
+): Promise<QueryLineageRead> {
+  if (USE_FIXTURES) {
+    return Promise.reject(new Error("A past run's query is not available in fixture mode."));
+  }
+  return get<QueryLineageRead>(`/v1/query-executions/${executionId}/lineage`, signal);
 }
 
 /** AT-9 / row UX-15's error-mapping requirement: `run_agent_analysis` maps
@@ -195,13 +222,46 @@ export function fetchAgentRunGroundingReceipts(
  *  `alternatives` degrades to `[]` and the raw `detail` is still shown. */
 export type AgentAskErrorKind =
   | "AMBIGUOUS_DEFINITION"
+  | "AMBIGUOUS_KNOWLEDGE"
   | "DATASOURCE_DISABLED"
+  | "NOT_AUTHORIZED"
   | "POLICY_REJECTED"
+  | AgentAskContextProductKind
   | "MODEL_UNAVAILABLE"
   | "MODEL_THROTTLED"
   | "CLARIFICATION_NEEDED"
   | "SERVER_ERROR"
   | "UNKNOWN";
+
+/** R11-FP12: the three ways asking *through* a context product is refused, all 422s carrying a
+ *  stable code. They are not "the generated query was rejected by policy": the question never
+ *  reached a query, and what the person can do about each differs -- pick another product, ask
+ *  for access to this one, or ask something the product's tables can answer.
+ *
+ *  F08: they are three KINDS, not one. Collapsed into a single
+ *  `CONTEXT_PRODUCT_REFUSED` they shared one title and showed the server's raw token as the
+ *  detail, so a person whose role is not a consumer of the product read the literal string
+ *  `CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED` under "this product cannot answer that question" --
+ *  a remedy-free sentence describing the wrong problem. The three remedies this comment already
+ *  named are only reachable if the classification keeps them apart. */
+export type AgentAskContextProductKind =
+  | "CONTEXT_PRODUCT_UNAVAILABLE"
+  | "CONTEXT_PRODUCT_ROLE_REQUIRED"
+  | "CONTEXT_PRODUCT_OUT_OF_SCOPE";
+
+/** The server's own stable tokens (`agent_orchestrator.py:378-380`) mapped to the kind whose
+ *  remedy matches. Keyed by the wire value so an unrecognised token stays a plain
+ *  `POLICY_REJECTED` rather than being guessed into one of these. */
+const CONTEXT_PRODUCT_REFUSALS: Readonly<Record<string, AgentAskContextProductKind>> = {
+  CONTEXT_PRODUCT_NOT_AVAILABLE: "CONTEXT_PRODUCT_UNAVAILABLE",
+  CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED: "CONTEXT_PRODUCT_ROLE_REQUIRED",
+  CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: "CONTEXT_PRODUCT_OUT_OF_SCOPE",
+  // F01: the governed tool the planner chose depends on a table the product does not name
+  // (`agent_orchestrator.py`, `CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE`). Same remedy as a
+  // generated statement reading one; before 2026-09-21 it fell through to POLICY_REJECTED and
+  // showed the raw token.
+  CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE: "CONTEXT_PRODUCT_OUT_OF_SCOPE",
+};
 
 export interface AgentAskErrorAlternative {
   businessNodeId: string;
@@ -216,6 +276,18 @@ export interface AgentAskError {
   detail: string;
   /** Only populated for `AMBIGUOUS_DEFINITION`. */
   alternatives: AgentAskErrorAlternative[];
+  /** Only populated for `CLARIFICATION_NEEDED`: the inputs the matched tool
+   *  needs before it can answer, read from the server's structured `detail`
+   *  rather than parsed out of its sentence. Empty when the server sent prose
+   *  only, in which case the caller shows the message and nothing more. */
+  requiredParameters: string[];
+  /** The tool version those parameters belong to, so a retry can pin the same
+   *  tool instead of re-racing retrieval and possibly selecting another. */
+  toolVersionId: string | null;
+  /** Only populated for `AMBIGUOUS_KNOWLEDGE` (R11-OKF02): the subjects the context product's
+   *  knowledge names equally for this question, read from the server's structured `detail`,
+   *  so the person picks one instead of the model choosing silently. */
+  candidates: string[];
 }
 
 const AMBIGUOUS_DEFINITION_RE =
@@ -245,10 +317,24 @@ function parseAmbiguousAlternatives(detail: string): AgentAskErrorAlternative[] 
   return alternatives;
 }
 
+const NO_CLARIFICATION = {
+  alternatives: [] as AgentAskErrorAlternative[],
+  requiredParameters: [] as string[],
+  toolVersionId: null,
+  candidates: [] as string[],
+};
+
+/** Narrow the wire body's `unknown` to the string list this field is specified
+ *  to be; anything else is treated as absent rather than half-trusted. */
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
 export function classifyAgentAskError(error: ApiError): AgentAskError {
   const { status, detail } = error;
   if (status === 409 && detail === "datasource is disabled") {
-    return { kind: "DATASOURCE_DISABLED", status, detail, alternatives: [] };
+    return { kind: "DATASOURCE_DISABLED", status, detail, ...NO_CLARIFICATION };
   }
   if (status === 409 && AMBIGUOUS_DEFINITION_RE.test(detail)) {
     return {
@@ -256,14 +342,50 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
       status,
       detail,
       alternatives: parseAmbiguousAlternatives(detail),
+      requiredParameters: [],
+      toolVersionId: null,
+      candidates: [],
     };
   }
-  if (status === 409) return { kind: "CLARIFICATION_NEEDED", status, detail, alternatives: [] };
-  if (status === 422) return { kind: "POLICY_REJECTED", status, detail, alternatives: [] };
-  if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, alternatives: [] };
-  if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, alternatives: [] };
-  if (status === 502) return { kind: "SERVER_ERROR", status, detail, alternatives: [] };
-  return { kind: "UNKNOWN", status, detail, alternatives: [] };
+  if (status === 409 && error.details?.code === "AMBIGUOUS_KNOWLEDGE") {
+    return {
+      kind: "AMBIGUOUS_KNOWLEDGE",
+      status,
+      detail,
+      alternatives: [],
+      requiredParameters: [],
+      toolVersionId: null,
+      candidates: stringList(error.details?.candidates),
+    };
+  }
+  if (status === 409) {
+    return {
+      kind: "CLARIFICATION_NEEDED",
+      status,
+      detail,
+      alternatives: [],
+      requiredParameters: stringList(error.details?.required_parameters),
+      toolVersionId:
+        typeof error.details?.tool_version_id === "string" ? error.details.tool_version_id : null,
+      candidates: [],
+    };
+  }
+  // A refusal is not a failure, and telling them apart is the whole point of
+  // this function. Without this branch a 403 fell through to UNKNOWN and Ask
+  // said "the question could not be answered" -- which reads as a fault in the
+  // platform to someone who simply may not read that datasource, and sends
+  // them to support rather than to whoever grants access. R11-B11's browser
+  // journey found it on the denied-access case.
+  if (status === 403) return { kind: "NOT_AUTHORIZED", status, detail, ...NO_CLARIFICATION };
+  const contextProductKind = status === 422 ? CONTEXT_PRODUCT_REFUSALS[detail] : undefined;
+  if (contextProductKind !== undefined) {
+    return { kind: contextProductKind, status, detail, ...NO_CLARIFICATION };
+  }
+  if (status === 422) return { kind: "POLICY_REJECTED", status, detail, ...NO_CLARIFICATION };
+  if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, ...NO_CLARIFICATION };
+  if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, ...NO_CLARIFICATION };
+  if (status === 502) return { kind: "SERVER_ERROR", status, detail, ...NO_CLARIFICATION };
+  return { kind: "UNKNOWN", status, detail, ...NO_CLARIFICATION };
 }
 
 /* ---------------------------------------------------------------------------
@@ -282,7 +404,7 @@ export function fetchAiAssets(
   signal?: AbortSignal,
 ): Promise<PageOf<AiAssetVersionRead>> {
   return demoOr(
-    async () => makeFixtureAiAssets(organizationId),
+    async (fixtures) => fixtures.makeFixtureAiAssets(organizationId),
     async () => {
       return get<PageOf<AiAssetVersionRead>>(
         `/v1/organizations/${organizationId}/ai-assets?limit=200`,
@@ -299,7 +421,7 @@ export function fetchAiAssetTrust(
   signal?: AbortSignal,
 ): Promise<AiTrustScoreRead> {
   return demoOr(
-    async () => makeFixtureAiTrust(versionId),
+    async (fixtures) => fixtures.makeFixtureAiTrust(versionId),
     async () => {
       return get<AiTrustScoreRead>(`/v1/ai-asset-versions/${versionId}/trust`, signal);
     },
@@ -313,7 +435,7 @@ export function fetchAiRemediations(
   signal?: AbortSignal,
 ): Promise<PageOf<AiRemediationRead>> {
   return demoOr(
-    async () => makeFixtureAiRemediations(versionId),
+    async (fixtures) => fixtures.makeFixtureAiRemediations(versionId),
     async () => {
       return get<PageOf<AiRemediationRead>>(
         `/v1/ai-asset-versions/${versionId}/remediations?limit=200`,
@@ -331,7 +453,7 @@ export function updateAiRemediation(
   signal?: AbortSignal,
 ): Promise<AiRemediationRead> {
   return demoOr(
-    async () => makeFixtureUpdateAiRemediation(remediationId, body),
+    async (fixtures) => fixtures.makeFixtureUpdateAiRemediation(remediationId, body),
     async () => {
       return putJson<AiRemediationRead>(`/v1/ai-remediations/${remediationId}`, body, signal);
     },
@@ -344,7 +466,7 @@ export function fetchAiAssessmentTemplates(
   signal?: AbortSignal,
 ): Promise<AiAssessmentTemplateRead[]> {
   return demoOr(
-    async () => makeFixtureAiAssessmentTemplates(),
+    async (fixtures) => fixtures.makeFixtureAiAssessmentTemplates(),
     async () => {
       return get<AiAssessmentTemplateRead[]>("/v1/ai-assessment-templates", signal);
     },
@@ -358,13 +480,40 @@ export function fetchAiAssessmentTemplates(
    `/ai/runtime-status` and `/agent-evaluations` routes that view calls.
    See `AiGovernanceScreen.tsx`'s own header comment
    for the full endpoint list, file:line citations, and what was
-   deliberately left out (the kill switch; `AgentEvalGateRead`, which is
+   deliberately left out (`AgentEvalGateRead`, which is
    `AiRegistryScreen`'s per-asset-version concern, not this org-wide suite).
+   The organization kill switch is NOT left out any more: its three calls
+   follow `fetchAiRuntimeStatus` below (R11-AUD08).
 --------------------------------------------------------------------------- */
 
 export interface ModelRouteQuery {
   limit?: number;
   offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/model-route-outcomes`
+ *  (`list_model_route_outcomes`, R11-MP11) -- each route's record over the last
+ *  `days` of Ask runs, counted from what the runs recorded. The demo build has
+ *  no runs, so it answers an empty window rather than invented counts. */
+export function fetchModelRouteOutcomes(
+  organizationId: string,
+  days: number,
+  signal?: AbortSignal,
+): Promise<ModelRouteOutcomesRead> {
+  return demoOr(
+    async () => ({
+      organization_id: organizationId,
+      since: new Date(Date.now() - days * 86_400_000).toISOString(),
+      runs_considered: 0,
+      truncated: false,
+      routes: [],
+    }),
+    async () =>
+      get<ModelRouteOutcomesRead>(
+        `/v1/organizations/${organizationId}/model-route-outcomes?days=${days}`,
+        signal,
+      ),
+  );
 }
 
 /** `GET /v1/organizations/{organization_id}/model-routes` (`list_model_routes`,
@@ -377,7 +526,7 @@ export function fetchModelRoutes(
   signal?: AbortSignal,
 ): Promise<PageOf<ModelRouteConfigurationRead>> {
   return demoOr(
-    async () => makeFixtureModelRoutes(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureModelRoutes(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -400,7 +549,7 @@ export function createModelRoute(
   signal?: AbortSignal,
 ): Promise<ModelRouteConfigurationRead> {
   return demoOr(
-    async () => makeFixtureCreateModelRoute(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateModelRoute(organizationId, body),
     async () => {
       return postJson<ModelRouteConfigurationRead>(
         `/v1/organizations/${organizationId}/model-routes`,
@@ -420,7 +569,7 @@ export function submitModelRoute(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureSubmitModelRoute(routeId),
+    async (fixtures) => fixtures.makeFixtureSubmitModelRoute(routeId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/model-routes/${routeId}/submit`, {}, signal);
     },
@@ -434,10 +583,95 @@ export function submitModelRoute(
  *  not a tenant's data). */
 export function fetchAiRuntimeStatus(signal?: AbortSignal): Promise<AiRuntimeStatusRead> {
   return demoOr(
-    async () => makeFixtureAiRuntimeStatus(),
+    async (fixtures) => fixtures.makeFixtureAiRuntimeStatus(),
     async () => {
       return get<AiRuntimeStatusRead>("/v1/ai/runtime-status", signal);
     },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   The model kill switch (MG-2, `ai_governance_api.py`) -- "stop AI now".
+
+   Not the per-agent switch `engageAgentKillSwitch` below drives
+   (`agent_contract_api.py`, one agent's next run): this one halts every model
+   call for the ORGANIZATION (or, given a `route_key`, one route), checked live
+   on the very next `structured_completion`. Deliberately not the model-route
+   maker-checker either -- module 15 section 7 asks for a single-operator,
+   immediately-effective action that is audited rather than dual-controlled, and
+   reversal needs the same PlatformAdmin authorization. So there is no second
+   approver to wait for: a release is refused only when nothing is engaged
+   (409 "kill switch is not currently engaged").
+
+   The write calls refuse under fixtures rather than pretend, for the reason
+   `engageAgentKillSwitch` gives: a kill switch that silently did nothing is the
+   worst possible thing to mock. The read answers "nothing engaged" there, which
+   is the demo estate's whole truth and is what the live route itself answers
+   for an organization that never used the switch.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{organization_id}/kill-switch`
+ *  (`list_kill_switch_state`, `ai_governance_api.py`) -- every switch row this
+ *  organization has ever had: at most one `ORGANIZATION` row (`route_key` "*")
+ *  and one `ROUTE` row per route. An organization that never used the switch has
+ *  NO rows, so `[]` means "not engaged", not "unknown". Read by
+ *  AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer and Viewer. */
+export function fetchModelKillSwitchState(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<KillSwitchStateRead[]> {
+  return demoOr(
+    async () => [],
+    async () => {
+      return get<KillSwitchStateRead[]>(
+        `/v1/organizations/${encodeURIComponent(organizationId)}/kill-switch`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/kill-switch/engage`
+ *  (`engage_kill_switch`) -- stops model use. PlatformAdmin only. `reason` is
+ *  required (3-2000 characters) and is recorded with the audit event; leave
+ *  `route_key` out for the whole organization. Takes effect on the very next
+ *  model call. Engaging an already-engaged switch is accepted and replaces its
+ *  reason. */
+export function engageModelKillSwitch(
+  organizationId: string,
+  body: KillSwitchEngageRequest,
+  signal?: AbortSignal,
+): Promise<KillSwitchStateRead> {
+  if (USE_FIXTURES) {
+    return Promise.reject(
+      new Error("The kill switch is unavailable in demo data mode — run against the API."),
+    );
+  }
+  return postJson<KillSwitchStateRead>(
+    `/v1/organizations/${encodeURIComponent(organizationId)}/kill-switch/engage`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/kill-switch/release`
+ *  (`release_kill_switch`) -- lets model use resume. PlatformAdmin only, `reason`
+ *  required, audited identically to the engage. Refused with a 409 ("kill switch
+ *  is not currently engaged") when there is nothing to release. */
+export function releaseModelKillSwitch(
+  organizationId: string,
+  body: KillSwitchReleaseRequest,
+  signal?: AbortSignal,
+): Promise<KillSwitchStateRead> {
+  if (USE_FIXTURES) {
+    return Promise.reject(
+      new Error("The kill switch is unavailable in demo data mode — run against the API."),
+    );
+  }
+  return postJson<KillSwitchStateRead>(
+    `/v1/organizations/${encodeURIComponent(organizationId)}/kill-switch/release`,
+    body,
+    signal,
   );
 }
 
@@ -455,7 +689,7 @@ export function fetchAgentEvaluations(
   signal?: AbortSignal,
 ): Promise<PageOf<AgentEvaluationRunRead>> {
   return demoOr(
-    async () => makeFixtureAgentEvaluations(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureAgentEvaluations(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -478,7 +712,7 @@ export function runAgentEvaluation(
   signal?: AbortSignal,
 ): Promise<AgentEvaluationRunRead> {
   return demoOr(
-    async () => makeFixtureRunAgentEvaluation(organizationId),
+    async (fixtures) => fixtures.makeFixtureRunAgentEvaluation(organizationId),
     async () => {
       return postJson<AgentEvaluationRunRead>(
         `/v1/organizations/${organizationId}/agent-evaluations`,
@@ -516,7 +750,7 @@ export function fetchAgentContractRequests(
   signal?: AbortSignal,
 ): Promise<PageOf<AgentContractRequestRead>> {
   return demoOr(
-    async () => makeFixtureAgentContractRequests(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureAgentContractRequests(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -541,7 +775,7 @@ export function submitAgentContractRequest(
   signal?: AbortSignal,
 ): Promise<AgentContractRequestRead> {
   return demoOr(
-    async () => makeFixtureSubmitAgentContractRequest(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureSubmitAgentContractRequest(organizationId, body),
     async () => {
       return postJson<AgentContractRequestRead>(
         `/v1/organizations/${organizationId}/agent-contract-requests`,
@@ -564,7 +798,7 @@ export function fetchAgentInbox(
   signal?: AbortSignal,
 ): Promise<AgentInboxRead> {
   return demoOr(
-    async () => makeFixtureAgentInbox(organizationId, persona),
+    async (fixtures) => fixtures.makeFixtureAgentInbox(organizationId, persona),
     async () => {
       return get<AgentInboxRead>(
         `/v1/organizations/${organizationId}/agent-inbox?persona=${encodeURIComponent(persona)}`,
@@ -608,7 +842,7 @@ export function fetchAgentRoster(
   signal?: AbortSignal,
 ): Promise<AgentRosterRead> {
   return demoOr(
-    async () => makeFixtureAgentRoster(organizationId, query.windowDays ?? 30),
+    async (fixtures) => fixtures.makeFixtureAgentRoster(organizationId, query.windowDays ?? 30),
     async () => {
       const params = new URLSearchParams();
       if (query.windowDays) params.set("window_days", String(query.windowDays));
@@ -638,7 +872,7 @@ export function fetchReviewerAgentState(
   signal?: AbortSignal,
 ): Promise<ReviewerAgentStateRead> {
   return demoOr(
-    async () => makeFixtureReviewerAgentState(organizationId),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentState(organizationId),
     async () => {
       return get<ReviewerAgentStateRead>(`/v1/organizations/${organizationId}/reviewer-agent`, signal);
     },
@@ -655,7 +889,7 @@ export function runReviewerAgentPreReview(
   signal?: AbortSignal,
 ): Promise<ReviewerAgentRunResult> {
   return demoOr(
-    async () => makeFixtureReviewerAgentPreReview(),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentPreReview(),
     async () => {
       return postJson<ReviewerAgentRunResult>(
         `/v1/organizations/${organizationId}/reviewer-agent/pre-review?limit=${limit}`,
@@ -675,7 +909,7 @@ export function runReviewerAgent(
   signal?: AbortSignal,
 ): Promise<ReviewerAgentRunResult> {
   return demoOr(
-    async () => makeFixtureReviewerAgentRun(),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentRun(),
     async () => {
       return postJson<ReviewerAgentRunResult>(
         `/v1/organizations/${organizationId}/reviewer-agent/run?limit=${limit}`,
@@ -724,7 +958,7 @@ export function fetchDisagreementRates(
   signal?: AbortSignal,
 ): Promise<DisagreementReportRead> {
   return demoOr(
-    async () => makeFixtureDisagreementRates(windowDays),
+    async (fixtures) => fixtures.makeFixtureDisagreementRates(windowDays),
     async () => {
       return get<DisagreementReportRead>(
         `/v1/organizations/${organizationId}/reviewer-agent/disagreement-rates?window_days=${windowDays}`,
@@ -748,7 +982,7 @@ export function fetchReviewerAgentSamples(
   signal?: AbortSignal,
 ): Promise<PageOf<ReviewAuditSampleRead>> {
   return demoOr(
-    async () => makeFixtureReviewerAgentSamples(query),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentSamples(query),
     async () => {
       const params = new URLSearchParams();
       params.set("outcome", query.outcome ?? "PENDING");
@@ -756,6 +990,84 @@ export function fetchReviewerAgentSamples(
       params.set("offset", String(query.offset ?? 0));
       return get<PageOf<ReviewAuditSampleRead>>(
         `/v1/organizations/${organizationId}/reviewer-agent/samples?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `GET .../reviewer-agent/samples/{id}/downstream-impact` — R11-C8: the agent
+ *  runs that cited or consulted what a sampled decision changed, while that
+ *  change stood. Identifiers and match bases only; no question or answer text
+ *  is stored to return. */
+export function fetchSampleDownstreamImpact(
+  organizationId: string,
+  sampleId: string,
+  signal?: AbortSignal,
+): Promise<SampleDownstreamImpactRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureSampleDownstreamImpact(sampleId),
+    async () => {
+      return get<SampleDownstreamImpactRead>(
+        `/v1/organizations/${organizationId}/reviewer-agent/samples/${sampleId}/downstream-impact`,
+        signal,
+      );
+    },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   ADR-0029: task agents — the steward, lineage and quality agents. Each has
+   two real routes, `/v1/organizations/{org}/{kind}-agent` and `…/run`, with
+   the same response shapes (`task_agent_api.py`). A run only ever *opens*
+   review items — no task agent decides anything — so fixture mode returns a
+   representative result rather than refusing, the same standing as the
+   reviewer agent's run fixture.
+--------------------------------------------------------------------------- */
+
+export type TaskAgentKind = "steward" | "lineage" | "quality" | "tool";
+
+/** What a run is asked to do. Each agent's own request model narrows
+ *  `capabilities` to the keys it has; the shape is otherwise shared. */
+export interface TaskAgentRunBody {
+  capabilities: string[];
+  limit: number;
+  datasource_id: string | null;
+  dry_run: boolean;
+}
+
+/** `GET /v1/organizations/{org}/{kind}-agent` — whether the agent could run
+ *  here (and the refusal it would get if not), its tier and what that tier
+ *  lets it do, any kill switch stopping it, and how its proposals have fared
+ *  with reviewers. */
+export function fetchTaskAgentState(
+  organizationId: string,
+  kind: TaskAgentKind,
+  signal?: AbortSignal,
+): Promise<TaskAgentStateRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureTaskAgentState(organizationId, kind),
+    async () => {
+      return get<TaskAgentStateRead>(`/v1/organizations/${organizationId}/${kind}-agent`, signal);
+    },
+  );
+}
+
+/** `POST .../{kind}-agent/run` — one bounded run. 409s (via `ApiError`) with a
+ *  stable reason code in `detail` when the agent may not act; in that case
+ *  nothing the run produced is kept. `dry_run` previews and opens nothing. */
+export function runTaskAgent(
+  organizationId: string,
+  kind: TaskAgentKind,
+  body: TaskAgentRunBody,
+  signal?: AbortSignal,
+): Promise<TaskAgentRunRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureTaskAgentRun(organizationId, kind, body),
+    async () => {
+      return postJson<TaskAgentRunRead>(
+        `/v1/organizations/${organizationId}/${kind}-agent/run`,
+        body,
         signal,
       );
     },
@@ -778,5 +1090,33 @@ export async function resolveAuditSample(
   return postJson<ReviewAuditSampleRead>(
     `/v1/organizations/${organizationId}/reviewer-agent/samples/${sampleId}/resolve`,
     body,
+  );
+}
+
+/** `POST /v1/agent-runs/{id}/tool-blueprint` (`analysis_tool_blueprint`) --
+ *  render this run's own stored SQL into a candidate governed tool definition.
+ *
+ *  Reads nothing the caller supplies: the blueprint comes from what the run
+ *  actually executed, so an answer cannot be proposed as a tool that does
+ *  something else, and the endpoint refuses anyone but the run's own author.
+ *
+ *  Here rather than inline in `SaveAnalysisTool` because the component called
+ *  `postJson` directly and so bypassed `demoOr`: in the demo estate the first
+ *  step of proposing a tool made a live network call and failed, while the
+ *  second step (`createToolVersion`) had a fixture. The flow could not be
+ *  demonstrated and the failure read as a broken feature. */
+export function fetchAnalysisToolBlueprint(
+  agentRunId: string,
+  signal?: AbortSignal,
+): Promise<AnalysisToolBlueprintRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureAnalysisToolBlueprint(agentRunId),
+    async () => {
+      return postJson<AnalysisToolBlueprintRead>(
+        `/v1/agent-runs/${agentRunId}/tool-blueprint`,
+        {},
+        signal,
+      );
+    },
   );
 }

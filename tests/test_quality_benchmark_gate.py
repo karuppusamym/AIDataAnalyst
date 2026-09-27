@@ -22,6 +22,7 @@ Mirrors `tests/test_perf_baseline_gate.py`'s (PF-3) shape:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import pytest
 
@@ -38,10 +39,33 @@ from scripts.quality_benchmark import (
     load_retrieval_corpus,
     load_tool_selection_corpus,
     main,
+    run_footprint_benchmark,
     run_retrieval_benchmark,
     run_tool_selection_benchmark,
     seed_catalog,
 )
+
+
+@pytest.fixture(autouse=True)
+def deterministic_retrieval(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Measure the same thing on every machine, and pay no provider to do it.
+
+    The harness builds its retriever from `get_settings()`, which reads `.env`. A developer box
+    that has an embedding provider configured answers the vector channel from a live model whose
+    vectors drift between calls; CI, with no key, takes the deterministic path. The named-case
+    ranks moved with that difference -- this file passed and failed minutes apart on an unchanged
+    tree, and each run spent about ten seconds on paid calls. Pinning the provider off makes a
+    local run measure what CI measures, which is what the committed baseline was recorded from.
+    """
+    from aida.config import get_settings
+
+    monkeypatch.setenv("AIDA_EMBEDDING_PROVIDER", "unset")
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
+
 
 # ---------------------------------------------------------------------------
 # find_regressions -- pure comparison logic
@@ -116,16 +140,87 @@ async def test_retrieval_benchmark_resolves_named_cases_as_calibrated() -> None:
     by_id = {r.case.id: r for r in report.results}
     assert by_id["orders-lexical-top1"].rank == 1
     assert by_id["governed-tool-top1"].rank == 1
-    assert by_id["customer-lookup-tool-outranks"].rank == 2
+    # What this case is named for is the ordering, not the seat: something governed answers
+    # "who is the customer" ahead of the raw table, and the table is still found within its
+    # bound. Asserting the absolute seat made the gate report on how many *other* candidates the
+    # estate happens to offer -- it reads 2 or 3 depending on whether an embedding provider is
+    # configured, which is why this file passed and failed minutes apart on an unchanged tree.
+    customer_lookup = by_id["customer-lookup-tool-outranks"]
+    assert not customer_lookup.hit_at_1, "a governed tool should answer this ahead of the table"
+    assert customer_lookup.within_bound
     assert by_id["orders-related-customer-recall"].within_bound
 
-    # Aggregate metrics stay within a generous band of the committed baseline's
-    # measured values (0.8333 / 1.0 / 0.9028) -- generous because this test's job
-    # is proving the harness resolves real cases correctly, not re-asserting the
-    # exact baseline (the CLI regression gate below already does that job).
-    assert report.hit_at_1_rate >= 0.75
-    assert report.recall_within_bound_rate == 1.0
-    assert report.mrr >= 0.85
+    # Aggregate metrics over the **lexically solvable** cases only, which is
+    # what this test was calibrated against and all this corpus used to hold.
+    #
+    # R11-B2 added `semantic-*` cases whose wording shares no word stem with
+    # their target, precisely so the corpus could fail on the vector signal it
+    # fuses -- and all of them currently miss. Left in the aggregate they drag
+    # hit@1 to 0.59 and break a test whose job is proving the harness resolves
+    # real cases correctly, which would mean an honest new failing case breaks
+    # a gate about something else. The CLI regression gate below owns the
+    # whole-corpus numbers against the committed baseline.
+    lexical = [r for r in report.results if not r.case.id.startswith("semantic-")]
+    assert lexical, "the calibrated lexical cases have vanished from the corpus"
+    hit_at_1 = sum(1 for r in lexical if r.rank == 1) / len(lexical)
+    within_bound = sum(1 for r in lexical if r.within_bound) / len(lexical)
+    mrr = sum(r.reciprocal_rank for r in lexical) / len(lexical)
+    assert hit_at_1 >= 0.75
+    assert within_bound == 1.0
+    assert mrr >= 0.85
+
+
+async def test_the_semantic_cases_are_present_and_measured() -> None:
+    """The semantic half is a measurement, not a target, and it must not vanish.
+
+    These cases exist to record that similarity retrieval of an object lexical
+    never surfaced does **not** work here -- the vector channel re-ranks the
+    authorized candidate set and cannot discover. That is a real limitation
+    with a design decision attached to it (R11-S3), and the corpus is where it
+    is measured rather than asserted.
+
+    So this pins their presence and that the harness scores them, not a pass
+    rate. Deleting them to make an aggregate look better is the failure mode
+    worth guarding against; if they ever start passing, that is a genuine
+    improvement and this test keeps passing too.
+    """
+    session, engine = await _make_session()
+    try:
+        catalog = await seed_catalog(session)
+        cases = load_retrieval_corpus(CORPUS_DIR / "retrieval_quality_corpus.json")
+        report = await run_retrieval_benchmark(session, catalog, cases)
+    finally:
+        await session.close()
+        await engine.dispose()
+
+    semantic = [r for r in report.results if r.case.id.startswith("semantic-")]
+    assert len(semantic) >= 5, (
+        "the semantic-only retrieval cases are gone; they are the only cases in "
+        "this corpus that can fail on the vector signal, so without them the "
+        "corpus cannot measure what it fuses"
+    )
+    assert all(r.case.min_rank >= 1 for r in semantic)
+
+
+async def test_footprint_enrichment_is_measured_before_and_after_with_gaps_kept() -> None:
+    """R11-FP13: the corpus is built so only enrichment can reach each target. Before it,
+    every reachability case misses; after it, each lands within bound; and the target whose
+    only path is an undecided lineage proposal stays unreached in both runs."""
+    cases = load_retrieval_corpus(CORPUS_DIR / "footprint_enrichment_corpus.json")
+
+    report = await run_footprint_benchmark(cases)
+
+    before = {r.case.id: r for r in report.before.results}
+    after = {r.case.id: r for r in report.after.results}
+    reachability = [case.id for case in cases if not case.expect_absent]
+    assert reachability and all(before[case_id].rank is None for case_id in reachability)
+    assert all(after[case_id].within_bound for case_id in reachability)
+    assert after["gap-proposed-lineage-steers-nothing"].rank is None
+    assert (report.recall_before, report.recall_after, report.gap_preservation_rate) == (
+        0.0,
+        1.0,
+        1.0,
+    )
 
 
 async def test_tool_selection_benchmark_resolves_named_cases_as_calibrated() -> None:
@@ -150,14 +245,39 @@ async def test_tool_selection_benchmark_resolves_named_cases_as_calibrated() -> 
     assert report.pass_rate == 1.0
 
 
-def test_model_generation_posture_is_honest_about_this_sandbox() -> None:
-    """This repo's dev/test settings carry no model credentials -- proving the
-    posture check reports that truthfully rather than defaulting to an
-    unverifiable 'maybe'."""
+def test_model_generation_posture_reports_this_environment_truthfully() -> None:
+    """The posture check must describe the environment it is in, not a fixed one.
+
+    This asserted `model_generation_enabled is False` and `activatable is
+    False`, which was true of a sandbox with no credentials and became false
+    the day one was configured -- so the test failed because the deployment
+    improved, which tells nobody anything. Its actual job, per its own original
+    docstring, is that the check reports truthfully rather than defaulting to
+    an unverifiable "maybe". That is what is asserted now: every field is
+    checked against the settings it claims to describe, so the test holds both
+    on an unconfigured sandbox and on a configured one, and fails if the check
+    ever disagrees with its own inputs.
+    """
+    from aida.config import get_settings
+
+    settings = get_settings()
     posture = check_model_generation_posture()
 
-    assert posture.model_generation_enabled is False
-    assert posture.activatable is False
+    assert posture.model_generation_enabled is settings.model_generation_enabled
+    assert posture.model_route_configured is bool(settings.model_route)
+    assert posture.openai_credential_present is (settings.openai_api_key is not None)
+    assert posture.gemini_credential_present is (settings.gemini_api_key is not None)
+
+    # `activatable` is a conjunction, never a guess: it may be true only when
+    # generation is switched on, a route is named, and some credential exists.
+    if posture.activatable:
+        assert posture.model_generation_enabled
+        assert posture.model_route_configured
+        assert posture.openai_credential_present or posture.gemini_credential_present
+
+    # And the vector signal reports a reason exactly when it is unavailable --
+    # an absent signal with no reason is the "unverifiable maybe" this guards.
+    assert posture.vector_signal_available is (posture.vector_signal_reason is None)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +381,9 @@ def test_default_paths_live_under_docs_reference() -> None:
 def test_committed_corpus_files_exist_and_parse() -> None:
     retrieval_cases = load_retrieval_corpus(CORPUS_DIR / "retrieval_quality_corpus.json")
     tool_cases = load_tool_selection_corpus(CORPUS_DIR / "tool_selection_corpus.json")
+    footprint_cases = load_retrieval_corpus(CORPUS_DIR / "footprint_enrichment_corpus.json")
 
     assert len(retrieval_cases) > 0
     assert len(tool_cases) > 0
+    assert any(case.expect_absent for case in footprint_cases)
+    assert any(not case.expect_absent for case in footprint_cases)

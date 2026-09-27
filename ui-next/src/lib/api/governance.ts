@@ -13,25 +13,7 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get, postJson } from "./transport";
-import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureAuditEvents,
-  makeFixtureBulkDecideRelationshipCandidates,
-  makeFixtureCompliancePacks,
-  makeFixtureDecideRelationshipCandidate,
-  makeFixtureDecideReview,
-  makeFixtureDownloadCompliancePack,
-  makeFixtureGenerateCompliancePack,
-  makeFixtureLiftSuppression,
-  makeFixtureNegativeKnowledgeSearch,
-  makeFixtureNegativeKnowledgeSubject,
-  makeFixtureRelationshipCandidateCalibration,
-  makeFixtureRelationshipCandidateReviewQueue,
-  makeFixtureRelationshipCandidates,
-  makeFixtureReviewQueue,
-  makeFixtureParsedLineageReviewQueue,
-} from "../fixtures";
+import { demoOr, get, postJson, requestBlob, USE_FIXTURES } from "./transport";
 import type {
   CompliancePackRead,
   GeneratePackRequest,
@@ -45,9 +27,14 @@ import type {
   RelationshipCandidateDecision,
   RelationshipCandidateRead,
   RelationshipCandidateReviewQueueRead,
+  RelationshipValidationRead,
   ReviewQueueRead,
 } from "../types";
 import type { AuditEventRead, PageOf } from "../ui-types";
+
+export function fetchGovernanceReviewDiff(reviewId: string, signal?: AbortSignal): Promise<import("../types").GovernanceReviewDiffRead> {
+  return get(`/v1/governance/reviews/${encodeURIComponent(reviewId)}/diff`, signal);
+}
 
 /* ---------------------------------------------------------------------------
    UX-15: review queue, marketplace, lineage refusals and Studio change sets.
@@ -74,7 +61,7 @@ export function fetchReviewQueue(
   signal?: AbortSignal,
 ): Promise<ReviewQueueRead> {
   return demoOr(
-    async () => makeFixtureReviewQueue(query),
+    async (fixtures) => fixtures.makeFixtureReviewQueue(query),
     async () => {
       const params = new URLSearchParams();
       // `status=` (empty string) is the endpoint's own "every status" escape
@@ -98,7 +85,7 @@ export function decideGovernanceReview(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureDecideReview(reviewId, body),
+    async (fixtures) => fixtures.makeFixtureDecideReview(reviewId, body),
     async () => {
       return postJson<GovernanceReviewRead>(
         `/v1/governance/reviews/${reviewId}/decision`,
@@ -132,7 +119,7 @@ export function fetchRelationshipCandidates(
   signal?: AbortSignal,
 ): Promise<PageOf<RelationshipCandidateRead>> {
   return demoOr(
-    async () => makeFixtureRelationshipCandidates(datasourceId, opts.status),
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidates(datasourceId, opts.status),
     async () => {
       const params = new URLSearchParams();
       if (opts.status && opts.status !== "ALL") params.set("candidate_status", opts.status);
@@ -160,7 +147,7 @@ export function fetchRelationshipCandidateReviewQueue(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateReviewQueueRead> {
   return demoOr(
-    async () => makeFixtureRelationshipCandidateReviewQueue(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidateReviewQueue(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -184,7 +171,7 @@ export function decideRelationshipCandidate(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateRead> {
   return demoOr(
-    async () => makeFixtureDecideRelationshipCandidate(candidateId, body),
+    async (fixtures) => fixtures.makeFixtureDecideRelationshipCandidate(candidateId, body),
     async () => {
       return postJson<RelationshipCandidateRead>(
         `/v1/relationship-candidates/${candidateId}/decision`,
@@ -204,7 +191,7 @@ export function bulkDecideRelationshipCandidates(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateBulkDecisionResultRead> {
   return demoOr(
-    async () => makeFixtureBulkDecideRelationshipCandidates(body),
+    async (fixtures) => fixtures.makeFixtureBulkDecideRelationshipCandidates(body),
     async () => {
       return postJson<RelationshipCandidateBulkDecisionResultRead>(
         `/v1/relationship-candidates/bulk-decision`,
@@ -212,6 +199,25 @@ export function bulkDecideRelationshipCandidates(
         signal,
       );
     },
+  );
+}
+
+/** `GET /v1/relationship-candidates/{candidateId}/validation` (R11-FP06) — what
+ *  supports this join, derived from the catalog as it is now: evidence classes,
+ *  key columns, cardinality, direction, optionality and the profile each
+ *  statistic came from. `approvable: false` is the same refusal the decision
+ *  endpoint answers an approval with. Read-only, and it runs no source query. */
+export function fetchRelationshipCandidateValidation(
+  candidateId: string,
+  signal?: AbortSignal,
+): Promise<RelationshipValidationRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidateValidation(candidateId),
+    async () =>
+      get<RelationshipValidationRead>(
+        `/v1/relationship-candidates/${encodeURIComponent(candidateId)}/validation`,
+        signal,
+      ),
   );
 }
 
@@ -226,7 +232,7 @@ export function fetchRelationshipCandidateCalibration(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateCalibrationRead> {
   return demoOr(
-    async () => makeFixtureRelationshipCandidateCalibration(datasourceId),
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidateCalibration(datasourceId),
     async () => {
       const params = new URLSearchParams();
       if (datasourceId) params.set("datasource_id", datasourceId);
@@ -281,7 +287,85 @@ export async function fetchAuditEvents(
 ): Promise<PageOf<AuditEventRead>> {
   if (query.since) assertTimezoneAware("since", query.since);
   if (query.until) assertTimezoneAware("until", query.until);
-  if (USE_FIXTURES) return makeFixtureAuditEvents(query);
+
+  return demoOr(
+    (fixtures) => fixtures.makeFixtureAuditEvents(query),
+    () => {
+      const params = new URLSearchParams();
+      if (query.action) params.set("action", query.action);
+      if (query.resourceType) params.set("resource_type", query.resourceType);
+      if (query.correlationId) params.set("correlation_id", query.correlationId);
+      if (query.since) params.set("since", query.since);
+      if (query.until) params.set("until", query.until);
+      params.set("limit", String(query.limit ?? 100));
+      params.set("offset", String(query.offset ?? 0));
+
+      return get<PageOf<AuditEventRead>>(
+        `/v1/organizations/${query.organizationId}/audit-events?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** What one audit export delivered, read from the response headers the server
+ *  documents in `audit_export_api.py`. Every field the server may not have been
+ *  heard on is nullable rather than defaulted: an absent header is "unknown",
+ *  and a default of `false` for `truncated` would be exactly the lie the
+ *  server's header exists to prevent. */
+export interface AuditExportResult {
+  /** The name the server gave the file (`Content-Disposition`). */
+  filename: string;
+  /** Events in the file (`X-Export-Row-Count`). */
+  rowCount: number | null;
+  /** True when the server stopped at its row cap, so the file is INCOMPLETE
+   *  (`X-Export-Truncated`). `null` when the header could not be read. */
+  truncated: boolean | null;
+  /** The cap that applies (`X-Export-Row-Limit`). */
+  rowLimit: number | null;
+  /** SHA-256 of the file's bytes as the server computed it
+   *  (`X-Artifact-SHA256`) -- what a recipient checks the file against. */
+  sha256: string | null;
+}
+
+/** The export takes the ledger's own five filters and nothing else: it has no
+ *  `limit`/`offset`, because it is one file and not a page. */
+export type AuditExportQuery = Omit<AuditEventQuery, "limit" | "offset">;
+
+const headerNumber = (value: string | null): number | null => {
+  if (value === null || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/** `GET /v1/organizations/{organization_id}/audit-events/export.jsonl`
+ *  (`export_audit_events`, `audit_export_api.py`) -- every event matching the
+ *  filters, as JSON Lines, saved to disk.
+ *
+ *  Fetched rather than linked: a bare `<a download href>` cannot carry this
+ *  app's identity headers or bearer token, so the bytes come through
+ *  `requestBlob` (the shared transport) and are saved through an object URL,
+ *  the idiom the other downloads here use. A refusal is thrown as the
+ *  `ApiError` it arrived as and NOTHING is saved -- including the 403 the
+ *  server's EXPORT policy gate answers with a bare reason code, because a
+ *  deployment may let a role browse the ledger and not extract it.
+ *
+ *  The export is itself an audited act server-side (`AUDIT_EVENTS_EXPORTED`,
+ *  recorded before the bytes leave), so calling this leaves a trace in the
+ *  ledger it exports; it is a user's deliberate action and is never issued on
+ *  load. Under fixtures there is no server to compose it, so this says so
+ *  instead of saving a file that would look like a real export. */
+export async function downloadAuditEventsExport(
+  query: AuditExportQuery,
+  signal?: AbortSignal,
+): Promise<AuditExportResult> {
+  if (USE_FIXTURES) {
+    throw new Error(
+      "The audit export is composed by the server. Run against a live API (VITE_USE_FIXTURES=0) to export.",
+    );
+  }
+  if (query.since) assertTimezoneAware("since", query.since);
+  if (query.until) assertTimezoneAware("until", query.until);
 
   const params = new URLSearchParams();
   if (query.action) params.set("action", query.action);
@@ -289,13 +373,34 @@ export async function fetchAuditEvents(
   if (query.correlationId) params.set("correlation_id", query.correlationId);
   if (query.since) params.set("since", query.since);
   if (query.until) params.set("until", query.until);
-  params.set("limit", String(query.limit ?? 100));
-  params.set("offset", String(query.offset ?? 0));
+  const suffix = params.toString();
 
-  return get<PageOf<AuditEventRead>>(
-    `/v1/organizations/${query.organizationId}/audit-events?${params}`,
-    signal,
+  const { blob, response } = await requestBlob(
+    `/v1/organizations/${encodeURIComponent(query.organizationId)}/audit-events/export.jsonl${suffix ? `?${suffix}` : ""}`,
+    { signal },
   );
+
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename =
+    /filename="?([^";]+)"?/i.exec(disposition)?.[1] || `audit-events-${query.organizationId}.jsonl`;
+  const truncatedHeader = response.headers.get("X-Export-Truncated");
+  const result: AuditExportResult = {
+    filename,
+    rowCount: headerNumber(response.headers.get("X-Export-Row-Count")),
+    truncated: truncatedHeader === null ? null : truncatedHeader.trim().toLowerCase() === "true",
+    rowLimit: headerNumber(response.headers.get("X-Export-Row-Limit")),
+    sha256: response.headers.get("X-Artifact-SHA256"),
+  };
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return result;
 }
 
 /* ---------------------------------------------------------------------------
@@ -326,7 +431,7 @@ export function searchNegativeKnowledge(
   signal?: AbortSignal,
 ): Promise<PageOf<NegativeAssertionRead>> {
   return demoOr(
-    async () => makeFixtureNegativeKnowledgeSearch(query),
+    async (fixtures) => fixtures.makeFixtureNegativeKnowledgeSearch(query),
     async () => {
       const params = new URLSearchParams();
       if (query.assertionType) params.set("assertion_type", query.assertionType);
@@ -354,7 +459,7 @@ export function fetchNegativeKnowledgeForSubject(
   signal?: AbortSignal,
 ): Promise<PageOf<NegativeAssertionRead>> {
   return demoOr(
-    async () => makeFixtureNegativeKnowledgeSubject(subjectId, query),
+    async (fixtures) => fixtures.makeFixtureNegativeKnowledgeSubject(subjectId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -377,7 +482,7 @@ export function liftNegativeAssertionSuppression(
   signal?: AbortSignal,
 ): Promise<NegativeAssertionRead> {
   return demoOr(
-    async () => makeFixtureLiftSuppression(assertionId, body),
+    async (fixtures) => fixtures.makeFixtureLiftSuppression(assertionId, body),
     async () => {
       return postJson<NegativeAssertionRead>(
         `/v1/negative-knowledge/${assertionId}/lift-suppression`,
@@ -404,15 +509,19 @@ export interface CompliancePackQuery {
 }
 
 /** `GET /v1/compliance/packs` (`list_compliance_packs`, `compliance_api.py:119`).
- *  Gated server-side behind `PlatformAdmin`/`ComplianceOfficer`/`DataSteward`/
- *  `Viewer` -- a Viewer can see the list (name/framework/status/generated_at)
- *  but not a pack's evidence body, see `downloadCompliancePack` below. */
+ *  Gated server-side behind `PlatformAdmin`/`DataSteward`/`Auditor`/`Viewer`
+ *  (`PACK_READERS`). The list and the detail already return each pack's `sections`,
+ *  which is everything `downloadCompliancePack` returns too (today aggregate counts per
+ *  section), so a Viewer sees the same content the download gate withholds; the gate
+ *  decides who gets the file, not who sees the numbers (checked 2026-09-21). If sections
+ *  ever carry evidence rows, the list and detail read models must stop returning them to
+ *  Viewer first. */
 export function fetchCompliancePacks(
   query: CompliancePackQuery = {},
   signal?: AbortSignal,
 ): Promise<PageOf<CompliancePackRead>> {
   return demoOr(
-    async () => makeFixtureCompliancePacks(query),
+    async (fixtures) => fixtures.makeFixtureCompliancePacks(query),
     async () => {
       const params = new URLSearchParams();
       if (query.framework) params.set("framework", query.framework);
@@ -424,8 +533,8 @@ export function fetchCompliancePacks(
 }
 
 /** `POST /v1/compliance/packs/generate` (`generate_compliance_pack`,
- *  `compliance_api.py:62`) -- gated behind `PlatformAdmin`/`ComplianceOfficer`/
- *  `DataSteward` (no `Viewer`). The route itself 422s when `period_end` is
+ *  `PACK_GENERATORS` in `compliance_api.py`) -- gated behind `PlatformAdmin`/
+ *  `DataSteward` only (no `Viewer`, no `Auditor`: generating writes a record). The route itself 422s when `period_end` is
  *  not after `period_start`; that detail string is surfaced as-is, not
  *  re-validated client-side. */
 export function generateCompliancePack(
@@ -433,7 +542,7 @@ export function generateCompliancePack(
   signal?: AbortSignal,
 ): Promise<CompliancePackRead> {
   return demoOr(
-    async () => makeFixtureGenerateCompliancePack(body),
+    async (fixtures) => fixtures.makeFixtureGenerateCompliancePack(body),
     async () => {
       return postJson<CompliancePackRead>("/v1/compliance/packs/generate", body, signal);
     },
@@ -444,7 +553,7 @@ export function generateCompliancePack(
  *  `compliance_api.py:174`) -- the pack's structured evidence body
  *  (`response_model=dict[str, Any]`, no dedicated Pydantic model on the
  *  wire, hence the plain `Record` return type here). Gated behind
- *  `PlatformAdmin`/`ComplianceOfficer`/`DataSteward` ONLY -- deliberately
+ *  `PlatformAdmin`/`DataSteward`/`Auditor` ONLY (`PACK_DOWNLOADERS`) -- deliberately
  *  narrower than the list/get-by-id routes above, which also allow
  *  `Viewer`. A Viewer's 403 here is the route working as designed (they can
  *  see a pack exists, not its evidence body), not a bug to route around --
@@ -454,7 +563,7 @@ export function downloadCompliancePack(
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   return demoOr(
-    async () => makeFixtureDownloadCompliancePack(packId),
+    async (fixtures) => fixtures.makeFixtureDownloadCompliancePack(packId),
     async () => {
       return get<Record<string, unknown>>(`/v1/compliance/packs/${packId}/download`, signal);
     },
@@ -495,7 +604,7 @@ export async function listParsedLineageReviewQueue(
   // it issued a live request in the default fixtures build and rendered the
   // backend's "X-Principal-Id is required" as a load failure.
   return demoOr(
-    () => makeFixtureParsedLineageReviewQueue(query),
+    (fixtures) => fixtures.makeFixtureParsedLineageReviewQueue(query),
     () =>
       get<import("../types").ParsedLineageEdgeReviewQueueRead>(
         `/v1/lineage/parsed-edges/review-queue?${params}`,

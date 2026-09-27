@@ -10,6 +10,19 @@ do NOT share a supertype (see ADR-0026 for the rationale); this module
 composes across them at read time instead, and shares the "should this
 new row land ACTIVE or PROPOSED" decision so every parser applies the
 same rule.
+
+A sixth table joined on 2026-09-11: `DeepProcedureLineageEdge`, the
+routine-aware procedure table, edge type `ROUTINE` (migration
+`d81f5a2c9e47`). It was the one parser-produced table with no review state,
+which kept the lineage agent (ADR-0029) from proposing procedure lineage.
+
+A seventh on 2026-09-17: `TriggerLineageEdge`, edge type `TRIGGER` (R11-FP01).
+It was born with the six review columns (`b7c2f4d9e315`) and the lineage agent
+writes it PROPOSED, but it was missing here -- so no trigger edge could be listed,
+approved or rejected, and every one stayed inert. Entering this map is the whole
+of what makes it decidable: the queue, the single decision endpoint and its bulk
+twin, the maker-checker and the audit/outbox trail all dispatch through it, so a
+trigger edge is decided by exactly the path a routine edge is.
 """
 
 from __future__ import annotations
@@ -21,13 +34,16 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.envelope_models import MetadataTrigger
 from aida.models import (
     DbtLineageEdge,
+    MetadataSchema,
     OpenLineageColumnEdge,
     OpenLineageTableEdge,
     ProcedureLineageEdge,
     ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 
 # Confidence values on ViewLineageEdge / ProcedureLineageEdge / DbtLineageEdge
 # are string enums (FULL/PARTIAL/LOW), not floats -- see the parser's own
@@ -36,17 +52,23 @@ from aida.models import (
 # unified-lineage projection together.
 _STRING_CONFIDENCE_TO_FLOAT = {"FULL": 1.0, "PARTIAL": 0.6, "LOW": 0.3}
 
-# The five edge tables under review. Kept as a stable list so the queue
+# The edge tables under review. Kept as a stable list so the queue
 # service, the review endpoint dispatch, and the auditing details all
-# agree on the identifier vocabulary. VIEW / PROCEDURE / DBT /
-# OPENLINEAGE_TABLE / OPENLINEAGE_COLUMN is what the client-facing
-# `edge_type` field on the decision endpoint accepts.
+# agree on the identifier vocabulary. VIEW / PROCEDURE / ROUTINE / DBT /
+# OPENLINEAGE_TABLE / OPENLINEAGE_COLUMN / TRIGGER is what the client-facing
+# `edge_type` field on the decision endpoint accepts (`schemas.ParsedLineageEdgeType`,
+# kept in step by `tests/test_trigger_lineage_decidable.py`). PROCEDURE is the
+# raw-SQL procedure table; ROUTINE is the one keyed to a captured routine;
+# TRIGGER is the one keyed to a captured trigger. Appended, never inserted: the
+# queue composes tables in this order before its newest-first sort.
 EDGE_TYPE_TO_MODEL: dict[str, Any] = {
     "VIEW": ViewLineageEdge,
     "PROCEDURE": ProcedureLineageEdge,
+    "ROUTINE": DeepProcedureLineageEdge,
     "DBT": DbtLineageEdge,
     "OPENLINEAGE_TABLE": OpenLineageTableEdge,
     "OPENLINEAGE_COLUMN": OpenLineageColumnEdge,
+    "TRIGGER": TriggerLineageEdge,
 }
 
 EDGE_TYPES = tuple(EDGE_TYPE_TO_MODEL.keys())
@@ -70,6 +92,13 @@ def _coerce_confidence_to_float(confidence: str | float | int | None) -> float:
         except (TypeError, ValueError):
             return 0.0
     return _STRING_CONFIDENCE_TO_FLOAT.get(str(confidence).upper(), 0.0)
+
+
+def edge_confidence_as_float(confidence: str | float | int | None) -> float:
+    """The same mapping, for callers outside the review queue -- the lineage
+    agent reports a parse's confidence as a number on the same 0..1 scale the
+    queue filters on, rather than keeping a second copy of the table above."""
+    return _coerce_confidence_to_float(confidence)
 
 
 def resolve_review_status_for_new_edge(
@@ -133,8 +162,9 @@ async def list_parsed_lineage_review_queue(
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[ParsedLineageReviewItem], int]:
-    """Composite PROPOSED-edge review queue across the five parser-
-    produced edge tables. Returns `(items, total)`, ordered newest first.
+    """Composite PROPOSED-edge review queue across the parser-produced edge
+    tables in `EDGE_TYPE_TO_MODEL`. Returns `(items, total)`, ordered newest
+    first. An UNPARSED marker is ACTIVE by construction, so it never lands here.
 
     `edge_type` narrows to one table; `min_confidence` filters on the
     coerced 0..1 confidence (string enums included). Pagination is
@@ -164,8 +194,13 @@ async def list_parsed_lineage_review_queue(
         rows = (
             await session.scalars(base_stmt.order_by(model.created_at.desc()))
         ).all()
+        triggers = (
+            await _trigger_names(session, organization_id, {row.trigger_id for row in rows})
+            if etype == "TRIGGER"
+            else {}
+        )
         for row in rows:
-            item = _row_to_item(etype, row)
+            item = _row_to_item(etype, row, triggers=triggers)
             if item is None:
                 continue
             if min_confidence is not None and _coerce_confidence_to_float(
@@ -178,7 +213,42 @@ async def list_parsed_lineage_review_queue(
     return items[offset : offset + limit], total
 
 
-def _row_to_item(edge_type: str, row: Any) -> ParsedLineageReviewItem | None:
+async def _trigger_names(
+    session: AsyncSession, organization_id: UUID, trigger_ids: set[UUID]
+) -> dict[UUID, tuple[str, str]]:
+    """`trigger_id -> (qualified trigger name, firing table)` for one page of
+    trigger edges, in one query scoped to the caller's organization (INV-5).
+
+    Names, not text: a reviewer judging "`orders.customer_id` -> `audit.customer_id`"
+    needs to know *which* trigger claims it, and the id alone does not say. The
+    body is never read here -- it has its own gated route."""
+    if not trigger_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MetadataTrigger.id,
+                MetadataSchema.name,
+                MetadataTrigger.name,
+                MetadataTrigger.table_schema_name,
+                MetadataTrigger.table_name,
+            )
+            .join(MetadataSchema, MetadataSchema.id == MetadataTrigger.schema_id)
+            .where(
+                MetadataTrigger.organization_id == organization_id,
+                MetadataTrigger.id.in_(trigger_ids),
+            )
+        )
+    ).all()
+    return {
+        trigger_id: (f"{schema}.{name}", f"{table_schema or schema}.{table}")
+        for trigger_id, schema, name, table_schema, table in rows
+    }
+
+
+def _row_to_item(
+    edge_type: str, row: Any, *, triggers: dict[UUID, tuple[str, str]] | None = None
+) -> ParsedLineageReviewItem | None:
     """Project one edge row onto the queue item shape. Table-specific
     because each of the five tables carries a different natural key
     back to its source SQL -- see the `ParsedLineageReviewItem` doc."""
@@ -203,6 +273,67 @@ def _row_to_item(edge_type: str, row: Any) -> ParsedLineageReviewItem | None:
                 "sql_hash": row.sql_hash,
                 "dialect": row.dialect,
             },
+        )
+    if edge_type == "ROUTINE":
+        # The routine and the statement within it, so a reviewer can find the
+        # exact line; and, for an edge the parser resolved through a temp
+        # table, which one.
+        reference = {
+            "kind": "ROUTINE_BODY",
+            "datasource_id": str(row.datasource_id),
+            "routine_id": str(row.routine_id),
+            "statement_ordinal": str(row.statement_ordinal),
+            "sql_hash": row.sql_hash,
+            "dialect": row.dialect,
+        }
+        if row.via_temp_table:
+            reference["via_temp_table"] = row.via_temp_table
+        return ParsedLineageReviewItem(
+            edge_id=row.id,
+            edge_type=edge_type,
+            organization_id=row.organization_id,
+            created_at=row.created_at,
+            created_by=row.created_by,
+            confidence=row.confidence,
+            source_label=f"{row.source_table}.{row.source_column}",
+            target_label=f"{row.target_table}.{row.target_column}",
+            transformation_type=row.transformation_type,
+            source_sql_reference=reference,
+        )
+    if edge_type == "TRIGGER":
+        # The routine case's shape with the trigger as the owner. The source of a
+        # firing-row edge is the firing table, bound before the edge was built --
+        # the body never names it -- so the reference says which trigger claims the
+        # path and which table it fires on; on PostgreSQL it also says which
+        # function's body was read. Identifiers and hashes only (INV-6).
+        reference = {
+            "kind": "TRIGGER_BODY",
+            "datasource_id": str(row.datasource_id),
+            "trigger_id": str(row.trigger_id),
+            "statement_ordinal": str(row.statement_ordinal),
+            "sql_hash": row.sql_hash,
+            "dialect": row.dialect,
+        }
+        named = (triggers or {}).get(row.trigger_id)
+        if named is not None:
+            reference["trigger"], reference["firing_table"] = named
+        if row.routine_id is not None:
+            reference["routine_id"] = str(row.routine_id)
+        if row.via_routine:
+            reference["via_routine"] = row.via_routine
+        if row.via_temp_table:
+            reference["via_temp_table"] = row.via_temp_table
+        return ParsedLineageReviewItem(
+            edge_id=row.id,
+            edge_type=edge_type,
+            organization_id=row.organization_id,
+            created_at=row.created_at,
+            created_by=row.created_by,
+            confidence=row.confidence,
+            source_label=f"{row.source_table}.{row.source_column}",
+            target_label=f"{row.target_table}.{row.target_column}",
+            transformation_type=row.transformation_type,
+            source_sql_reference=reference,
         )
     if edge_type == "DBT":
         return ParsedLineageReviewItem(

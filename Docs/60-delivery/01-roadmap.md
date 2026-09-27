@@ -1,6 +1,8 @@
 # Roadmap
 
-> Status: Authoritative. Owner: Product + Engineering.
+> **Scope reconciled 2026-09-11.** [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
+> Status: Historical strategy; execution scope superseded by the September 11 reconciliation. Owner: Product + Engineering.
 > Sequencing rationale: `00-product/05-differentiation-and-whitespace.md` §6 — the governed-execution window is 12–24 months, so entry-ticket gaps are closed with minimum credible investment **in parallel** while differentiation compounds.
 
 ## 1. Shape of the plan

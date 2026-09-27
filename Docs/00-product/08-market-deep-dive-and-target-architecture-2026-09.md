@@ -3,6 +3,7 @@
 > Status: **Proposal**, prepared 2026-09-04. Owner: Product + Architecture.
 > Baseline compared against: `00-product/03..05` (research baseline 2026-08-28), `review-2026-08/target/05-target-architecture.md`, `60-delivery/00-status.md` (verified 2026-09-02), the `UI_Audit_Report_2026-09-03.html`, the two Atlan deep-dive documents under `Docs/` and `Docs/competitors/`, and the working tree on `feature/snowflake-dbt-lineage-mcp` at 543 commits.
 > Boundary: vendor claims are taken from public announcements dated May–September 2026 and are listed in Appendix A. Statements about Atlas are taken from the code, not from earlier documents; where the two disagree this document says so.
+> Claims: historical as of 2026-09-09; the review correction in §0 applies to every competitive statement here, and none may be reused as current fact without fresh evidence; sources: Appendix A.
 
 ---
 
@@ -86,6 +87,22 @@ The lesson: differentiators that live *inside* one execution plane are being abs
 | Connectors | PostgreSQL implemented; SQL Server beta with real fixture; Oracle, BigQuery, Snowflake, Databricks beta unverified live; Teradata and Db2 planned | The entry-ticket gap, unchanged |
 | Operational evidence | None at bank scale; no drill has been run (projection rebuild, PITR, Temporal failover, credential rotation, kill switch) | The honest blocker to "production-grade" |
 
+> **Re-measured 2026-09-12 (R11-P8).** The table above is the 2026-09-04 snapshot and is kept
+> as the baseline the rest of this document argues from. These rows have since moved, so do
+> not quote the figures above as current:
+>
+> | Row | 2026-09-04 | 2026-09-12 | Command |
+> |---|---|---|---|
+> | Python source | 302 files, ~111k lines | 383 files, ~142k lines (`src/aida/` 304 files/~131k; `src/atlas/` 79 files/~11k) | `find src -name '*.py' \| wc -l`; `find src -name '*.py' -exec cat {} + \| wc -l` |
+> | ORM | 132 classes, `models.py` 5,123 lines, `schemas.py` 3,929 | 129 classes, `models.py` 5,249 lines, `schemas.py` 3,736 | `grep -cE '^class ' src/aida/models.py`; `wc -l` |
+> | Module extraction | 5 of 21, 4 contracts | 6 of 21, 12 import-linter contracts | `pyproject.toml` `[[tool.importlinter.contracts]]` |
+> | Tests | 226 files, ~2,700 functions | 288 files, 3,547 functions, 9,944 collected | `pytest tests --collect-only` |
+> | Commit cadence | 543 commits | 690 on `feature/agent-os-v2` | `git rev-list --count HEAD` |
+> | UI | legacy portal at :3000 plus the React shell | legacy portal removed; the React shell is the only UI | — |
+>
+> The authorization row is unchanged: every workspace is still `SHADOW` and enforcement is
+> still unproven — see `60-delivery/00-status.md` and section P row R11-B3.
+
 **The one-sentence diagnosis.** Atlas has more governed-execution capability than any vendor in the matrix and less proof, less shape, and less distribution than all of them.
 
 ---
@@ -98,7 +115,7 @@ The lesson: differentiators that live *inside* one execution plane are being abs
 | Stores | PostgreSQL, Neo4j (per-org optional), Redis, Temporal, Kafka, MinIO | Remove Neo4j; defer Kafka; add pgvector and ephemeral DuckDB | Same as 2026-08, plus a **persisted pgvector index wired to the live path** and an **event-sourced agent ledger** table family in PostgreSQL |
 | Modules | 21 target, 5 extracted, flat package for the rest | 16 merged modules | **14 modules**: the 16, with the capability module split into **agent-workforce** (agents, contracts, autonomy tiers, supervision) and **capability** (tools, context products, MCP, model gateway), and **knowledge** folded into **semantics-glossary** until INV-10 is accepted |
 | Agent model | One orchestrator, one operational run type, registry entries not linked to runs | Not addressed | **Named role agents** bound to `AiAsset` versions with an `AgentRun → AiAssetVersion` link, per-agent identity, budget, autonomy tier, eval gate, and kill switch scope |
-| Human roles | Six personas do the work | Same | **Six personas supervise agents**; the persona's workbench becomes an agent inbox plus the residual high-judgement tasks |
+| Human roles | Five derived personas (Analyst, Steward, Reviewer, Operator, Auditor) do the work; Consumer is a work area, not a persona | Same | **The same personas supervise agents**; the persona's workbench becomes an agent inbox plus the residual high-judgement tasks |
 | Review | Unified queue, maker ≠ checker | Same | **Risk-tiered review**: tier-0 and tier-1 proposals may be checked by an independent reviewer agent with sampled human audit; tier-2+ remains human-only. Requires ADR-0027 amending INV-8's wording, not its intent |
 | Retrieval | Hybrid, unbenchmarked | Vector + graph + policy-before-ranking | Same, plus **learning-to-rank** over usage, feedback, quality and certification signals, with the deterministic policy filter kept in front |
 | Evaluation | Eval gate on agent versions; control corpus; exemplar store | Benchmark as publication gate | **Evaluation-and-learning loop as a module**: exemplars, benchmark suites per workspace, drift detection, confidence calibration, negative-knowledge feedback |
@@ -193,7 +210,7 @@ A role is a bundle of jobs. Some of those jobs are *making* (draft, propose, cla
 | Agent | Purpose | Tier | Built from |
 |---|---|---|---|
 | **Onboarding agent** | Registers a source from a ticket, runs certification, proposes bindings, opens the fleet schedule | T1 | Connectivity certification, workspace bindings, fleet |
-| **Lineage agent** | Parses views and procedures, proposes edges, attaches parser evidence, files review items | T1 (T2 for trusted sources) | `procedure_lineage.py`, `view_lineage_api.py`, per-edge review (LR-1), `Datasource.trusted_for_lineage` |
+| **Lineage agent** | Parses views and procedures, proposes edges, attaches parser evidence, files review items | T1 (T2 for trusted sources) | `procedure_lineage.py`, `sql_lineage_parser.py`, per-edge review (LR-1), `Datasource.trusted_for_lineage` |
 | **Quality agent** | Proposes rule packs from profiles and query history, tunes thresholds, triages incidents, routes | T1, T2 for routing | `quality_service.py`, `dbt_quality_bridge.py`, DQ-1..4 |
 | **Glossary agent** | Mines terms from query history and documents, detects conflicting definitions across LOBs | T1 | `query_history_miner.py`, SM-2 bindings, conflict resolution |
 | **Access agent** | Simulates policy impact, proposes ABAC policies from classification patterns, handles marketplace access requests | T1; never grants | PG-8 simulation, `policy_native_sync.py`, marketplace lifecycle |
@@ -223,7 +240,7 @@ The 3 September audit found the shell's problem was one missing header and a thi
 
 ### 6.1 Structural changes
 
-1. **Collapse navigation to six persona workbenches plus one agent inbox.** Each workbench is the persona's jobs from `02-personas-and-jobs.md`; the 30 screens become tabs, panels, or inspectors inside them. The command palette stays as the universal escape hatch. This is a routing change, not a rebuild; the screens already exist.
+1. **Collapse navigation to persona workbenches plus one agent inbox.** Each workbench is the persona's jobs from `02-personas-and-jobs.md`; the 30 screens become tabs, panels, or inspectors inside them. The command palette stays as the universal escape hatch. This is a routing change, not a rebuild; the screens already exist. As of 2026-09-20 the shell has eight work areas (Inbox, Analyst, Consumer, Developer, Steward, Reviewer, Operator, Auditor) over five derived personas (`ui-next/src/lib/workAreas.ts`).
 2. **Agent inbox as the new home.** For every persona: what its agents did since last visit, what is waiting for a decision (ranked by blast radius and confidence), what was auto-applied and sampled for audit, and the autonomy dial for each agent in this workspace. This is the single screen no competitor has, because no competitor separates agent proposals from human decisions structurally.
 3. **Evidence-first answer layout.** The Ask screen shows the answer, then a trust strip: composite trust score (W7), semantic and policy versions pinned, quality warnings, lineage depth, tool-or-freeform badge, masking applied, and the refusal explainer when applicable. Every element is a permalink into an inspector.
 4. **Trust signals at a glance on every row.** Certification pill, freshness age, quality state, owner avatar, AI-drafted versus human-confirmed provenance (the Select Star pattern) on catalog rows, marketplace cards and search hits. The data exists; the display does not.

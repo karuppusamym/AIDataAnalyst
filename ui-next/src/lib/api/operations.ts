@@ -2,9 +2,9 @@
    Operations — the fleet's runtime posture and the schedules that act on it.
 
    Org-wide operational reads (fleet summary, analysis runs, the outbox and
-   its requeue, ingestion batches); reliability (SLO definitions and budgets,
-   notification rules, archive/WORM posture, data-contract evaluation and
-   violations); and playbooks, the saved bulk-metadata automation.
+   its requeue, ingestion batches); reliability (notification rules,
+   archive/WORM posture, data-contract evaluation and violations); and
+   playbooks, the saved bulk-metadata automation.
 
    Transport, identity headers and the demo switch come from `./transport`:
    this module never calls `fetch` and never decodes an error itself.
@@ -12,29 +12,6 @@
 --------------------------------------------------------------------------- */
 
 import { deleteRequest, demoOr, get, patchJson, postJson } from "./transport";
-import {
-  makeFixtureAnalysisRuns,
-  makeFixtureArchiveStatus,
-  makeFixtureCreateAnalysisRun,
-  makeFixtureDatasourceAnalysisRuns,
-  makeFixtureContractSlaStatus,
-  makeFixtureContractViolations,
-  makeFixtureCreateNotificationRule,
-  makeFixtureCreatePlaybook,
-  makeFixtureCreateSloDefinition,
-  makeFixtureDeletePlaybook,
-  makeFixtureEvaluateDataContract,
-  makeFixtureFleetSummary,
-  makeFixtureIngestionBatches,
-  makeFixtureNotificationRules,
-  makeFixtureOutboxEvents,
-  makeFixturePlaybooks,
-  makeFixtureRequeueOutboxEvent,
-  makeFixtureRunPlaybook,
-  makeFixtureSloBudget,
-  makeFixtureSloDefinitions,
-  makeFixtureUpdatePlaybook,
-} from "../fixtures";
 import type {
   AnalysisRunCreate,
   AnalysisRunRead,
@@ -50,9 +27,6 @@ import type {
   PlaybookRunResultRead,
   PlaybookUpdate,
   SlaStatusResponse,
-  SloBudgetRead,
-  SloDefinitionCreate,
-  SloDefinitionRead,
 } from "../types";
 import type { PageOf, ViolationRead } from "../ui-types";
 
@@ -74,7 +48,7 @@ export function fetchFleetSummary(
   signal?: AbortSignal,
 ): Promise<FleetSummaryRead> {
   return demoOr(
-    async () => makeFixtureFleetSummary(organizationId),
+    async (fixtures) => fixtures.makeFixtureFleetSummary(organizationId),
     async () => {
       return get<FleetSummaryRead>(`/v1/organizations/${organizationId}/fleet-summary`, signal);
     },
@@ -97,7 +71,7 @@ export function fetchAnalysisRuns(
   signal?: AbortSignal,
 ): Promise<PageOf<AnalysisRunRead>> {
   return demoOr(
-    async () => makeFixtureAnalysisRuns(query),
+    async (fixtures) => fixtures.makeFixtureAnalysisRuns(query),
     async () => {
       const params = new URLSearchParams();
       if (query.runStatus) params.set("run_status", query.runStatus);
@@ -134,7 +108,7 @@ export function fetchDatasourceAnalysisRuns(
   signal?: AbortSignal,
 ): Promise<PageOf<AnalysisRunRead>> {
   return demoOr(
-    async () => makeFixtureDatasourceAnalysisRuns(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureDatasourceAnalysisRuns(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 20));
@@ -160,7 +134,7 @@ export function createAnalysisRun(
   signal?: AbortSignal,
 ): Promise<AnalysisRunRead> {
   return demoOr(
-    async () => makeFixtureCreateAnalysisRun(datasourceId, body),
+    async (fixtures) => fixtures.makeFixtureCreateAnalysisRun(datasourceId, body),
     async () => {
       return postJson<AnalysisRunRead>(
         `/v1/datasources/${datasourceId}/analysis-runs`,
@@ -187,7 +161,7 @@ export function fetchOutboxEvents(
   signal?: AbortSignal,
 ): Promise<PageOf<OutboxEventRead>> {
   return demoOr(
-    async () => makeFixtureOutboxEvents(query),
+    async (fixtures) => fixtures.makeFixtureOutboxEvents(query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -212,7 +186,7 @@ export function requeueOutboxEvent(
   signal?: AbortSignal,
 ): Promise<OutboxEventRead> {
   return demoOr(
-    async () => makeFixtureRequeueOutboxEvent(eventId),
+    async (fixtures) => fixtures.makeFixtureRequeueOutboxEvent(eventId),
     async () => {
       return postJson<OutboxEventRead>(`/v1/outbox-events/${eventId}/requeue`, {}, signal);
     },
@@ -235,7 +209,7 @@ export function fetchIngestionBatches(
   signal?: AbortSignal,
 ): Promise<PageOf<MetadataIngestionBatchRead>> {
   return demoOr(
-    async () => makeFixtureIngestionBatches(datasourceId, opts),
+    async (fixtures) => fixtures.makeFixtureIngestionBatches(datasourceId, opts),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(opts.limit ?? 100));
@@ -249,14 +223,18 @@ export function fetchIngestionBatches(
 }
 
 /* ---------------------------------------------------------------------------
-   Reliability -- SLOs, notification rules, archive/WORM evidence posture,
-   and runtime data-contract evaluation. Ports the legacy portal's
+   Reliability -- notification rules, archive/WORM evidence posture,
+   and runtime data-contract evaluation. The SLO definition/budget clients
+   were retired here on 2026-09-12 with the endpoints behind them (R11-D10):
+   nothing ever wrote `slo_measurement`, and no indicator source existed to
+   write it from, so the budget could only ever answer NO_DATA.
+   Ports the legacy portal's
    `renderReliability()` (`ui/scripts/features/control-center.js`) onto the
    real, already-merged `observability_api.py` / `notification_api.py` /
    `runtime_contracts_api.py` routes -- the legacy screen's own
    `loadControlCenter()` calls these exact paths.
 
-   Honest scope note: `organizationId` is accepted below on the SLO and
+   Honest scope note: `organizationId` is accepted below on the
    notification-rule functions for parity with every other org-scoped fetch
    in this file (and to key fixture data the same way other screens do), but
    it has nowhere to go on the wire for these particular routes.
@@ -277,62 +255,6 @@ export function fetchIngestionBatches(
    depended on the header.
 --------------------------------------------------------------------------- */
 
-export interface SloDefinitionQuery {
-  limit?: number;
-  offset?: number;
-}
-
-/** `GET /v1/observability/slo` (`observability_api.py::list_slo_definitions`,
- *  roles PlatformAdmin/DataAdmin/Operations/Viewer) -- every SLO definition
- *  for the caller's organization, newest first. */
-export function fetchSloDefinitions(
-  organizationId: string,
-  query: SloDefinitionQuery = {},
-  signal?: AbortSignal,
-): Promise<PageOf<SloDefinitionRead>> {
-  return demoOr(
-    async () => makeFixtureSloDefinitions(organizationId, query),
-    async () => {
-      const params = new URLSearchParams();
-      params.set("limit", String(query.limit ?? 100));
-      params.set("offset", String(query.offset ?? 0));
-      return get<PageOf<SloDefinitionRead>>(`/v1/observability/slo?${params}`, signal);
-    },
-  );
-}
-
-/** `POST /v1/observability/slo` (`observability_api.py::create_slo_definition`,
- *  roles PlatformAdmin/DataAdmin/Operations) -- 409s if `slo_key` already
- *  exists for this organization. */
-export function createSloDefinition(
-  organizationId: string,
-  body: SloDefinitionCreate,
-  signal?: AbortSignal,
-): Promise<SloDefinitionRead> {
-  return demoOr(
-    async () => makeFixtureCreateSloDefinition(organizationId, body),
-    async () => {
-      return postJson<SloDefinitionRead>("/v1/observability/slo", body, signal);
-    },
-  );
-}
-
-/** `GET /v1/observability/slo/{slo_id}/budget` (`observability_api.py::get_slo_budget`)
- *  -- computed live from the SLO's most recent `SloMeasurement`, never
- *  stored: `status` is HEALTHY/AT_RISK/BREACHED once a measurement exists
- *  (compared against `target`/`threshold`), NO_DATA when none ever landed. */
-export function fetchSloBudget(
-  sloId: string,
-  signal?: AbortSignal,
-): Promise<SloBudgetRead> {
-  return demoOr(
-    async () => makeFixtureSloBudget(sloId),
-    async () => {
-      return get<SloBudgetRead>(`/v1/observability/slo/${sloId}/budget`, signal);
-    },
-  );
-}
-
 /** `GET /v1/observability/archive/status` (`observability_api.py::get_archive_status`)
  *  -- WORM audit-archive posture: counts, latest archive id/checksum, and
  *  legal-hold count, rolled into one of NO_ARCHIVES/LEGAL_HOLD_ACTIVE/HEALTHY.
@@ -340,7 +262,7 @@ export function fetchSloBudget(
  *  banner comment -- no `organizationId` parameter to thread through. */
 export function fetchArchiveStatus(signal?: AbortSignal): Promise<ArchiveStatusRead> {
   return demoOr(
-    async () => makeFixtureArchiveStatus(),
+    async (fixtures) => fixtures.makeFixtureArchiveStatus(),
     async () => {
       return get<ArchiveStatusRead>("/v1/observability/archive/status", signal);
     },
@@ -360,7 +282,7 @@ export function fetchNotificationRules(
   signal?: AbortSignal,
 ): Promise<PageOf<NotificationRuleRead>> {
   return demoOr(
-    async () => makeFixtureNotificationRules(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureNotificationRules(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -380,7 +302,7 @@ export function createNotificationRule(
   signal?: AbortSignal,
 ): Promise<NotificationRuleRead> {
   return demoOr(
-    async () => makeFixtureCreateNotificationRule(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateNotificationRule(organizationId, body),
     async () => {
       return postJson<NotificationRuleRead>("/v1/notification-rules", body, signal);
     },
@@ -389,7 +311,7 @@ export function createNotificationRule(
 
 /** `POST /v1/data-contracts/{contract_id}/evaluate`
  *  (`runtime_contracts_api.py::evaluate_data_contract`, roles PlatformAdmin/
- *  DataSteward/DataEngineer/Viewer) -- no request body, just the path id.
+ *  DataSteward/Viewer) -- no request body, just the path id.
  *  Evaluates the contract against current schema/quality/freshness state,
  *  persists any violations found, and returns the same evaluation the
  *  enforcement path itself acts on (`allowed`/`enforcement_action`). */
@@ -398,7 +320,7 @@ export function evaluateDataContract(
   signal?: AbortSignal,
 ): Promise<EvaluationResponse> {
   return demoOr(
-    async () => makeFixtureEvaluateDataContract(contractId),
+    async (fixtures) => fixtures.makeFixtureEvaluateDataContract(contractId),
     async () => {
       return postJson<EvaluationResponse>(`/v1/data-contracts/${contractId}/evaluate`, {}, signal);
     },
@@ -420,7 +342,7 @@ export function fetchContractViolations(
   signal?: AbortSignal,
 ): Promise<PageOf<ViolationRead>> {
   return demoOr(
-    async () => makeFixtureContractViolations(contractId, query),
+    async (fixtures) => fixtures.makeFixtureContractViolations(contractId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -440,7 +362,7 @@ export function fetchContractSlaStatus(
   signal?: AbortSignal,
 ): Promise<SlaStatusResponse> {
   return demoOr(
-    async () => makeFixtureContractSlaStatus(contractId, periodDays),
+    async (fixtures) => fixtures.makeFixtureContractSlaStatus(contractId, periodDays),
     async () => {
       const params = new URLSearchParams();
       params.set("period_days", String(periodDays));
@@ -468,7 +390,7 @@ export function fetchPlaybooks(
   signal?: AbortSignal,
 ): Promise<PageOf<PlaybookRead>> {
   return demoOr(
-    async () => makeFixturePlaybooks(organizationId, query),
+    async (fixtures) => fixtures.makeFixturePlaybooks(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -489,7 +411,7 @@ export function createPlaybook(
   signal?: AbortSignal,
 ): Promise<PlaybookRead> {
   return demoOr(
-    async () => makeFixtureCreatePlaybook(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreatePlaybook(organizationId, body),
     async () => {
       return postJson<PlaybookRead>(`/v1/organizations/${organizationId}/playbooks`, body, signal);
     },
@@ -504,7 +426,7 @@ export function updatePlaybook(
   signal?: AbortSignal,
 ): Promise<PlaybookRead> {
   return demoOr(
-    async () => makeFixtureUpdatePlaybook(playbookId, body),
+    async (fixtures) => fixtures.makeFixtureUpdatePlaybook(playbookId, body),
     async () => {
       return patchJson<PlaybookRead>(`/v1/playbooks/${playbookId}`, body, signal);
     },
@@ -514,7 +436,7 @@ export function updatePlaybook(
 /** `DELETE /v1/playbooks/{playbook_id}` — 204, no response body. */
 export function deletePlaybook(playbookId: string, signal?: AbortSignal): Promise<void> {
   return demoOr(
-    async () => makeFixtureDeletePlaybook(playbookId),
+    async (fixtures) => fixtures.makeFixtureDeletePlaybook(playbookId),
     async () => {
       return deleteRequest(`/v1/playbooks/${playbookId}`, signal);
     },
@@ -530,7 +452,7 @@ export function runPlaybookNow(
   signal?: AbortSignal,
 ): Promise<PlaybookRunResultRead> {
   return demoOr(
-    async () => makeFixtureRunPlaybook(playbookId),
+    async (fixtures) => fixtures.makeFixtureRunPlaybook(playbookId),
     async () => {
       return postJson<PlaybookRunResultRead>(`/v1/playbooks/${playbookId}/run`, {}, signal);
     },

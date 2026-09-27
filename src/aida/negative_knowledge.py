@@ -116,7 +116,10 @@ async def check_re_proposal(
     """Check if a candidate was already rejected (active suppression).
 
     Returns the matching negative assertion if found with active suppression,
-    or None if the candidate is safe to re-propose.
+    or None when this exact predicate is not suppressed. This is a read-only,
+    exact-hash check: a changed predicate does not clear an earlier rejection.
+    If the original predicate returns, it remains suppressed until explicitly
+    lifted with ``lift_suppression``. Other proposal checks still apply.
     """
     candidate_hash = compute_predicate_hash(predicate)
 
@@ -247,38 +250,3 @@ async def query_negatives_for_scope(
     return list(result.scalars().all())
 
 
-async def auto_lift_on_material_change(
-    session: AsyncSession,
-    organization_id: UUID,
-    subject_id: str,
-    new_predicate: dict[str, Any],
-) -> list[NegativeAssertionRecord]:
-    """Auto-lift suppression when evidence changes materially.
-
-    Compares the new predicate hash against existing assertions and lifts
-    suppression on any whose material_change_hash no longer matches,
-    flagging them with a "previously rejected" marker.
-    """
-    new_hash = compute_predicate_hash(new_predicate)
-    lifted: list[NegativeAssertionRecord] = []
-
-    stmt = (
-        select(NegativeAssertionRecord)
-        .where(
-            and_(
-                NegativeAssertionRecord.organization_id == organization_id,
-                NegativeAssertionRecord.subject_id == subject_id,
-                NegativeAssertionRecord.suppression_active.is_(True),
-                NegativeAssertionRecord.material_change_hash != new_hash,
-            )
-        )
-    )
-    result = await session.execute(stmt)
-    for record in result.scalars().all():
-        record.suppression_active = False
-        record.suppression_lifted_at = datetime.now(UTC)
-        record.suppression_lifted_by = "system:material_change"
-        record.lift_reason = "material evidence changed"
-        lifted.append(record)
-
-    return lifted

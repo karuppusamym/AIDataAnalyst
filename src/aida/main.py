@@ -24,26 +24,37 @@ from aida.api import router
 from aida.asset_description_api import router as asset_description_router
 from aida.asset_evidence_api import router as asset_evidence_router
 from aida.audit_archive_s3 import S3ArchiveStorage
+from aida.audit_export_api import router as audit_export_router
 from aida.authorization_posture import assert_startup_posture
 from aida.bi_api import router as bi_router
+from aida.change_signals_api import router as change_signals_router
+from aida.column_description_api import router as column_description_router
 from aida.column_documentation_api import router as column_documentation_router
 from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
 from aida.config import Settings, get_settings
+from aida.connectors.postgres_pool import close_postgres_pools
+from aida.connectors.sqlserver_pool import close_sqlserver_pools
 from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
 from aida.context_compiler_api import router as context_compiler_router
 from aida.context_product_api import router as context_product_router
+from aida.conversation_api import router as conversation_router
 from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
+from aida.definition_history_api import router as definition_history_router
 from aida.delegation_api import router as delegation_router
 from aida.description_withdrawal_api import router as description_withdrawal_router
 from aida.detokenization_api import router as detokenization_router
 from aida.document_ingestion_api import router as document_ingestion_router
+from aida.engine_capability_api import router as engine_capability_router
+from aida.external_mcp_api import router as external_mcp_router
+from aida.footprint_gaps_api import router as footprint_gaps_router
 from aida.glossary_api import router as glossary_router
-from aida.graph_perspectives_api import router as graph_perspectives_router
+from aida.graphql_api import router as graphql_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
+from aida.lineage_agent_api import router as lineage_agent_router
 from aida.lineage_evidence_export_api import router as lineage_evidence_export_router
 from aida.logging import configure_logging
 from aida.marketplace_discovery import router as marketplace_discovery_router
@@ -63,8 +74,12 @@ from aida.observability import (
     traced,
 )
 from aida.observability_api import router as observability_router
+from aida.okf_export_api import router as okf_export_router
+from aida.okf_import_api import router as okf_import_router
+from aida.ontology_api import router as ontology_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
+from aida.outbound_clients import close_outbound_clients
 from aida.parsed_lineage_review_api import router as parsed_lineage_review_router
 from aida.persona_api import router as persona_router
 from aida.playbooks_api import router as playbooks_router
@@ -72,6 +87,7 @@ from aida.policy_native_sync_api import router as policy_native_sync_router
 from aida.procedure_lineage_api import router as procedure_lineage_router
 from aida.procedure_tool_api import router as procedure_tool_router
 from aida.product_marketplace_api import router as product_marketplace_router
+from aida.quality_agent_api import router as quality_agent_router
 from aida.quality_api import router as quality_router
 from aida.readiness import (
     AUDIT_ARCHIVE_TASK,
@@ -80,22 +96,28 @@ from aida.readiness import (
     evaluate_readiness,
     probe_workspace_authorization_posture,
 )
+from aida.relationship_validation_api import router as relationship_validation_router
+from aida.request_body_limits import RequestBodyLimitMiddleware
 from aida.retrieval_ops_api import router as retrieval_ops_router
+from aida.review_batch_api import router as review_batch_router
 from aida.review_queue_api import router as review_queue_router
+from aida.routine_description_api import router as routine_description_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
 from aida.schemas import HealthResponse
 from aida.search_api import router as search_router
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
 from aida.sql_validation_api import router as sql_validation_router
+from aida.sql_workspace_api import router as sql_workspace_router
+from aida.steward_agent_api import router as steward_agent_router
 from aida.stewardship_api import router as stewardship_router
 from aida.studio_api import router as studio_router
 from aida.table_family_api import router as table_family_router
 from aida.token_revocation_api import router as token_revocation_router
+from aida.tool_agent_api import router as tool_agent_router
 from aida.tool_api import router as tool_router
 from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
-from aida.view_lineage_api import router as view_lineage_router
 from aida.workspace_api import router as workspace_router
 from aida.worm_archive import (
     ArchiveConfig,
@@ -385,6 +407,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         temporal_reconnect_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await temporal_reconnect_task
+    await close_outbound_clients()
+    await close_postgres_pools()
+    close_sqlserver_pools()
     logger.info("service_stopped", service=settings.service_name)
 
 
@@ -401,6 +426,7 @@ app.include_router(workspace_router)
 app.include_router(semantic_router)
 app.include_router(tool_router)
 app.include_router(operational_router)
+app.include_router(audit_export_router)
 app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(agent_contract_router)
@@ -414,11 +440,11 @@ app.include_router(model_export_router)
 app.include_router(model_import_router)
 app.include_router(description_withdrawal_router)
 app.include_router(composite_key_router)
-app.include_router(graph_perspectives_router)
 app.include_router(openlineage_router)
 app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
 app.include_router(sql_validation_router)
+app.include_router(sql_workspace_router)
 app.include_router(quality_router)
 app.include_router(ingestion_router)
 app.include_router(glossary_router)
@@ -428,12 +454,17 @@ app.include_router(parsed_lineage_review_router)
 app.include_router(lineage_evidence_export_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)
+# R11-OKF01: the OKF bundle target, beside the single-file compiler rather than inside it.
+app.include_router(okf_export_router)
+# R11-OKF03: bundle import -- preview, then pending proposals; off by default.
+app.include_router(okf_import_router)
 app.include_router(product_marketplace_router)
 app.include_router(marketplace_discovery_router)
 app.include_router(search_router)
+app.include_router(external_mcp_router)
+app.include_router(conversation_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
-app.include_router(view_lineage_router)
 app.include_router(studio_router)
 app.include_router(notification_router)
 app.include_router(observability_router)
@@ -450,16 +481,49 @@ app.include_router(delegation_router)
 app.include_router(persona_router)
 app.include_router(playbooks_router)
 app.include_router(asset_description_router)
+app.include_router(column_description_router)
+# R11-FP08: the third member of the description family -- a routine's
+# Atlas-authored description, drafted and reviewed exactly as the two above.
+app.include_router(routine_description_router)
+# R11-FP03: the read half of the definition history those descriptions cite.
+# The rows have been written since 2026-09-15 and nothing could read them.
+app.include_router(definition_history_router)
 app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
 app.include_router(review_queue_router)
+# R11-REV01: the change-focused queue and frozen review batches over it.
+app.include_router(review_batch_router)
+# ADR-0029: task agents.
+app.include_router(steward_agent_router)
+app.include_router(lineage_agent_router)
+app.include_router(quality_agent_router)
+app.include_router(tool_agent_router)
+# Governed ontology v1: typed definitions, decided in the governance queue.
+app.include_router(ontology_router)
+# R11-FP15: which source objects changed since they were last read.
+app.include_router(change_signals_router)
+# R11-FP05/FP17: what Atlas does not know about each source yet, and who can close it.
+app.include_router(footprint_gaps_router)
+# R11-FP06: what supports a proposed join, before and after it is decided.
+app.include_router(relationship_validation_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
+# Review 2026-09-16 §5: the engine x native-object-kind x facet matrix, served
+# from the same source the published reference page is generated from.
+app.include_router(engine_capability_router)
 app.include_router(procedure_tool_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents
+# R11-GQL01: POST /graphql -- typed metadata reads over the same authorization the
+# REST catalog reads make. Read-only; governed execution is R11-GQL02.
+app.include_router(graphql_router)
+
+# R11-AUD11: the proxy's body bounds on the API's own port, ahead of every route's body parse.
+# Added before `request_context` below, so that one stays outermost and a 413 still carries a
+# correlation id and is counted like any other response.
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.middleware("http")

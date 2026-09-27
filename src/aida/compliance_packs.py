@@ -3,9 +3,19 @@ Compliance Pack Generation (Phase E - EE.4 / OB-5)
 ====================================================
 
 Generates audit-ready compliance reports from runtime evidence.  Packs are
-reproducible (same inputs produce the same output) and WORM-archived after
-generation.  Supports MODEL_RISK, BCBS_239, ACCESS_REVIEW, AI_USAGE, and
-CHANGE_CONTROL frameworks.
+reproducible (same inputs produce the same output) and are persisted as
+checksummed `CompliancePackRecord` rows.  Supports MODEL_RISK, BCBS_239,
+ACCESS_REVIEW, AI_USAGE, and CHANGE_CONTROL frameworks.
+
+**A stored pack is not a WORM archive.**  This module writes one database row
+per pack; it does not hand the payload to `aida.worm_archive`'s storage
+provider, so there is no immutable object, no retention acknowledgment and no
+read-back verification behind it.  The checksum makes tampering *detectable*
+by anyone who re-generates the pack from the same inputs; it does not make the
+row *immutable*.  Audit events take the real archive path
+(`worm_archive.archive_pending_audit_events`); routing packs through the same
+provider is tracked as follow-up work, and until it lands the claim in this
+docstring and in the UI stays "generated and stored".
 """
 
 from __future__ import annotations
@@ -531,7 +541,11 @@ async def persist_pack(
     pack: CompliancePack,
     generated_by: str,
 ) -> CompliancePackRecord:
-    """WORM-archive a generated compliance pack."""
+    """Persist a generated compliance pack as a checksummed record row.
+
+    Not an archive write: see this module's docstring.  The caller's session
+    owns the transaction, so the row is durable when that session commits.
+    """
     record = CompliancePackRecord(
         organization_id=org_id,
         name=pack.name,

@@ -1,5 +1,6 @@
 import { useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { pushLocation } from "../lib/location";
 import type { CatalogRowRead } from "../lib/ui-types";
 import { Pill, StateDot } from "./primitives";
 import type { Tone } from "./primitives";
@@ -64,22 +65,31 @@ const relTime = (iso: string): string => {
  *  same screen scoped to this asset instead. */
 const MAX_INLINE_CHIPS = 3;
 function GlossaryChipRow({ terms, tableId }: { terms: readonly string[]; tableId: string }) {
-  const visible = terms.slice(0, MAX_INLINE_CHIPS);
-  const overflow = terms.length - visible.length;
+  /* A term links an asset once as far as a reader is concerned, but the row
+     can carry it twice -- two approved links to the same term, or the same
+     term reached through two categories. Rendering both gave two chips that
+     do the same thing and a duplicate React key. The name is the identity
+     here, so collapse on it and keep first-seen order. */
+  const unique = [...new Set(terms)];
+  const visible = unique.slice(0, MAX_INLINE_CHIPS);
+  const overflow = unique.length - visible.length;
+  /* The shell routes on the hash (`#/meaning`), so a path-only URL like
+     `/business-meaning?...` reloaded the app at the default screen and lost
+     the selection -- F08's defect class, reached through a hand-built link.
+     `pushLocation` writes the screen and the allowed query fields for us. */
   const openTerm = (term: string) => (e: React.MouseEvent) => {
     e.stopPropagation();
-    const q = encodeURIComponent(term);
-    window.location.href = `/business-meaning?view=glossary&term=${q}`;
+    pushLocation({ screen: "meaning", params: { view: "glossary", q: term } });
   };
   const openAllForTable = (e: React.MouseEvent) => {
     e.stopPropagation();
-    window.location.href = `/business-meaning?view=glossary&asset=${encodeURIComponent(tableId)}`;
+    pushLocation({ screen: "meaning", params: { view: "glossary", asset: tableId } });
   };
   return (
     <span
       className="cglossary"
       role="list"
-      aria-label={`${terms.length} glossary term${terms.length === 1 ? "" : "s"}`}
+      aria-label={`${unique.length} glossary term${unique.length === 1 ? "" : "s"}`}
     >
       {visible.map((t) => (
         <button

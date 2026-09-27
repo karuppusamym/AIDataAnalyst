@@ -45,6 +45,7 @@ export function ReferencePicker({
   searchPlaceholder = "Filter…",
   /** Rows visible before the list scrolls. */
   visibleRows = 6,
+  unavailableReason,
 }: {
   label: string;
   options: PickerOption[];
@@ -55,6 +56,12 @@ export function ReferencePicker({
   emptyHint?: string;
   searchPlaceholder?: string;
   visibleRows?: number;
+  /** Set when this SESSION may not read what the picker would list (R11-AUD01).
+   *  The picker then offers nothing -- no search box, no checkboxes, no chips to
+   *  remove blind -- and says why in one sentence. Distinct from `error`, which
+   *  is a read that was tried and failed: this one was never tried, because the
+   *  surface-control matrix says it would be refused. */
+  unavailableReason?: string;
 }) {
   const [query, setQuery] = useState("");
   const listId = useRef(`rp-${Math.random().toString(36).slice(2, 9)}`).current;
@@ -72,6 +79,18 @@ export function ReferencePicker({
   const toggle = (id: string) => {
     onChange(selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id]);
   };
+
+  if (unavailableReason) {
+    return (
+      <div className="refpicker refpicker--unavailable">
+        <div className="refpicker__head">
+          <span className="refpicker__label">{label}</span>
+          <span className="refpicker__count">not available to you</span>
+        </div>
+        <p className="refpicker__note">{unavailableReason}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="refpicker">

@@ -3,6 +3,9 @@
 .bm__h1{margin:0;font-size:22px;letter-spacing:-.015em}
 .bm__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch}
 .bm__stats{display:flex;gap:18px;font-size:12.5px;color:var(--ink-3);flex-wrap:wrap}
+/* R11-S13 (M4): the count and the ontology entry point share the header's
+   right-hand side, so the button does not push the count onto its own row. */
+.bm__headactions{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .bm__stats b{color:var(--ink);font-weight:600;font-family:var(--mono)}
 .tnum{font-variant-numeric:tabular-nums}
 

@@ -34,12 +34,77 @@ required, only a DB session and the worker principal.
   HTTP path); this is a defer, not a failure, and a later completion
   event picks the table back up.
 
-**Reachability.** `run_newly_created_table_drafter_consumer()` is
+**Reachability.** `supervise_newly_created_table_drafter()` is
 imported and started as a background asyncio task from
 `aida.workflows.worker.run_worker` (the `aida.workflows.worker`
 process, already an `ENTRY_POINTS` row in
 `tests/test_reachability_gate.py`) so this module is reachable through
 the existing worker entry point rather than becoming a new deployable.
+It runs `run_newly_created_table_drafter_consumer()` -- one
+connection's worth of work -- and runs it again when it fails.
+
+**Failure handling (R11-AUD03).** The consumer needs a broker and the
+default ten-service stack has none. Started bare, `consumer.start()`
+raised inside a task nobody awaited until the worker shut down: the
+task ended, nothing was logged, and automatic drafting for newly
+created tables quietly never happened -- and when Redpanda came up
+later, nothing noticed. The supervisor is the fix. It re-runs the
+consumer whenever the consumer ends without having been asked to stop,
+waiting 2 s and doubling to a 60 s cap between attempts, and it logs
+every failed attempt as `newly_created_table_drafter_unavailable`
+(`attempt`, `next_retry_seconds`, `bootstrap_servers`, `error_type`):
+at ERROR for the first failure of an incident and every tenth attempt
+after it, at WARNING in between, so a broker that stays away is loud
+without becoming an error line per retry. A consumer that had been up
+for a minute before it failed starts a new incident rather than
+continuing a crash loop, and the backoff starts over. Nothing the
+consumer raises can end the supervisor, so nothing it raises can take
+the Temporal worker down with it; cancellation and the consumer's own
+stopping state (the SIGINT / SIGTERM flag) are the only ways out.
+
+**What a monitor can scrape (R11-AUD03).** The log lines above tell a person who
+is reading them; three series tell an alert.
+`aida_newly_created_table_drafter_consumer_up` is 1 while the consumer has
+started and is consuming and 0 while it is not -- before its first start,
+while it is being retried, after it ends. `..._failures_total` counts the
+attempts that ended without a stop having been asked for, the same events the
+`newly_created_table_drafter_unavailable` line reports. Both live in the
+Temporal worker's registry and reach a scrape only when the worker opens its
+metrics listener (`aida.worker_metrics`, `worker_metrics_port`, off by default).
+
+The gauge carries one label, `consumer_group`, and that is not decoration. This
+module is imported by the worker whether or not `auto_enqueue_on_ingest` is on,
+and a gauge with no label is exported at 0 from the moment it is created: a
+worker that had switched the feature off would publish "consumer down" forever,
+and an alert on it would page for a decision somebody made. A labelled gauge has
+no series until `.labels()` is first called, which the supervisor does when it
+starts -- so the series exists exactly where the consumer is supposed to be
+running, and an alert on `== 0` cannot fire anywhere else. Where it does fire is
+the default stack: `auto_enqueue_on_ingest` is on, there is no broker, and 0 is
+the truth.
+
+What the gauge cannot see is a consumer that dies on the same message again and
+again. It is 1 for the moment each attempt's `start()` has succeeded and 0 for
+the rest of every backoff, so a scrape occasionally lands on the 1. The failures
+counter cannot tell that loop from a missing broker either: both raise it once a
+minute. `..._starts_total` can. It counts the `start()` calls that succeeded, so
+a missing broker leaves it where it is, a healthy consumer adds one, and a
+message that kills every consumer adds one per restart;
+`AtlasNewlyCreatedTableDrafterRestarting` reads it.
+
+**Per-message semantics are unchanged, on purpose.** An exception
+while handling a message leaves the `async for` before
+`consumer.commit()`, so the offset stays where it was and the group
+redelivers the message once the consumer is started again:
+at-least-once, which `handle_newly_created_table` is written for
+(idempotent; `enqueue_semantics_in_batches` resumes). What the
+supervisor adds is that the restart now happens -- before it, the
+exception ended the task and nothing ever redelivered. A message that
+fails every time therefore holds its partition in a loud restart loop
+at the capped backoff, where it used to stop the consumer silently for
+good. Skipping or dead-lettering such a message means deciding which
+failures are terminal and where the message goes, and it changes the
+delivery guarantee, so it is a change of its own and not made here.
 
 **Never do.** Never call `record_outbox()` from inside the handler
 itself for the same event id -- that would put a downstream projector
@@ -54,14 +119,20 @@ import asyncio
 import contextlib
 import json
 import signal
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 import structlog
+from prometheus_client import Counter, Gauge
 from sqlalchemy import select
 
+from aida.agent_contracts import REASON_CONTRACT_MISSING, agent_kill_blocking_reason
+from aida.agent_tasks import record_agent_task
 from aida.asset_description_service import (
+    MINIMUM_EVIDENCE_FOR_REVIEW,
     compose_draft_text,
     evidence_payload,
     gather_evidence,
@@ -77,6 +148,7 @@ from aida.models import (
     AssetDocumentation,
     AssetDocumentationVersion,
     DataSource,
+    GovernanceReview,
     MetadataEnrichmentProposal,
     MetadataTable,
     SemanticInferenceRun,
@@ -84,6 +156,13 @@ from aida.models import (
 from aida.schemas import SemanticInferenceRequest
 from aida.security import SecurityContext
 from aida.semantic_inference_service import generate_semantic_inference
+from aida.steward_agent import STEWARD_AGENT
+from aida.task_agent import (
+    TaskAgentAuthority,
+    TaskAgentRefused,
+    mode_for,
+    resolve_task_agent_authority,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -100,10 +179,157 @@ _AUTO_ENQUEUE_PRINCIPAL = "auto-enqueue-drafter"
 _OPEN_DRAFT_STATUSES = ("DRAFT", "PENDING_APPROVAL")
 _APPROVED_DOC_STATUS = "APPROVED"
 
+#: The Kafka consumer group this side-car reads the shared topic as. A constant because two
+#: things must name the same group: the consumer that joins it and the label on the gauge that
+#: says whether that consumer is up -- a label that drifted from the group would report on a
+#: consumer that does not exist.
+DRAFTER_CONSUMER_GROUP = "aida-newly-created-table-drafter-v1"
+
+DRAFTER_CONSUMER_UP = Gauge(
+    "aida_newly_created_table_drafter_consumer_up",
+    (
+        "1 while the newly-created-table drafter's Kafka consumer has started and the broker "
+        "answered its last metadata probe, 0 while it has not started, is being retried, or the "
+        "broker stopped answering after the start (aiokafka retries a dropped connection "
+        "internally and never raises it into the loop, so only the probe notices). Absent when the "
+        "supervisor never ran, e.g. auto_enqueue_on_ingest is off. 0 is expected on the default "
+        "stack, which has no broker."
+    ),
+    labelnames=("consumer_group",),
+)
+DRAFTER_CONSUMER_FAILURES = Counter(
+    "aida_newly_created_table_drafter_failures_total",
+    (
+        "Attempts by the newly-created-table drafter's consumer that ended without a stop having "
+        "been asked for: the broker was unreachable or dropped, or a message could not be "
+        "handled. The supervisor restarts the consumer after each. A message that fails on every "
+        "delivery shows here even when the up gauge is caught at 1."
+    ),
+)
+DRAFTER_CONSUMER_STARTS = Counter(
+    "aida_newly_created_table_drafter_starts_total",
+    (
+        "Starts of the newly-created-table drafter's consumer that succeeded (the broker answered "
+        "and the group was joined). A missing broker never adds to it and a healthy consumer adds "
+        "one, so more than a few in half an hour is a consumer that starts and is then killed, "
+        "most likely by a message that fails on every delivery."
+    ),
+)
+
+
+#: How often the running consumer asks the broker for cluster metadata, and how long it waits. A
+#: broker that drops after `start()` is retried inside aiokafka and never raised into the message
+#: loop, so without this the up gauge stayed 1 and `AtlasNewlyCreatedTableDrafterConsumerDown`
+#: could not fire (found reviewing round 12, 2026-09-21).
+DRAFTER_BROKER_PROBE_SECONDS = 30.0
+DRAFTER_BROKER_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+async def _probe_broker(consumer: Any) -> None:
+    """Keep the up gauge true to the broker while the consumer runs. Cancelled with the consumer.
+
+    `consumer.topics()` fetches cluster metadata and raises when no known broker answers
+    (aiokafka 0.14 `AIOKafkaClient.fetch_all_metadata`). One log line per change of state, not per
+    probe, so an hour-long outage is two lines.
+    """
+    reachable = True
+    while True:
+        await asyncio.sleep(DRAFTER_BROKER_PROBE_SECONDS)
+        try:
+            await asyncio.wait_for(consumer.topics(), timeout=DRAFTER_BROKER_PROBE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            if reachable:
+                logger.warning(
+                    "newly_created_table_drafter_broker_unreachable", error_type=type(exc).__name__
+                )
+            reachable = False
+            _set_consumer_up(0)
+        else:
+            if not reachable:
+                logger.info("newly_created_table_drafter_broker_reachable_again")
+            reachable = True
+            _set_consumer_up(1)
+
+
+def _set_consumer_up(value: int) -> None:
+    """The one place the gauge is written, so its label is written the same way everywhere.
+
+    The first call creates the series (see the module docstring on why that must not be at
+    import): the supervisor makes it at start, the consumer moves it after that.
+    """
+    DRAFTER_CONSUMER_UP.labels(consumer_group=DRAFTER_CONSUMER_GROUP).set(value)
+
+
+#: ADR-0029: the ledger intent of a draft made on ingest by an organization's
+#: registered steward agent, and the stop reason when its contract is T0.
+INTENT_DRAFT_ON_INGEST = "steward.draft_table_description_on_ingest"
+REASON_STEWARD_OBSERVES_ONLY = "steward_agent_observes_only"
+
 
 @dataclass(slots=True)
 class DrafterConsumerState:
+    """What the consumer and whoever supervises it share.
+
+    `stopping` is flipped by the SIGINT / SIGTERM handler and read by both: the
+    consumer stops after the message in hand, and the supervisor does not start
+    another attempt. `started_at` is `time.monotonic()` at the moment the
+    consumer's `start()` last succeeded; the supervisor clears it before each
+    attempt and reads it afterwards, so "was it up for a while before it failed"
+    is measured from a live connection and not from the attempt beginning (a
+    `start()` that hangs for its own timeout must not count as uptime).
+    """
+
     stopping: bool = False
+    started_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StewardGovernance:
+    """Whether this side-car drafts under the steward agent's contract (ADR-0029).
+
+    An organization that registered the steward agent -- a contract for its
+    principal on an approved version -- has put automated table drafting under
+    that contract, and the side-car honours it: it drafts as the agent, stops
+    when the agent's kill switch is engaged or its contract only observes (T0),
+    and puts a reviewable draft in the queue as the agent's own request, the way
+    the agent's own runs do. `authority` is then set, and `stopped_reason` when
+    the contract forbids drafting now -- including a registration the runtime
+    refuses (an unapproved version, two contracts).
+
+    An organization with no contract at all has not opted in, and both stay
+    unset: the side-car behaves exactly as it did before ADR-0029. That is what
+    keeps this from being the behaviour change the ADR declined -- failing
+    closed in every organization that never registered the agent.
+    """
+
+    authority: TaskAgentAuthority | None = None
+    stopped_reason: str | None = None
+
+
+async def steward_governance(session: Any, organization_id: UUID) -> StewardGovernance:
+    try:
+        authority = await resolve_task_agent_authority(
+            session, organization_id, spec=STEWARD_AGENT, settings=get_settings()
+        )
+    except TaskAgentRefused as exc:
+        if exc.reason_code == REASON_CONTRACT_MISSING:
+            return StewardGovernance()
+        return StewardGovernance(stopped_reason=exc.reason_code)
+    blocking = await agent_kill_blocking_reason(session, authority.contract)
+    if blocking is not None:
+        return StewardGovernance(authority=authority, stopped_reason=blocking)
+    if mode_for(authority.contract.autonomy_tier) != "PROPOSE":
+        return StewardGovernance(authority=authority, stopped_reason=REASON_STEWARD_OBSERVES_ONLY)
+    return StewardGovernance(authority=authority)
+
+
+def _steward_context(organization_id: UUID, authority: TaskAgentAuthority) -> SecurityContext:
+    return SecurityContext(
+        principal_id=authority.principal_id,
+        principal_type="AGENT",
+        organization_id=organization_id,
+        roles=STEWARD_AGENT.audit_roles,
+    )
 
 
 def _worker_context(organization_id: UUID) -> SecurityContext:
@@ -205,7 +431,9 @@ async def enqueue_description_draft_for_table(
     `score_evidence`, `text_fingerprint`, `evidence_payload`). Returns
     the persisted draft, or `None` when it was intentionally skipped
     (APPROVED description already exists, open draft in review already
-    exists, handler already produced one for this table).
+    exists, handler already produced one for this table, or the
+    organization's steward agent contract stops it -- see
+    `StewardGovernance`).
     """
     if await _table_has_approved_description(session, table.id):
         logger.info(
@@ -225,10 +453,33 @@ async def enqueue_description_draft_for_table(
             table_id=str(table.id),
         )
         return None
+    governance = await steward_governance(session, organization_id)
+    if governance.stopped_reason is not None:
+        logger.info(
+            "auto_enqueue_stopped_by_steward_agent",
+            table_id=str(table.id),
+            reason=governance.stopped_reason,
+        )
+        record_audit(
+            session,
+            _worker_context(organization_id),
+            action="AUTO_ENQUEUE_DRAFTS_ON_INGEST",
+            resource_type="TABLE",
+            resource_id=str(table.id),
+            outcome="SKIPPED",
+            correlation_id=str(table.id),
+            details={"reason": governance.stopped_reason, "steward_agent_contract": True},
+        )
+        return None
+    authority = governance.authority
     evidence = await gather_evidence(session, table)
     drafted_text = compose_draft_text(evidence)
     fingerprint = text_fingerprint(drafted_text)
     scores = score_evidence(evidence)
+    # Under the steward agent's contract a reviewable draft is its request for
+    # review, exactly as in the agent's own runs; a thin one stays a DRAFT, as
+    # it always did, because it could never be submitted.
+    submitting = authority is not None and scores.overall >= MINIMUM_EVIDENCE_FOR_REVIEW
     draft = AssetDescriptionDraft(
         organization_id=organization_id,
         table_id=table.id,
@@ -240,11 +491,88 @@ async def enqueue_description_draft_for_table(
         completeness_score=scores.completeness,
         overall_score=scores.overall,
         evidence=evidence_payload(evidence),
-        created_by=_AUTO_ENQUEUE_PRINCIPAL,
+        status="PENDING_APPROVAL" if submitting else "DRAFT",
+        created_by=authority.principal_id if authority is not None else _AUTO_ENQUEUE_PRINCIPAL,
     )
     session.add(draft)
     await session.flush()
+    if authority is not None:
+        await _record_under_steward_contract(
+            session,
+            organization_id=organization_id,
+            authority=authority,
+            draft=draft,
+            submitting=submitting,
+        )
     return draft
+
+
+async def _record_under_steward_contract(
+    session: Any,
+    *,
+    organization_id: UUID,
+    authority: TaskAgentAuthority,
+    draft: AssetDescriptionDraft,
+    submitting: bool,
+) -> None:
+    """The review request and the ledger row the steward agent's own runs write,
+    so a draft made on its behalf at ingest is decided, counted and sampled
+    like one it proposed. `ASSET_DESCRIPTION_DRAFT` is T0, inside every agent's
+    proposal ceiling."""
+    review: GovernanceReview | None = None
+    if submitting:
+        review = GovernanceReview(
+            organization_id=organization_id,
+            object_type="ASSET_DESCRIPTION_DRAFT",
+            object_id=str(draft.id),
+            requested_action="PUBLISH",
+            requested_by=authority.principal_id,
+        )
+        session.add(review)
+        await session.flush()
+        draft.governance_review_id = review.id
+        record_audit(
+            session,
+            _steward_context(organization_id, authority),
+            action=f"{STEWARD_AGENT.key}_agent.propose",
+            resource_type="governance_review",
+            resource_id=str(review.id),
+            outcome="SUCCESS",
+            correlation_id=str(draft.table_id),
+            details={
+                "object_type": "ASSET_DESCRIPTION_DRAFT",
+                "object_id": str(draft.id),
+                "trigger": NEWLY_CREATED_TABLE_EVENT_TYPE,
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="governance_review",
+            aggregate_id=str(review.id),
+            event_type="governance.review_requested.v1",
+            payload={
+                "review_id": str(review.id),
+                "object_type": "ASSET_DESCRIPTION_DRAFT",
+                "object_id": str(draft.id),
+                "requested_action": "PUBLISH",
+            },
+        )
+    await record_agent_task(
+        session,
+        organization_id=organization_id,
+        agent_principal_id=authority.principal_id,
+        intent=INTENT_DRAFT_ON_INGEST,
+        inputs={
+            "table_id": str(draft.table_id),
+            "text_fingerprint": draft.text_fingerprint,
+            "trigger": NEWLY_CREATED_TABLE_EVENT_TYPE,
+        },
+        ai_asset_version_id=authority.version.id,
+        proposal_ref_type="GOVERNANCE_REVIEW" if review is not None else "ASSET_DESCRIPTION_DRAFT",
+        proposal_ref_id=review.id if review is not None else draft.id,
+        sampling_rate=authority.contract.sampling_rate,
+    )
 
 
 async def handle_newly_created_table(session: Any, payload: dict[str, Any]) -> None:
@@ -409,24 +737,39 @@ async def handle_newly_created_table(session: Any, payload: dict[str, Any]) -> N
     await enqueue_semantics_for_source(session, datasource_id, [table_id])
 
 
-async def enqueue_semantics_for_source(
+#: Tables per semantic-inference batch. On the consumer's path each batch is
+#: its own transaction (`enqueue_semantics_in_batches`).
+SEMANTICS_BATCH_SIZE = 100
+
+
+async def enqueue_semantics_batch(
     session: Any,
     datasource_id: UUID,
+    *,
     table_ids: list[UUID] | None = None,
-) -> None:
-    """Generate actual proposals, once per table and completed scan, in bounded batches."""
+    after: UUID | None = None,
+) -> UUID | None:
+    """Propose semantics for the next batch of a source's unproposed tables.
+
+    Returns the last table id the batch covered, which is the cursor for the
+    next one, or None when nothing is left or the source is not ready (no
+    completed scan, or auto-enqueue switched off). It takes the source's row
+    lock, so two batches for one source never run side by side.
+
+    The cursor is what makes the pass end. A table inference writes no proposal
+    for stays unproposed, so selecting "whatever is still unproposed" picked it
+    again on every pass, forever. In the dev stack that loop held one
+    transaction for the worker's whole uptime; every migration queued behind
+    it, and every write behind the migration.
+    """
     datasource = await session.scalar(
-        select(DataSource)
-        .where(
-            DataSource.id == datasource_id,
-        )
-        .with_for_update()
+        select(DataSource).where(DataSource.id == datasource_id).with_for_update()
     )
     if datasource is None or not get_settings().auto_enqueue_on_ingest:
-        return
+        return None
     run_id = await _completed_analysis_run_id(session, datasource_id)
     if run_id is None:
-        return
+        return None
     proposed = (
         select(MetadataEnrichmentProposal.table_id)
         .join(
@@ -435,35 +778,71 @@ async def enqueue_semantics_for_source(
         )
         .where(SemanticInferenceRun.analysis_run_id == run_id)
     )
+    filters = [
+        MetadataTable.datasource_id == datasource_id,
+        MetadataTable.status == "ACTIVE",
+        MetadataTable.id.not_in(proposed),
+    ]
+    if table_ids is not None:
+        filters.append(MetadataTable.id.in_(table_ids))
+    if after is not None:
+        filters.append(MetadataTable.id > after)
+    pending: list[UUID] = list(
+        await session.scalars(
+            select(MetadataTable.id)
+            .where(*filters)
+            .order_by(MetadataTable.id)
+            .limit(SEMANTICS_BATCH_SIZE)
+        )
+    )
+    if not pending:
+        return None
+    await generate_semantic_inference(
+        datasource_id,
+        SemanticInferenceRequest(use_model=False, max_tables=SEMANTICS_BATCH_SIZE),
+        _worker_context(datasource.organization_id),
+        session,
+        get_settings(),
+        table_ids=pending,
+    )
+    await session.flush()
+    return pending[-1]
+
+
+async def enqueue_semantics_for_source(
+    session: Any,
+    datasource_id: UUID,
+    table_ids: list[UUID] | None = None,
+) -> None:
+    """Every batch, inside the caller's transaction: the single-table path from
+    `handle_newly_created_table`, and any caller that owns the transaction."""
+    after: UUID | None = None
     while True:
-        filters = [
-            MetadataTable.datasource_id == datasource_id,
-            MetadataTable.status == "ACTIVE",
-            MetadataTable.id.not_in(proposed),
-        ]
-        if table_ids is not None:
-            filters.append(MetadataTable.id.in_(table_ids))
-        pending = list(
-            await session.scalars(
-                select(MetadataTable.id)
-                .where(*filters)
-                .order_by(
-                    MetadataTable.id,
-                )
-                .limit(100)
-            )
+        after = await enqueue_semantics_batch(
+            session, datasource_id, table_ids=table_ids, after=after
         )
-        if not pending:
+        if after is None:
             return
-        await generate_semantic_inference(
-            datasource_id,
-            SemanticInferenceRequest(use_model=False, max_tables=100),
-            _worker_context(datasource.organization_id),
-            session,
-            get_settings(),
-            table_ids=pending,
-        )
-        await session.flush()
+
+
+async def enqueue_semantics_in_batches(datasource_id: UUID) -> int:
+    """The consumer's path for a completed scan: one transaction per batch.
+
+    A whole source in one transaction held its row lock and its snapshot for
+    the entire pass, so on a large source any migration touching those tables
+    waited for all of it. Committed batch by batch, nothing outlives a batch.
+    A failure keeps the batches before it, and since the message is not
+    acknowledged, a replay resumes there: tables already proposed are skipped.
+    Returns how many batches ran.
+    """
+    after: UUID | None = None
+    batches = 0
+    while True:
+        async with session_factory() as session, session.begin():
+            after = await enqueue_semantics_batch(session, datasource_id, after=after)
+        if after is None:
+            return batches
+        batches += 1
 
 
 def _decode_event(raw: bytes) -> dict[str, Any]:
@@ -472,14 +851,35 @@ def _decode_event(raw: bytes) -> dict[str, Any]:
     return decoded
 
 
-async def run_newly_created_table_drafter_consumer() -> None:
+def _stop_on_signals(state: DrafterConsumerState) -> None:
+    """SIGINT / SIGTERM set `state.stopping` and nothing else.
+
+    Whoever creates the state owns this, exactly once: the supervisor, or a
+    caller that runs the consumer bare. A supervised consumer is handed the
+    supervisor's state and must not register the handlers again on every retry.
+    """
+    loop = asyncio.get_running_loop()
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signal_name, setattr, state, "stopping", True)
+
+
+async def run_newly_created_table_drafter_consumer(
+    state: DrafterConsumerState | None = None,
+) -> None:
     """Consume `catalog.table.newly_created.v1` from the shared
     `aida.platform.events.v1` Kafka topic and dispatch each event to
-    `handle_newly_created_table`. Import path is what
-    `aida.workflows.worker.run_worker` starts as a background task
+    `handle_newly_created_table`.
+
+    One connection's worth of work, and it never retries: it returns when
+    `state.stopping` is set and raises when the connection or the handling of a
+    message fails. Retrying is `supervise_newly_created_table_drafter`'s job --
+    that is what `aida.workflows.worker.run_worker` starts as a background task
     when `settings.auto_enqueue_on_ingest` is True, keeping this file
     reachable through the existing worker entry point rather than
-    becoming a new deployable.
+    becoming a new deployable -- and it passes the `state` it shares with this
+    coroutine. Called with no state, this creates one and installs the signal
+    handlers, as it always did.
 
     Deliberately imports `aiokafka` locally (rather than at module
     top) so tests that only exercise `handle_newly_created_table`
@@ -489,22 +889,35 @@ async def run_newly_created_table_drafter_consumer() -> None:
     from aiokafka import AIOKafkaConsumer  # noqa: PLC0415 -- see docstring
 
     settings = get_settings()
-    state = DrafterConsumerState()
-    loop = asyncio.get_running_loop()
-    for signal_name in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(signal_name, setattr, state, "stopping", True)
+    if state is None:
+        state = DrafterConsumerState()
+        _stop_on_signals(state)
     consumer = AIOKafkaConsumer(
         "aida.platform.events.v1",
         bootstrap_servers=settings.kafka_bootstrap_servers,
-        group_id="aida-newly-created-table-drafter-v1",
+        group_id=DRAFTER_CONSUMER_GROUP,
         client_id="aida-newly-created-table-drafter",
         enable_auto_commit=False,
         auto_offset_reset="earliest",
     )
-    await consumer.start()
-    logger.info("newly_created_table_drafter_started")
+    started = False
+    probe: asyncio.Task[None] | None = None
     try:
+        # Inside the `try` so that a `start()` that fails still reaches the
+        # `finally`: it can die after the client has opened connections and its
+        # metadata-refresh task, and a supervised retry every minute must not
+        # leave those behind for each attempt (aiokafka's `__del__` warns
+        # "Unclosed AIOKafkaConsumer" about exactly that).
+        await consumer.start()
+        started = True
+        state.started_at = time.monotonic()
+        DRAFTER_CONSUMER_STARTS.inc()
+        _set_consumer_up(1)
+        probe = asyncio.create_task(_probe_broker(consumer))
+        logger.info(
+            "newly_created_table_drafter_started",
+            bootstrap_servers=settings.kafka_bootstrap_servers,
+        )
         async for message in consumer:
             envelope = _decode_event(message.value)
             if envelope.get("event_type") not in (
@@ -515,13 +928,11 @@ async def run_newly_created_table_drafter_consumer() -> None:
                 if state.stopping:
                     break
                 continue
-            async with session_factory() as session, session.begin():
-                if envelope["event_type"] == NEWLY_CREATED_TABLE_EVENT_TYPE:
+            if envelope["event_type"] == NEWLY_CREATED_TABLE_EVENT_TYPE:
+                async with session_factory() as session, session.begin():
                     await handle_newly_created_table(session, envelope["payload"])
-                else:
-                    await enqueue_semantics_for_source(
-                        session, UUID(envelope["payload"]["datasource_id"])
-                    )
+            else:
+                await enqueue_semantics_in_batches(UUID(envelope["payload"]["datasource_id"]))
             await consumer.commit()
             logger.info(
                 "newly_created_table_drafter_processed",
@@ -531,9 +942,135 @@ async def run_newly_created_table_drafter_consumer() -> None:
             if state.stopping:
                 break
     finally:
-        await consumer.stop()
-        logger.info("newly_created_table_drafter_stopped")
+        # First, before the awaits below: from here on nothing is consuming -- whether the loop
+        # ended, a message failed, `start()` never succeeded or this was cancelled -- and
+        # `stop()` against a broker that is gone can take a while to give up.
+        if probe is not None:
+            probe.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await probe
+        _set_consumer_up(0)
+        try:
+            await consumer.stop()
+        except Exception as exc:
+            # Cleanup must not replace the error that brought us here: the
+            # supervisor reports that one, and a `stop()` that cannot reach a
+            # broker that is already gone is the expected companion of it.
+            logger.warning("newly_created_table_drafter_stop_failed", error_type=type(exc).__name__)
+        if started:
+            logger.info("newly_created_table_drafter_stopped")
+
+
+#: Wait after the first failed attempt; doubles per consecutive failure up to
+#: the cap. Two seconds is long enough not to hammer a broker that is starting
+#: and short enough that a Redpanda which comes up a moment after the worker is
+#: picked up almost at once; a minute is the longest a healthy stack is left
+#: without drafting after the broker returns.
+DRAFTER_RETRY_INITIAL_SECONDS = 2.0
+DRAFTER_RETRY_MAX_SECONDS = 60.0
+#: A consumer that stayed up this long before it failed is a new incident, not
+#: a continuing crash loop: the backoff starts over and the failure is logged
+#: as a first one. It equals the cap on purpose -- staying up as long as the
+#: longest wait the supervisor would ever impose is what "healthy" has to mean.
+DRAFTER_HEALTHY_AFTER_SECONDS = 60.0
+#: `newly_created_table_drafter_unavailable` is an ERROR for the first failed
+#: attempt of an incident and for every Nth after it, a WARNING otherwise: with
+#: the cap above, a broker that stays away is an error about every ten minutes
+#: and a warning each minute in between.
+DRAFTER_ERROR_EVERY_N_ATTEMPTS = 10
+
+DrafterRunner = Callable[[DrafterConsumerState], Awaitable[None]]
+DrafterSleep = Callable[[float], Awaitable[None]]
+
+
+def drafter_retry_delay_seconds(attempt: int) -> float:
+    """Seconds to wait after the `attempt`-th consecutive failure (1 is the first)."""
+    # The exponent is clamped so a very long outage cannot overflow the float
+    # long after the delay has stopped growing.
+    exponent = min(max(attempt, 1) - 1, 16)
+    return min(DRAFTER_RETRY_INITIAL_SECONDS * 2.0**exponent, DRAFTER_RETRY_MAX_SECONDS)
+
+
+async def supervise_newly_created_table_drafter(
+    run_consumer: DrafterRunner = run_newly_created_table_drafter_consumer,
+    *,
+    sleep: DrafterSleep = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    state: DrafterConsumerState | None = None,
+) -> None:
+    """Keep the newly-created-table consumer running, and say so when it is not.
+
+    The worker starts this as a background task and nobody awaits that task until
+    shutdown, so it is written not to end: a failure of the consumer -- the broker
+    is absent or drops, a message cannot be handled -- is logged as
+    `newly_created_table_drafter_unavailable` and the consumer is started again
+    after a capped exponential backoff, for as long as the process lives. The
+    consumer's success is logged by the consumer itself
+    (`newly_created_table_drafter_started`).
+
+    It ends only by cancellation (the worker's shutdown) or when the shared
+    `state.stopping` is set. A consumer that returns without being asked to stop
+    is treated as a failure, and waited out like one, so that it cannot spin.
+
+    `run_consumer`, `sleep` and `monotonic` are parameters so the loop can be
+    driven by a fake consumer and a fake clock; the defaults are the real ones.
+    When it creates the state it also installs the SIGINT / SIGTERM handlers that
+    set it, as the bare consumer used to.
+
+    It also owns the two series in the module docstring: it creates the gauge, at 0, when
+    it starts (the consumer moves it to 1 once `start()` has succeeded and back to 0 when it
+    ends), and it counts each failed attempt into `DRAFTER_CONSUMER_FAILURES` where it logs it.
+    """
+    bootstrap_servers = get_settings().kafka_bootstrap_servers
+    if state is None:
+        state = DrafterConsumerState()
+        _stop_on_signals(state)
+    # Not consuming yet, and the moment the series comes to exist: see the module docstring.
+    _set_consumer_up(0)
+    failed_attempts = 0
+    while not state.stopping:
+        state.started_at = None
+        failure: Exception | None = None
+        try:
+            await run_consumer(state)
+        except Exception as exc:
+            # `Exception` and not `BaseException`: cancellation and interpreter
+            # exit must pass through. Everything else is what this loop exists
+            # to survive -- the consumer runs in a task no one is awaiting.
+            failure = exc
+        error_type = type(failure).__name__ if failure is not None else None
+        if state.stopping:
+            if failure is not None:
+                logger.warning(
+                    "newly_created_table_drafter_failed_while_stopping", error_type=error_type
+                )
+            return
+        if (
+            state.started_at is not None
+            and monotonic() - state.started_at >= DRAFTER_HEALTHY_AFTER_SECONDS
+        ):
+            failed_attempts = 0
+        failed_attempts += 1
+        # Every failed attempt, not only the ones the log escalates: the counter is what a
+        # rate() over a window reads, and it must agree with the WARNING lines between the ERRORs.
+        DRAFTER_CONSUMER_FAILURES.inc()
+        delay = drafter_retry_delay_seconds(failed_attempts)
+        fields: dict[str, Any] = {
+            "attempt": failed_attempts,
+            "next_retry_seconds": delay,
+            "bootstrap_servers": bootstrap_servers,
+            # None: the consumer returned without an error and without being told to stop.
+            "error_type": error_type,
+        }
+        if failed_attempts == 1 or failed_attempts % DRAFTER_ERROR_EVERY_N_ATTEMPTS == 0:
+            # `exc_info` carries the traceback where the log pipeline keeps it
+            # (the platform's redaction processor drops the `exception` field, so
+            # `error_type` above is what is always readable).
+            logger.error("newly_created_table_drafter_unavailable", exc_info=failure, **fields)
+        else:
+            logger.warning("newly_created_table_drafter_unavailable", **fields)
+        await sleep(delay)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_newly_created_table_drafter_consumer())
+    asyncio.run(supervise_newly_created_table_drafter())

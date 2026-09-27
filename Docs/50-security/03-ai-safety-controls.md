@@ -123,10 +123,10 @@ Non-content generation evidence — route version, model ID, token counts, laten
 | Scope | All model traffic, organization-wide or per route |
 | Effect on deterministic paths | **None** — tool-first execution, catalog, lineage, quality continue |
 | Latency | Full stop within 60 seconds |
-| Authorization | Platform operator; audited |
+| Authorization | `PlatformAdmin` only, for engaging and for releasing (`Operations` is refused); audited |
 | Drill | Quarterly, timed, evidence retained |
 
-**An undrilled kill switch is not a kill switch.** Currently designed, **not drilled** — tracked P0.
+**An undrilled kill switch is not a kill switch.** The switch is implemented (`src/aida/ai_governance_api.py`; the model gateway checks it first, ahead of every other activation condition) and has had one in-process drill: `tests/test_kill_switch_drill.py` (MG-2) engages it through the real route and asserts the next generation call is stopped, on in-memory SQLite with no network hop. **No quarterly drill against a deployed stack has been run and no drill evidence is retained** — tracked P0 (AS-4).
 
 ## 11. Model risk evaluation
 

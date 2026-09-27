@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import math
 from collections import Counter
 from dataclasses import replace
@@ -68,6 +66,17 @@ from aida.relationship_intelligence import (
     score_relationship_candidate_signals,
 )
 from aida.relationship_naming import canonical_column_name, physical_type_family
+from aida.relationship_validation import (
+    RelationshipColumnsMissingError,
+    load_relationship_catalog_facts,
+    public_relationship_evidence,
+    refusal_detail,
+    validate_composite_relationship_candidate,
+    validate_relationship_candidate,
+    validate_relationship_candidate_from,
+    with_recorded_validation,
+)
+from aida.relationship_validation_api import authorize_relationship_sides
 from aida.schemas import (
     RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
     CanonicalTableMappingRead,
@@ -102,6 +111,7 @@ from aida.schemas import (
     TableRef,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.signing import sign_value
 
 router = APIRouter(prefix="/v1", tags=["intelligence-governance"])
 
@@ -124,6 +134,45 @@ SENSITIVE_CLASSIFICATIONS = SENSITIVE_CLASSES
 
 def _is_positive(rating: str) -> bool:
     return rating == "HELPFUL"
+
+
+#: R11-MP17: roles that may confirm a run they did not ask. The confirmation is
+#: what turns someone else's query into a shared example, so it is a checker's
+#: act, not an analyst's.
+SECOND_CONFIRMATION_ROLES: frozenset[str] = frozenset(
+    {"PlatformAdmin", "DataSteward", "Reviewer"}
+)
+AWAITING_SECOND_CONFIRMATION = "AWAITING_SECOND_CONFIRMATION"
+
+
+async def _memory_status(
+    session: AsyncSession, agent_run: AgentRun, *, second_confirmation: bool
+) -> str:
+    """The query memory status from every rating on the run, recounted (R11-MP17).
+
+    Any negative rating suppresses reuse. Otherwise the query is ELIGIBLE -- a
+    template and few-shot example for everyone on the datasource -- only once
+    someone other than the run's owner rated it helpful; the owner's own rating
+    alone leaves it AWAITING_SECOND_CONFIRMATION. Recounted from the rows
+    rather than from the counters so the rule cannot drift from the evidence.
+    """
+    ratings = (
+        await session.execute(
+            select(QueryFeedback.principal_id, QueryFeedback.rating).where(
+                QueryFeedback.agent_run_id == agent_run.id
+            )
+        )
+    ).all()
+    if any(not _is_positive(rating) for _principal, rating in ratings):
+        return "SUPPRESSED"
+    positives = [principal for principal, rating in ratings if _is_positive(rating)]
+    if not positives:
+        return "OBSERVED"
+    if not second_confirmation:
+        return "ELIGIBLE"
+    if any(principal != agent_run.principal_id for principal in positives):
+        return "ELIGIBLE"
+    return AWAITING_SECOND_CONFIRMATION
 
 
 @router.get(
@@ -299,7 +348,7 @@ async def get_knowledge_graph(
             target_columns=[columns_by_id[candidate.target_column_id].name],
             status=candidate.status,
             confidence=candidate.confidence,
-            evidence=candidate.evidence,
+            evidence=public_relationship_evidence(candidate.evidence),
             candidate_id=candidate.id,
         )
         for candidate in candidates
@@ -505,7 +554,11 @@ async def get_knowledge_graph_neighborhood(
 async def upsert_query_feedback(
     agent_run_id: UUID,
     body: QueryFeedbackUpsert,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "Analyst", "AgentDeveloper")),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "Analyst", "AgentDeveloper", "DataSteward", "Reviewer"
+        )
+    ),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> QueryFeedback:
@@ -513,8 +566,16 @@ async def upsert_query_feedback(
     if agent_run is None:
         raise HTTPException(status_code=404, detail="agent run not found")
     enforce_organization(context, agent_run.organization_id)
-    if "PlatformAdmin" not in context.roles and agent_run.principal_id != context.principal_id:
-        raise HTTPException(status_code=403, detail="feedback is limited to the run owner")
+    if agent_run.principal_id != context.principal_id and not (
+        SECOND_CONFIRMATION_ROLES & set(context.roles)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "feedback on another person's run is a second confirmation, "
+                "limited to PlatformAdmin, DataSteward and Reviewer"
+            ),
+        )
     if agent_run.status != "COMPLETED" or agent_run.query_execution_id is None:
         raise HTTPException(status_code=409, detail="only completed agent runs accept feedback")
     execution = await session.get(QueryExecution, agent_run.query_execution_id)
@@ -548,15 +609,7 @@ async def upsert_query_feedback(
             memory.positive_feedback_count = max(0, memory.positive_feedback_count - 1)
         else:
             memory.negative_feedback_count = max(0, memory.negative_feedback_count - 1)
-    comment_hash = (
-        hmac.new(
-            settings.audit_hmac_key.encode(),
-            body.comment.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        if body.comment
-        else None
-    )
+    comment_hash = await sign_value(settings, body.comment) if body.comment else None
     if feedback is None:
         feedback = QueryFeedback(
             organization_id=agent_run.organization_id,
@@ -573,12 +626,11 @@ async def upsert_query_feedback(
         memory.positive_feedback_count += 1
     else:
         memory.negative_feedback_count += 1
-    memory.status = (
-        "SUPPRESSED"
-        if memory.negative_feedback_count > 0
-        else "ELIGIBLE"
-        if memory.positive_feedback_count > 0
-        else "OBSERVED"
+    await session.flush()
+    memory.status = await _memory_status(
+        session,
+        agent_run,
+        second_confirmation=settings.query_memory_requires_second_confirmation,
     )
     await session.flush()
     execution_context = replace(context, organization_id=agent_run.organization_id)
@@ -1186,7 +1238,13 @@ async def list_relationship_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: a DataSteward/MetadataReviewer can already decide these candidates
+        # (decide_relationship_candidate below); without list access the queue read
+        # a caller can't answer for renders empty rather than refused.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -1326,19 +1384,41 @@ async def decide_relationship_candidate(
         require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RelationshipCandidate:
     candidate = await session.get(RelationshipCandidate, candidate_id)
     if candidate is None:
         raise HTTPException(status_code=404, detail="relationship candidate not found")
     enforce_organization(context, candidate.organization_id)
+    # R11-FP06: deciding a join reads both sides, and an approval records their evidence on the
+    # candidate. The same datasource and domain gates the validation read applies hold here, so
+    # approving is never the way around a read the gates refuse.
+    await authorize_relationship_sides(
+        session,
+        context,
+        settings,
+        source_datasource_id=candidate.datasource_id,
+        target_datasource_ids=[candidate.target_datasource_id],
+    )
     if candidate.created_by == context.principal_id:
         raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
     if candidate.status != "PENDING":
         raise HTTPException(status_code=409, detail="relationship candidate is already decided")
+    decided_at = datetime.now(UTC)
+    if body.decision == "APPROVE":
+        # R11-FP06: an approval is checked against the catalog as it is now, and the
+        # validation it rested on is kept with the candidate.
+        try:
+            validation = await validate_relationship_candidate(session, candidate)
+        except RelationshipColumnsMissingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not validation.approvable:
+            raise HTTPException(status_code=409, detail=refusal_detail(validation))
+        candidate.evidence = with_recorded_validation(candidate.evidence, validation, decided_at)
     candidate.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     candidate.reviewed_by = context.principal_id
     candidate.review_reason = body.reason
-    candidate.reviewed_at = datetime.now(UTC)
+    candidate.reviewed_at = decided_at
     if candidate.status == "REJECTED":
         # N4: the real EE.3/N16 negative-knowledge write, so this rejection
         # becomes queryable "known not true" and suppresses re-proposal --
@@ -1387,7 +1467,11 @@ async def list_rename_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: same list/decide asymmetry as list_relationship_candidates above.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -1718,7 +1802,12 @@ async def list_cross_source_object_resolution_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: same list/decide asymmetry as list_relationship_candidates above --
+        # this is the "same-object" (cross-source) candidate queue Cross-source reads.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -1875,6 +1964,7 @@ async def bulk_decide_relationship_candidates(
         require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RelationshipCandidateBulkDecisionResultRead:
     """RL-6: decide up to RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS PENDING
     relationship candidates in one call, by explicit id list or by a
@@ -1903,6 +1993,16 @@ async def bulk_decide_relationship_candidates(
         ).all()
     }
     new_status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    # R11-FP06: one batched read of the catalog facts every validation in this
+    # batch needs, instead of the six-plus-one-per-table each candidate's
+    # validation used to issue for itself. Each candidate's verdict is then
+    # computed from it purely, so the per-item rules below -- maker-checker,
+    # PENDING-only, the per-side authorization and the domain grant -- are
+    # untouched and still decided per candidate. A REJECT decides no evidence,
+    # so it reads nothing.
+    catalog_facts = await load_relationship_catalog_facts(
+        session, list(candidates.values()) if new_status == "APPROVED" else []
+    )
     now = datetime.now(UTC)
     results: list[RelationshipCandidateBulkDecisionItemRead] = []
     succeeded = 0
@@ -1928,6 +2028,24 @@ async def bulk_decide_relationship_candidates(
                 )
             )
             continue
+        try:
+            # R11-FP06: the single decision's datasource and domain gates, reported per item.
+            await authorize_relationship_sides(
+                session,
+                context,
+                settings,
+                source_datasource_id=candidate.datasource_id,
+                target_datasource_ids=[candidate.target_datasource_id],
+            )
+        except HTTPException as exc:
+            results.append(
+                RelationshipCandidateBulkDecisionItemRead(
+                    candidate_id=str(candidate_id),
+                    status="FAILED",
+                    reason=str(exc.detail),
+                )
+            )
+            continue
         if candidate.created_by == context.principal_id:
             results.append(
                 RelationshipCandidateBulkDecisionItemRead(
@@ -1946,6 +2064,28 @@ async def bulk_decide_relationship_candidates(
                 )
             )
             continue
+        if new_status == "APPROVED":
+            # R11-FP06: the single decision's evidence gate, reported per item.
+            try:
+                validation = validate_relationship_candidate_from(catalog_facts, candidate)
+            except RelationshipColumnsMissingError as exc:
+                results.append(
+                    RelationshipCandidateBulkDecisionItemRead(
+                        candidate_id=str(candidate_id), status="FAILED", reason=str(exc)
+                    )
+                )
+                continue
+            if not validation.approvable:
+                refusal = refusal_detail(validation)
+                results.append(
+                    RelationshipCandidateBulkDecisionItemRead(
+                        candidate_id=str(candidate_id),
+                        status="FAILED",
+                        reason=f"{refusal['code']}: {refusal['message']}",
+                    )
+                )
+                continue
+            candidate.evidence = with_recorded_validation(candidate.evidence, validation, now)
         candidate.status = new_status
         candidate.reviewed_by = context.principal_id
         candidate.review_reason = body.reason
@@ -2668,7 +2808,11 @@ async def list_composite_relationship_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: same list/decide asymmetry as list_relationship_candidates above.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -2713,21 +2857,40 @@ async def decide_composite_relationship_candidate(
         require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> CompositeRelationshipCandidateRead:
     group = await session.get(RelationshipCandidateGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="composite relationship candidate not found")
     enforce_organization(context, group.organization_id)
+    # R11-FP06: the same gate the composite validation read applies.
+    await authorize_relationship_sides(
+        session,
+        context,
+        settings,
+        source_datasource_id=group.datasource_id,
+        target_datasource_ids=[],
+    )
     if group.created_by == context.principal_id:
         raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
     if group.status != "PENDING":
         raise HTTPException(
             status_code=409, detail="composite relationship candidate is already decided"
         )
+    decided_at = datetime.now(UTC)
+    if body.decision == "APPROVE":
+        # R11-FP06: the same evidence gate as a single-column join, over every column pair.
+        try:
+            validation = await validate_composite_relationship_candidate(session, group)
+        except RelationshipColumnsMissingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not validation.approvable:
+            raise HTTPException(status_code=409, detail=refusal_detail(validation))
+        group.evidence = with_recorded_validation(group.evidence, validation, decided_at)
     group.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     group.reviewed_by = context.principal_id
     group.review_reason = body.reason
-    group.reviewed_at = datetime.now(UTC)
+    group.reviewed_at = decided_at
     record_audit(
         session,
         replace(context, organization_id=group.organization_id),

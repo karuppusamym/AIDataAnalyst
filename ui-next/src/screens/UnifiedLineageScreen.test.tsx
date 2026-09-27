@@ -10,23 +10,28 @@ import type { PageOf } from "../lib/ui-types";
    (`unified_lineage_api.py::get_unified_lineage_graph`/`get_unified_lineage_impact`).
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchUnifiedLineageGraph = vi.fn<
   (datasourceId: string, query: unknown, signal?: AbortSignal) => Promise<UnifiedLineageGraphRead>
 >();
 const fetchLineageImpact = vi.fn<
   (datasourceId: string, nodeId: string, query: unknown, signal?: AbortSignal) => Promise<UnifiedLineageImpactRead>
 >();
+const findOrgDatasourceById = vi.fn<
+  (organizationId: string, datasourceId: string, signal?: AbortSignal) => Promise<DataSourceRead | null>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchUnifiedLineageGraph: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
       fetchUnifiedLineageGraph(datasourceId, query, signal),
     fetchLineageImpact: (datasourceId: string, nodeId: string, query: unknown, signal?: AbortSignal) =>
       fetchLineageImpact(datasourceId, nodeId, query, signal),
+    findOrgDatasourceById: (organizationId: string, datasourceId: string, signal?: AbortSignal) =>
+      findOrgDatasourceById(organizationId, datasourceId, signal),
   };
 });
 
@@ -96,10 +101,12 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchUnifiedLineageGraph.mockReset();
   fetchLineageImpact.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  findOrgDatasourceById.mockReset();
+  findOrgDatasourceById.mockResolvedValue(null);
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchUnifiedLineageGraph.mockResolvedValue(GRAPH);
   fetchLineageImpact.mockResolvedValue(IMPACT);
   fetchDomainLineageGraph.mockReset();
@@ -131,6 +138,36 @@ afterEach(() => {
 });
 
 describe("UnifiedLineageScreen against the real unified-lineage graph/impact endpoints", () => {
+  it("previews a guided question before executing bounded directional impact", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+    fireEvent.change(screen.getByLabelText("Ask the graph"), { target: { value: "upstream of orders_raw within 2 hops" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview graph query" }));
+    expect(fetchLineageImpact).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Run impact query" }));
+    await waitFor(() => expect(fetchLineageImpact).toHaveBeenCalledWith("ds_1", "t_orders_raw", { depth: 2, nodeLimit: 200 }, expect.anything()));
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("raw_sales")).toBeInTheDocument();
+    expect(within(table).queryByText("revenue_agg")).not.toBeInTheDocument();
+  });
+
+  it("filters nodes and incident edges by asset name and type, and clears filters", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+    fireEvent.change(screen.getByLabelText("Find assets"), { target: { value: "revenue" } });
+    expect(screen.getByRole("tab", { name: "Nodes (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Edges (0)" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Node type"), { target: { value: "TABLE" } });
+    expect(screen.getByRole("tab", { name: "Nodes (0)" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear asset filters" }));
+    expect(screen.getByRole("tab", { name: "Nodes (3)" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Edges (2)" })).toBeInTheDocument();
+  });
+
   it("picking a datasource loads the bounded graph with the default node/edge limits and APPROVED suggestions", async () => {
     const UnifiedLineageScreen = await loadScreen();
     render(<UnifiedLineageScreen />);
@@ -247,6 +284,36 @@ describe("UnifiedLineageScreen against the real unified-lineage graph/impact end
     expect(screen.getByRole("button", { name: /Request access to dom_retail/ })).toBeInTheDocument();
   });
 
+  it("says how many of the domain's sources the workspace withheld, without naming them", async () => {
+    fetchDomainLineageGraph.mockResolvedValueOnce({
+      data_domain_id: "dom1",
+      datasource_ids: ["ds_1"],
+      nodes: [],
+      edges: [],
+      counts_by_source: {},
+      returned_node_count: 0, returned_edge_count: 0, node_limit: 300, edge_limit: 1500,
+      truncated: false, truncation_reasons: [],
+      withheld_cross_boundary_domain_ids: [],
+      withheld_datasource_count: 2,
+    });
+    history.replaceState(null, "", "/?scope=domain&dom=dom1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+
+    const notice = await screen.findByText("2 data sources in this domain are not shown.");
+    expect(notice.closest("[role=status]")).toHaveTextContent(/their tables and edges are left out/);
+    expect(screen.queryByText(/Some edges are withheld/)).not.toBeInTheDocument();
+  });
+
+  it("shows no withheld-source notice when the server withheld none", async () => {
+    history.replaceState(null, "", "/?scope=domain&dom=dom1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+
+    await waitFor(() => expect(screen.getByText(/Some edges are withheld/)).toBeInTheDocument());
+    expect(screen.queryByText(/in this domain (is|are) not shown/)).not.toBeInTheDocument();
+  });
+
   it("resolves impact against the source that owns the node, not the domain", async () => {
     // The impact endpoint is datasource-scoped, so a domain-graph node id has
     // to be split back into its `{datasource_id}:{node_id}` parts.
@@ -276,5 +343,64 @@ describe("UnifiedLineageScreen against the real unified-lineage graph/impact end
     expect(fetchDomainLineageGraph).not.toHaveBeenCalled();
     expect(screen.queryByText(/Some edges are withheld/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Data domain")).not.toBeInTheDocument();
+  });
+});
+
+describe("UnifiedLineageScreen says what it shows, and fits its panels", () => {
+  it("names a linked source the workspace does not list, instead of 'Select a datasource…' above its graph", async () => {
+    history.replaceState(null, "", "/?ds=ds_far");
+    findOrgDatasourceById.mockResolvedValue({ ...DATASOURCE, id: "ds_far", name: "sample_bank_source" });
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+
+    const picker = screen.getByLabelText("Data source") as HTMLSelectElement;
+    await waitFor(() =>
+      expect(picker.selectedOptions[0]?.textContent).toBe("sample_bank_source (outside this workspace)"),
+    );
+    expect(picker.value).toBe("ds_far");
+    expect(screen.getByText(/which the active workspace does not/)).toBeInTheDocument();
+    expect(findOrgDatasourceById).toHaveBeenCalledWith(expect.any(String), "ds_far", expect.anything());
+  });
+
+  it("does not flag or look up a source the workspace already lists", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+
+    const picker = screen.getByLabelText("Data source") as HTMLSelectElement;
+    await waitFor(() => expect(picker.selectedOptions[0]?.textContent).toBe("snowflake_prod"));
+    expect(screen.queryByText(/which the active workspace does not/)).not.toBeInTheDocument();
+    expect(findOrgDatasourceById).not.toHaveBeenCalled();
+  });
+
+  it("fits the impact table to its panel: three columns, rows under their direction, evidence under the asset", async () => {
+    history.replaceState(null, "", "/?ds=ds_1&node=t_orders_raw");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "analytics.core.orders_raw" })).toBeInTheDocument(),
+    );
+
+    const table = screen.getByRole("table");
+    const head = table.querySelector("thead")!;
+    expect(within(head).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+      "Asset",
+      "Depth",
+      "Quality",
+    ]);
+    expect(within(table).getByText("via foreign key")).toBeInTheDocument();
+    expect(within(table).getByText("Upstream")).toBeInTheDocument();
+    expect(within(table).getByText("Downstream")).toBeInTheDocument();
+  });
+
+  it("describes the hop bound the graph question already accepts", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+
+    expect(screen.getByText(/optionally "within 1–5 hops"/)).toBeInTheDocument();
   });
 });

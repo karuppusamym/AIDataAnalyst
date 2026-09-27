@@ -116,15 +116,22 @@ ALLOWLIST: dict[str, str] = {
         "tsconfig and imported by no module -- being unimported is what an ambient "
         ".d.ts is for, so this is a permanent exception, not a backlog item."
     ),
-    "components/OrgPicker.tsx": (
-        "Docs/review-2026-09-05/POINTS-TRACKER.md D01: named by the review "
-        "(REVIEW.md line 301) alongside ProposalCard as unreached from main. Unlike "
-        "ProposalCard it was deliberately KEPT -- the shell's active org control is "
-        "`ScopePicker`, and `AdministrationScreen` documents `OrgPicker` as the "
-        "shell-nav org control this screen deliberately does not duplicate. It is a "
-        "decision with an owner (D01), recorded here rather than hidden: wire it "
-        "into the shell nav or delete it, and remove this entry either way."
+    "lib/demoDataMode.ts": (
+        "R11-X1: imported by `ui-next/vite.config.ts`, which decides demo-vs-live "
+        "at build time and hands the client a literal. This gate walks the browser "
+        "entry points, and a build-config module is reachable from none of them by "
+        "construction -- putting the policy where the browser could import it is "
+        "what made the fixture estate unshakeable from the bundle in the first "
+        "place. A permanent exception while the build owns the decision, not a "
+        "backlog item; it goes away only if the policy moves back into the app."
     ),
+    # R11-S13 (M6): `components/OrgPicker.tsx` was the third entry. D01 recorded
+    # the decision as "wire it into the shell nav or delete it, and remove this
+    # entry either way"; the shell's org control is `ScopePicker`, which has been
+    # the mounted one throughout, so the second branch was taken. The component
+    # and its test are gone and this entry goes with them -- an allow-list row
+    # for a deleted file is the stale reference
+    # `test_allowlist_has_no_stale_entries` exists to fail on.
 }
 
 
@@ -294,6 +301,26 @@ def discover_entry_points(ui_root: Path, src_root: Path) -> tuple[dict[str, str]
                 f"{index_html} declares no resolvable <script type=\"module\" src=...>; "
                 "without it this gate would walk an empty graph."
             )
+
+    # Every other top-level page is an entry too. Vite builds each `*.html` in
+    # `build.rollupOptions.input` as its own page -- the Excel add-in's task
+    # pane and sign-in dialog are two -- and a walker that only read index.html
+    # would report everything behind them as dead code the day they shipped.
+    # Unlike index.html they are optional, but one that names a script that
+    # does not exist is a problem, not a smaller graph.
+    for page in sorted(ui_root.glob("*.html")):
+        if page.name == "index.html":
+            continue
+        for src in HTML_MODULE_SCRIPT.findall(page.read_text(encoding="utf-8")):
+            candidate = (ui_root / src.lstrip("/")).resolve()
+            if candidate.is_file():
+                entries[candidate.relative_to(src_root).as_posix()] = (
+                    f"browser entry point ({page.name} <script type=module>)"
+                )
+            else:
+                problems.append(
+                    f"{page} declares a module script {src!r} that does not exist."
+                )
 
     vitest_config = ui_root / "vitest.config.ts"
     if vitest_config.is_file():

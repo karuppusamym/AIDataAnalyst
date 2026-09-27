@@ -327,29 +327,6 @@ async def mine_eval_questions(
     )
 
 
-async def load_eval_questions_for_objects(
-    session: AsyncSession,
-    *,
-    organization_id: UUID,
-    object_keys: set[tuple[str, str]],
-) -> list[StudioEvalQuestion]:
-    """Load mined questions for the given `(object_type, object_id)` pairs."""
-    if not object_keys:
-        return []
-    object_types = {k[0] for k in object_keys}
-    object_ids = {k[1] for k in object_keys}
-    rows = (
-        await session.scalars(
-            select(StudioEvalQuestion).where(
-                StudioEvalQuestion.organization_id == organization_id,
-                StudioEvalQuestion.object_type.in_(object_types),
-                StudioEvalQuestion.object_id.in_(object_ids),
-            )
-        )
-    ).all()
-    return [q for q in rows if (q.object_type, q.object_id) in object_keys]
-
-
 def check_eval_regressions(
     change_items: list[ChangeItem],
     questions: list[StudioEvalQuestion],

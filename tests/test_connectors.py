@@ -1,10 +1,12 @@
 import inspect
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import pytest
 
 from aida.connectors import postgres
-from aida.connectors.base import ConnectorQueryHistoryUnsupported
+from aida.connectors.base import ConnectorCapabilities, ConnectorQueryHistoryUnsupported
+from aida.connectors.capability_certification import derive_capabilities
 from aida.connectors.discovery import (
     apply_column_descriptions,
     apply_table_descriptions,
@@ -39,10 +41,21 @@ def test_registry_definitions_expose_capabilities_without_connector_instantiatio
     assert postgres.capabilities["explain"] is True
     assert sqlserver.capabilities["approximate_statistics"] is True
     assert snowflake.capabilities["explain"] is True
-    assert default_capabilities(postgres) == postgres.capabilities
-    assert default_capabilities(sqlserver) == sqlserver.capabilities
-    assert default_capabilities(snowflake) == snowflake.capabilities
-    assert default_capabilities(databricks) == databricks.capabilities
+
+    # INV-9 (R11-C14): what the platform advertises is the connector's *claim narrowed by
+    # its certification result*, not the hand-written literal it used to return verbatim.
+    # The old assertion here -- `default_capabilities(x) == x.capabilities` -- pinned that
+    # the two were the same dict. The relationship is now the derivation, and that what is
+    # advertised can never exceed what the connector claims.
+    for definition in (postgres, sqlserver, snowflake, databricks):
+        claimed = ConnectorCapabilities(**definition.claimed_capabilities)
+        advertised = default_capabilities(definition)
+        assert advertised == asdict(derive_capabilities(definition.connector_type, claimed))
+        assert [
+            flag
+            for flag, on in advertised.items()
+            if on and not definition.claimed_capabilities[flag]
+        ] == [], f"{definition.connector_type} advertises a flag it does not claim"
 
 
 # --- envelope 1.1 axes (gap/02 N1) ------------------------------------------

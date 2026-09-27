@@ -1,10 +1,17 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { configureAxeForJsdom } from "./a11y";
 
 afterEach(() => {
   cleanup();
 });
+
+// R11-C2: axe-core is configured once, here, rather than per test file, so
+// every accessibility assertion in the suite runs against the same rule set
+// and the rules jsdom cannot judge are disabled in exactly one place. See
+// `./a11y.ts` for which rules those are and what covers them instead.
+configureAxeForJsdom();
 
 // jsdom has no ResizeObserver; @tanstack/react-virtual (CatalogTable, UX-11;
 // VirtualList, UX-15) needs one to exist to mount at all. A no-op stub is

@@ -118,6 +118,124 @@ def test_no_connector_execution_outside_gateway() -> None:
     )
 
 
+# The driver entry points a module would have to call to reach a source without
+# going through a `SqlExecutor` at all. `policy_native_sync` did exactly this
+# (review 2026-09-11, defect D1): it imported `asyncpg`/`pytds` directly and
+# executed DDL on a customer database, so it called neither method above, imported
+# nothing the import-linter contract protects, and passed `mypy --strict` -- all
+# three INV-2 layers, clean, while holding an open connection to a source.
+_DRIVER_CONNECT_CALLS = frozenset(
+    {
+        "connect",  # asyncpg.connect / pytds.connect / snowflake.connector.connect
+        "connect_async",  # oracledb.connect_async
+    }
+)
+_DRIVER_MODULES = frozenset(
+    {"asyncpg", "pytds", "oracledb", "snowflake", "databricks", "databricks_sql", "dbsql"}
+)
+
+
+def _files_opening_a_driver_connection_outside_connectors() -> list[str]:
+    offenders = []
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        relative = path.relative_to(_SRC_ROOT)
+        if relative.parts[0] == "connectors":
+            # The connectors package is where a source connection is supposed to
+            # be opened; the gateway is what decides whether a statement may use one.
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in _DRIVER_CONNECT_CALLS:
+                continue
+            root = node.func.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in _DRIVER_MODULES:
+                offenders.append(f"{relative}:{node.lineno}")
+    return offenders
+
+
+def test_no_module_outside_connectors_opens_its_own_source_connection() -> None:
+    """INV-2's fourth layer: a module cannot reach a source by importing a driver.
+
+    The three existing layers all watch the `SqlExecutor` surface. None of them
+    can see a module that skips that surface entirely and dials the database
+    itself, which is how a second execution path lived in `policy_native_sync`
+    until the 2026-09-11 review found it. Opening the connection is the step
+    worth forbidding: everything after it is unreviewable by construction.
+
+    A module that genuinely needs to talk to a source belongs in
+    `aida.connectors`, behind the registry, and its statements belong to the
+    gateway. Adding a name here is a change to the platform's central
+    invariant; it needs an ADR, not a pull request.
+    """
+    offenders = _files_opening_a_driver_connection_outside_connectors()
+    assert offenders == [], (
+        "only aida.connectors may open a connection to a data source, found: " f"{offenders}"
+    )
+
+
+# The raw signing/tokenization secrets. Each is read by exactly one provider
+# factory; every other reader is a module holding key material the deployment's
+# KMS configuration was meant to keep out of the process.
+_RAW_KEY_SETTINGS = {
+    "audit_hmac_key": "signing.py",
+    "tokenization_key": "tokenization.py",
+}
+
+
+def _files_reading_a_raw_key_outside_its_provider() -> list[str]:
+    # Both source roots, unlike the INV-2 scans above: a key read from
+    # `src/atlas` leaks exactly as much as one read from `src/aida`, and the
+    # settings object these live on is defined over there. `config.py` is the
+    # one legitimate reader -- it validates the values it declares.
+    offenders = []
+    roots = [_SRC_ROOT, _SRC_ROOT.parent / "atlas"]
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            relative = path.relative_to(root.parent)
+            if relative.name in {"config.py"}:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute) or node.attr not in _RAW_KEY_SETTINGS:
+                    continue
+                if relative.name == _RAW_KEY_SETTINGS[node.attr]:
+                    continue
+                offenders.append(f"{relative}:{node.lineno} reads {node.attr}")
+    return offenders
+
+
+def test_raw_signing_keys_are_read_only_by_their_provider_factory() -> None:
+    """QG-5/QG-6: a KMS-backed deployment must not hold key material.
+
+    `signing.py` promises the raw key never enters the process once a KMS signer
+    is configured, and production forbids the local providers outright. Until the
+    2026-09-11 review that promise was false in four places: `agent_orchestrator`
+    (twice), `tool_api` and `intelligence_api` each passed
+    `settings.audit_hmac_key` straight to `hmac.new` for an agent run's question
+    digest, a tool execution's parameter fingerprint and a feedback comment. All
+    four now go through `signing.sign_value`.
+
+    Nothing structural stopped that, which is why it happened at four sites
+    rather than one. This is the structural part: the raw secrets may be read
+    only by the provider factory that owns each one, so the next such call is a
+    failing test rather than a quiet leak of key material into a hot path.
+
+    The production length floors in `Settings` stay as they are. They are cheap
+    insurance for exactly the regression this test now prevents, and removing
+    them because "production cannot read the key anyway" would rest on the very
+    invariant that had just been violated.
+    """
+    offenders = _files_reading_a_raw_key_outside_its_provider()
+    assert offenders == [], (
+        "raw signing/tokenization keys may only be read by their provider factory "
+        f"({', '.join(sorted(_RAW_KEY_SETTINGS.values()))}); found: {offenders}"
+    )
+
+
 def test_the_connector_handed_to_the_platform_has_no_sql_surface() -> None:
     """INV-2, structurally: the type `ConnectorRegistry.create` is annotated to
     return must not expose a SQL-accepting method, because that annotation is what
@@ -412,6 +530,9 @@ _GOVERNED_OBJECT_TYPES = [
     "BULK_STEWARDSHIP_OPERATION",
     "GLOSSARY_CONFLICT",
     "GLOSSARY_LINK_PROPOSAL",
+    # R11-AUD02: the two T3 access changes that had no adapter and so no review at all.
+    "ACCESS_POLICY",
+    "WORKSPACE_MEMBERSHIP",
 ]
 
 

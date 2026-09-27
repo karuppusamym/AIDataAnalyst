@@ -1,8 +1,9 @@
 # Competitive Feature Matrix
 
 > Status: Authoritative. Owner: Product. Baseline: 2026-08-28.
+> Claims: assessed 2026-08-28 against vendor-stated public capability; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`, `10-architecture/15-agent-architecture-critical-review.md` §5 (primary sources checked 2026-09-09). Competitor scores are that assessment; §9 says which have since moved.
 > Legend: `●` strong / mature · `◐` partial or preview · `○` weak or absent · `—` not applicable to that product's model.
-> Atlas column reflects **current implemented state** (see `60-delivery/00-status.md`), not roadmap.
+> Atlas column was scored as **implemented state, not roadmap** at the 2026-08-28 baseline; the implementation-status callout in §2 lists the cells re-measured since. Current status is tracker section P (`60-delivery/03-tracker.md`); dated implementation and verification evidence is the capability register (`60-delivery/20-capability-register.md`); `60-delivery/00-status.md` is a dated snapshot of both.
 
 ## 1. How to read this
 
@@ -17,14 +18,22 @@ This matrix has one purpose: decide what to build next. It is scored against ven
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|---|---|
 | Connector count (native) | ● 80+ | ● 100+ | ● | ◐ own estate | ◐ preview | ● | ○ 2 (PG, MSSQL) | ENTRY | P0 |
 | Connector certification harness | ○ | ○ | ◐ open framework | — | — | ○ | ◐ control-plane suite | DIFF | P0 |
-| Cross-source global search | ● | ● | ● | ◐ | ● universal search | ● | ◐ lexical only | ENTRY | P0 |
+| Cross-source global search | ● | ● | ● | ◐ | ● universal search | ● | ◐ lexical Search screen; the fused route has no caller | ENTRY | P0 |
 | Semantic / vector search | ● | ◐ | ● | ◐ | ● hybrid | ◐ | ○ | ENTRY | P0 |
 | Policy-aware search (filter before rank) | ◐ | ◐ | ◐ | ● | ● | ○ | ● | DIFF | — |
 | Usage/popularity ranking | ● | ◐ | ● behavioural | ● column-level | ● query-log | ◐ | ○ | PARITY | P1 |
 | Asset certification badges | ● | ● | ● | ◐ | ◐ | ● | ◐ tools/metrics only | PARITY | P1 |
-| Million-object UX (virtualization) | ● | ● | ● | ● | ● | ◐ | ○ | ENTRY | P1 |
-| Bulk actions (tag, own, classify) | ● | ● | ● | ◐ | ◐ | ◐ | ○ | ENTRY | P1 |
+| Million-object UX (virtualization) | ● | ● | ● | ● | ● | ◐ | ◐ windowed, 1M scale uncertified | ENTRY | P1 |
+| Bulk actions (tag, own, classify) | ● | ● | ● | ◐ | ◐ | ◐ | ◐ four actions, no dry run | ENTRY | P1 |
 | Data marketplace / data products | ● | ● | ● | ◐ | ◐ | ○ | ○ | PARITY | P2 |
+
+> **Implementation status (2026-09-20).** Three Atlas cells above were re-measured against the tree: two scored the user interface as absent while `ui-next/` ships it, and the third described an API without saying that no screen calls it. The competitor cells and every other Atlas cell are still the 2026-08-28 baseline and were not re-checked in this pass, so confirm a row against the [capability register](../60-delivery/20-capability-register.md) before quoting it. Three are known to be older than the code and are not re-scored here: the native connector count (`aida.connectors.registry` registers six adapters, against `2` in the cell), semantic / vector search (a vector channel exists behind `global-search`, below), and the MCP server for external agents (`POST /mcp`, `src/aida/mcp_server.py`, is in the OpenAPI baseline).
+>
+> - **Million-object UX (virtualization): `○` to `◐`.** `ui-next/src/components/VirtualList.tsx` mounts only the visible slice and states the true position with `aria-setsize` and `aria-posinset`; `ui-next/src/components/CatalogTable.tsx` is the same idea as a windowed `role="grid"`. `grep -rl VirtualList ui-next/src` lists 19 files as of 2026-09-20: the component, the test setup, and 17 that render it (16 under `ui-next/src/screens/` and `PlaybookDryRunPanel.tsx`). The cell stays partial because scale is not certified: tracker CT-2 records the literal 1M-table run as open (a 100,000-table proxy was measured on the API), and R11-B15 carries the remainder, blocked on a target size.
+> - **Bulk actions (tag, own, classify): `○` to `◐`.** Stewardship's Bulk actions view (`StewardshipBulkActions` in `ui-next/src/screens/StewardshipScreen.tsx`) runs tag, classify, assign ownership and certify against `POST /v1/organizations/{organization_id}/tables/bulk-tag`, `bulk-classify`, `bulk-own` and `bulk-certify`, by filter or by an explicit id list that the Catalog screen hands across (`CatalogScreen.tsx` caps that handoff at 100 checked rows). The server caps one call at 500 items (`CATALOG_BULK_ACTION_MAX_ITEMS` in `src/atlas/modules/catalog/service.py`) and there is no dry-run preview, which the screen's own header comment states. The review queue has a separate batch mode (`ui-next/src/screens/ReviewBatchQueue.tsx`: select across pages, freeze, then decide). Partial rather than strong for those two limits.
+> - **Cross-source global search: `lexical only` to `API only, no UI caller`.** Two routes exist: `GET /v1/search` and `GET /v1/search/suggest` (`src/aida/search_api.py`, lexical) and `GET /v1/organizations/{organization_id}/global-search` (`src/aida/semantic_api.py`), which fuses lexical, vector and graph signals across datasources; its vector channel runs only when an embedding model is configured. `ui-next/src` calls neither: `grep -rn "global-search" ui-next/src` finds a type definition and a comment. Catalog has its own `q` filter over `catalog/rows`. **Updated 2026-09-21 (tracker R11-AUD08):** the Search screen (`ui-next/src/screens/SearchScreen.tsx`, `#/analyst/search`) and a Ctrl/Cmd+K palette section (`PaletteAssetResults.tsx`) now call `GET /v1/search` and `GET /v1/search/suggest`, so the cell moves from `API only, no UI caller` to a lexical screen. It matches table and column names only, and a column hit carries neither its table nor its datasource, so a column cannot open its table. The fused `global-search` route still has no caller, and its vector channel still needs an embedding model.
+>
+> The matrix has no row for the command palette, accessibility or onboarding, so none is scored here, and no competitor score is invented for them. What the tree has for the record: the Ctrl/Cmd+K palette in `ui-next/src/App.tsx` is a "Quick navigation" dialog that filters the shell's own pages by label and keyword, and does not search catalog objects; every navigable screen is swept with axe-core in jsdom (`ui-next/src/a11y-sweep.test.tsx`) and a subset in a real browser in both themes plus 320px reflow (`e2e/tests/accessibility.spec.ts`); human acceptance (screen reader, zoom, focus-indicator contrast) is still open, tracker R11-C2; and the Overview screen renders a per-persona onboarding checklist and a first-source setup (`ui-next/src/components/OnboardingWizard.tsx`, `FirstSourceSetup.tsx`).
 
 ## 3. Lineage
 
@@ -127,9 +136,11 @@ This matrix has one purpose: decide what to build next. It is scored against ven
 | Ecosystem / MCP | **Behind** | Close fast — MCP is now the distribution channel |
 | Proof at scale | **Behind** | Benchmarks are a product feature, not a QA task |
 
-## 9. The seven capabilities nobody else has
+## 9. The seven capabilities scored as Atlas-only in the 2026-08-28 baseline
 
-These are the entries marked **DIFF** where Atlas scores `●` and every competitor scores `○` or `—`. They are the product.
+These are the entries marked **DIFF** where Atlas scored `●` and every competitor scored `○` or `—` in the 2026-08-28 assessment. They are the product thesis, not a current market fact.
+
+> **Moved since the baseline.** The 2026-09-04 deep dive (`00-product/08-market-deep-dive-and-target-architecture-2026-09.md`, finding 2) found the first of these, a single mandatory execution gateway, now enforced inside the warehouse boundary by Databricks' Unity AI Gateway; it stays absent only *across a heterogeneous estate*. The architecture review's §5 (`10-architecture/15-agent-architecture-critical-review.md`, sources checked 2026-09-09) is the narrower, dated primary-source comparison. Re-verify a row before quoting it.
 
 1. A **single mandatory execution gateway** every source query must pass — including tools, profilers, and admin queries.
 2. **Deterministic AST validation** of all SQL before execution, with catalog allowlists derived from parsed references.

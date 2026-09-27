@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from typing import Any
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
@@ -13,6 +14,7 @@ from aida.catalog_bulk_actions import (
 )
 from aida.certification_evidence import compute_certification_evidence
 from aida.config import get_settings
+from aida.description_withdrawal import WITHDRAWN
 from aida.models import (
     AssetCertification,
     AssetTag,
@@ -22,9 +24,11 @@ from aida.models import (
     GlossaryLinkProposal,
     GlossaryTerm,
     GlossaryTermVersion,
+    GovernanceReview,
     MetadataColumn,
     MetadataTable,
     OwnershipAssignment,
+    ReviewAuditSample,
 )
 from aida.schemas import CoverageDimensionRead, StewardshipCoverageRead
 
@@ -106,6 +110,24 @@ def active_certified_table_ids(
     }
 
 
+def _instant(value: datetime | None) -> str | None:
+    """R11-C8: a timestamp as a before-image holds it.
+
+    SQLite returns naive datetimes for timezone-aware columns, so a naive value
+    is read as UTC. One spelling per instant is what lets a restore compare
+    "unchanged since" as strings on both backends.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def _from_instant(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value is not None else None
+
+
 async def apply_bulk_operation(
     session: AsyncSession,
     operation: BulkStewardshipOperation,
@@ -113,7 +135,9 @@ async def apply_bulk_operation(
     reviewer: str,
     now: datetime,
 ) -> tuple[str, int]:
-    applied = 0
+    applied_subjects: list[str] = []
+    # R11-C8: what each applied subject held before this operation wrote to it.
+    before_images: dict[str, dict[str, Any]] = {}
     parameters = operation.parameters
     subject_ids = [UUID(value) for value in operation.subject_ids]
     if operation.operation_type == "ASSIGN_OWNERSHIP":
@@ -135,6 +159,17 @@ async def apply_bulk_operation(
             )
             if existing is not None:
                 if existing.status != "ACTIVE":
+                    # R11-C8: read before the reactivation below overwrites it.
+                    before_images[str(subject_id)] = {
+                        "assignment_id": str(existing.id),
+                        "existed": True,
+                        "status": existing.status,
+                        "assigned_by": existing.assigned_by,
+                        "expires_at": _instant(existing.expires_at),
+                        "expiry_warning_emitted_at": _instant(existing.expiry_warning_emitted_at),
+                        "reaffirmed_at": _instant(existing.reaffirmed_at),
+                        "written_by": reviewer,
+                    }
                     existing.status = "ACTIVE"
                     existing.assigned_by = reviewer
                     # A reactivation is treated as a fresh assertion of
@@ -142,10 +177,21 @@ async def apply_bulk_operation(
                     # warning stamp so the row can warn again in its next cycle.
                     existing.expires_at = expires_at
                     existing.expiry_warning_emitted_at = None
-                    applied += 1
+                    applied_subjects.append(str(subject_id))
                 continue
+            # R11-C8: the prior state of an assignment this creates is no
+            # assignment. The id is fixed here so the before-image can name the
+            # row before a flush would otherwise assign it.
+            created_id = uuid4()
+            before_images[str(subject_id)] = {
+                "assignment_id": str(created_id),
+                "existed": False,
+                "reaffirmed_at": None,
+                "written_by": reviewer,
+            }
             session.add(
                 OwnershipAssignment(
+                    id=created_id,
                     organization_id=operation.organization_id,
                     subject_type=operation.subject_type,
                     subject_id=str(subject_id),
@@ -161,7 +207,7 @@ async def apply_bulk_operation(
                     expires_at=expires_at,
                 )
             )
-            applied += 1
+            applied_subjects.append(str(subject_id))
         event_type = "ownership.assigned.v1"
     elif operation.operation_type == "LINK_TERM":
         term_id = UUID(parameters["term_id"])
@@ -184,8 +230,71 @@ async def apply_bulk_operation(
                     confidence=1.0,
                 )
             )
-            applied += 1
+            applied_subjects.append(str(table_id))
         event_type = "glossary.term_linked_bulk.v1"
+    elif operation.operation_type == "UNLINK_TERM":
+        # AR-11: the compensating action for LINK_TERM. `subject_ids` here is
+        # the *original operation's* `applied_subject_ids` -- the links it
+        # actually created -- so a link that already existed before it ran is
+        # never this reversal's to remove. `request_bulk_operation_reversal`
+        # is what guarantees that; this branch would happily unlink anything
+        # it is handed, exactly as LINK_TERM will link anything it is handed.
+        term_id = UUID(parameters["term_id"])
+        links = (
+            await session.scalars(
+                select(AssetTermLink).where(
+                    AssetTermLink.organization_id == operation.organization_id,
+                    AssetTermLink.table_id.in_(subject_ids),
+                    AssetTermLink.term_id == term_id,
+                )
+            )
+        ).all()
+        for link in links:
+            # Deleted rather than status-flagged because `AssetTermLink` has
+            # no lifecycle column to flag: the link's existence *is* its
+            # state, and the audit row plus this reversal's own row are what
+            # preserve the history. The asset reads as unlinked again, the
+            # same shape `description_withdrawal` gives a retired
+            # description.
+            await session.delete(link)
+            applied_subjects.append(str(link.table_id))
+        event_type = "glossary.term_unlinked_bulk.v1"
+    elif operation.operation_type == "WITHDRAW_CERTIFICATION":
+        # AR-11: the compensating action for CERTIFY_ASSET.
+        #
+        # Deliberately `WITHDRAWN`, not `REVOKED`. The platform already has a
+        # revoke (P2-08, `POST /tables/{id}/certification/revoke`) and it
+        # means something else: `asset_usage_decision` maps REVOKED to
+        # BLOCKED, "a standing refusal, stronger than never certified". That
+        # is the right answer when a steward decides an asset must not be
+        # used, and the wrong one here -- overturning a certification the
+        # agent should never have granted must leave the asset *uncertified*,
+        # not refused. WITHDRAWN is the same word, and the same reasoning,
+        # `description_withdrawal` uses for a retracted description: the row
+        # keeps its content as evidence, the current-state projection stops
+        # counting it, and the asset reads as it did before the claim was
+        # made.
+        #
+        # It also does **not** resurrect whatever CERTIFY_ASSET superseded.
+        # Flipping a SUPERSEDED row back to ACTIVE would rewrite history and
+        # lose the fact that the asset was ever certified on the agent's
+        # word; a steward who wants the older attestation back re-grants it,
+        # the same "reinstatement is a fresh publish" rule.
+        certifications = (
+            await session.scalars(
+                select(AssetCertification).where(
+                    AssetCertification.organization_id == operation.organization_id,
+                    AssetCertification.table_id.in_(subject_ids),
+                    AssetCertification.asset_type == "TABLE",
+                    AssetCertification.status == "ACTIVE",
+                )
+            )
+        ).all()
+        for certification in certifications:
+            certification.status = WITHDRAWN
+            certification.updated_at = now
+            applied_subjects.append(str(certification.table_id))
+        event_type = "certification.withdrawn_bulk.v1"
     elif operation.operation_type == "DEPRECATE_TERM":
         terms = (
             await session.scalars(
@@ -198,6 +307,26 @@ async def apply_bulk_operation(
         for term in terms:
             if term.lifecycle_status == "DEPRECATED":
                 continue
+            # R11-C8: the term's lifecycle, and exactly which versions were
+            # APPROVED, read before both are overwritten below. The ids matter:
+            # a version already DEPRECATED before this ran was never this
+            # operation's to bring back.
+            approved_version_ids = (
+                await session.scalars(
+                    select(GlossaryTermVersion.id).where(
+                        GlossaryTermVersion.term_id == term.id,
+                        GlossaryTermVersion.status == "APPROVED",
+                    )
+                )
+            ).all()
+            before_images[str(term.id)] = {
+                "lifecycle_status": term.lifecycle_status,
+                "deprecated_by": term.deprecated_by,
+                "deprecated_at": _instant(term.deprecated_at),
+                "deprecation_reason": term.deprecation_reason,
+                "version_ids": [str(version_id) for version_id in approved_version_ids],
+                "written_by": reviewer,
+            }
             term.lifecycle_status = "DEPRECATED"
             term.deprecated_by = reviewer
             term.deprecated_at = now
@@ -210,7 +339,7 @@ async def apply_bulk_operation(
                 )
                 .values(status="DEPRECATED", updated_at=now)
             )
-            applied += 1
+            applied_subjects.append(str(term.id))
         event_type = "glossary.term_deprecated.v1"
     elif operation.operation_type == "CERTIFY_ASSET":
         expires_at = datetime.fromisoformat(parameters["expires_at"])
@@ -248,7 +377,7 @@ async def apply_bulk_operation(
                     evidence=evidence_blob,
                 )
             )
-            applied += 1
+            applied_subjects.append(str(table_id))
         event_type = "certification.granted.v1"
     elif operation.operation_type == "TAG":
         # AT-1: a playbook's TAG action, routed through review because its
@@ -272,6 +401,14 @@ async def apply_bulk_operation(
         ).all()
         existing_tags = {row.table_id: row for row in existing_tag_rows}
         for subject_id in subject_ids:
+            # Read before the call: `apply_tag_item` mutates an existing row
+            # in place, so afterwards its prior value is gone.
+            prior_tag = existing_tags.get(subject_id)
+            prior_image: dict[str, Any] = {
+                "existed": prior_tag is not None,
+                "tag_value": prior_tag.tag_value if prior_tag is not None else None,
+                "applied_by": prior_tag.applied_by if prior_tag is not None else None,
+            }
             try:
                 row, is_new = apply_tag_item(
                     subject_id,
@@ -291,7 +428,8 @@ async def apply_bulk_operation(
                 continue
             if is_new:
                 session.add(row)
-            applied += 1
+            applied_subjects.append(str(subject_id))
+            before_images[str(subject_id)] = prior_image
         event_type = "catalog.asset_tag.applied.v1"
     elif operation.operation_type == "CLASSIFY":
         # AT-1: a playbook's CLASSIFY action, same reuse as TAG above but of
@@ -305,6 +443,8 @@ async def apply_bulk_operation(
         ).all()
         columns_by_id = {row[0].id: (row[0], row[1]) for row in column_rows}
         for subject_id in subject_ids:
+            found = columns_by_id.get(subject_id)
+            prior_classification = found[0].classification if found is not None else None
             try:
                 apply_classify_item(
                     subject_id,
@@ -313,7 +453,8 @@ async def apply_bulk_operation(
                 )
             except CatalogBulkItemError:
                 continue
-            applied += 1
+            applied_subjects.append(str(subject_id))
+            before_images[str(subject_id)] = {"classification": prior_classification}
         event_type = "catalog.column.classified.v1"
     elif operation.operation_type == "REASSIGN_LEAVER":
         # GL-7: `subject_ids` here are `OwnershipAssignment.id` values (not
@@ -364,10 +505,19 @@ async def apply_bulk_operation(
             assignment.status = "REASSIGNED"
             successor_row = successor_lookup.get((assignment.subject_type, assignment.subject_id))
             if successor_row is not None:
+                # R11-C8: an existing successor row is overwritten, so what it
+                # held is kept first.
+                successor_image: dict[str, Any] = {
+                    "successor_id": str(successor_row.id),
+                    "successor_existed": True,
+                    "successor_status": successor_row.status,
+                    "successor_assigned_by": successor_row.assigned_by,
+                }
                 successor_row.status = "ACTIVE"
                 successor_row.assigned_by = reviewer
             else:
                 successor_row = OwnershipAssignment(
+                    id=uuid4(),
                     organization_id=operation.organization_id,
                     subject_type=assignment.subject_type,
                     subject_id=assignment.subject_id,
@@ -378,15 +528,406 @@ async def apply_bulk_operation(
                 )
                 session.add(successor_row)
                 successor_lookup[(assignment.subject_type, assignment.subject_id)] = successor_row
-            applied += 1
+                successor_image = {
+                    "successor_id": str(successor_row.id),
+                    "successor_existed": False,
+                }
+            applied_subjects.append(str(subject_id))
+            before_images[str(subject_id)] = {**successor_image, "written_by": reviewer}
         event_type = "ownership.leaver_reassigned.v1"
+    elif operation.operation_type == "RESTORE_TAG":
+        # R11-C8: the compensating action for TAG. `subject_ids` are the
+        # original's applied tables; `before_images` is what each held.
+        #
+        # A subject is restored only if its tag still carries the value the
+        # original wrote. If a person has changed it since, the current value
+        # is theirs, and putting back what the operation overwrote would erase
+        # a later, independent decision -- a second wrong change, the thing
+        # this ledger exists to prevent. Such a subject is skipped and not
+        # counted, as every other branch skips a stale subject.
+        tag_key = parameters["tag_key"]
+        written_value = parameters.get("tag_value")
+        images = parameters["before_images"]
+        tag_rows = (
+            await session.scalars(
+                select(AssetTag).where(
+                    AssetTag.organization_id == operation.organization_id,
+                    AssetTag.table_id.in_(subject_ids),
+                    AssetTag.tag_key == tag_key,
+                )
+            )
+        ).all()
+        tags_by_table = {row.table_id: row for row in tag_rows}
+        for subject_id in subject_ids:
+            tag = tags_by_table.get(subject_id)
+            image = images.get(str(subject_id))
+            if tag is None or image is None or tag.tag_value != written_value:
+                continue
+            if image["existed"]:
+                tag.tag_value = image["tag_value"]
+                tag.applied_by = image["applied_by"]
+            else:
+                # The operation created this tag, so the prior state is no tag.
+                await session.delete(tag)
+            applied_subjects.append(str(subject_id))
+        event_type = "catalog.asset_tag.restored.v1"
+    elif operation.operation_type == "RESTORE_CLASSIFICATION":
+        # R11-C8: the compensating action for CLASSIFY, under the same rule --
+        # only a column still holding what the original wrote is restored, to
+        # exactly the classification it held before, UNCLASSIFIED included.
+        written_classification = parameters["classification"]
+        images = parameters["before_images"]
+        restore_columns = (
+            await session.scalars(
+                select(MetadataColumn).where(
+                    MetadataColumn.organization_id == operation.organization_id,
+                    MetadataColumn.id.in_(subject_ids),
+                )
+            )
+        ).all()
+        columns_by_subject = {column.id: column for column in restore_columns}
+        for subject_id in subject_ids:
+            column = columns_by_subject.get(subject_id)
+            image = images.get(str(subject_id))
+            if (
+                column is None
+                or image is None
+                or column.classification != written_classification
+            ):
+                continue
+            column.classification = image["classification"]
+            applied_subjects.append(str(subject_id))
+        event_type = "catalog.column.classification_restored.v1"
+    elif operation.operation_type == "WITHDRAW_OWNERSHIP":
+        # R11-C8: the compensating action for ASSIGN_OWNERSHIP. An assignment
+        # the original created moves to WITHDRAWN -- kept as evidence of who
+        # was named, as every non-ACTIVE ownership status is, and never read as
+        # the owner -- and one it reactivated gets back the status, assigner,
+        # expiry and warning stamp it held.
+        #
+        # Only an assignment still as the original left it is restored: ACTIVE,
+        # assigned by the original's reviewer, and not reaffirmed since. A
+        # reaffirmation is an owner confirming the assignment is right -- a
+        # later, independent decision -- and a lapse or a leaver reassignment
+        # has already moved the row on. Any of those is skipped and not counted.
+        images = parameters["before_images"]
+        withdraw_ids = [UUID(image["assignment_id"]) for image in images.values()]
+        assignments_to_restore = {
+            row.id: row
+            for row in (
+                await session.scalars(
+                    select(OwnershipAssignment).where(
+                        OwnershipAssignment.organization_id == operation.organization_id,
+                        OwnershipAssignment.id.in_(withdraw_ids),
+                    )
+                )
+            ).all()
+        }
+        for subject_id in subject_ids:
+            image = images.get(str(subject_id))
+            assignment = (
+                assignments_to_restore.get(UUID(image["assignment_id"]))
+                if image is not None
+                else None
+            )
+            if (
+                assignment is None
+                or assignment.status != "ACTIVE"
+                or assignment.assigned_by != image["written_by"]
+                or _instant(assignment.reaffirmed_at) != image["reaffirmed_at"]
+            ):
+                continue
+            if image["existed"]:
+                assignment.status = image["status"]
+                assignment.assigned_by = image["assigned_by"]
+                assignment.expires_at = _from_instant(image["expires_at"])
+                assignment.expiry_warning_emitted_at = _from_instant(
+                    image["expiry_warning_emitted_at"]
+                )
+            else:
+                assignment.status = WITHDRAWN
+            applied_subjects.append(str(subject_id))
+        event_type = "ownership.assignment_withdrawn_bulk.v1"
+    elif operation.operation_type == "RESTORE_TERM":
+        # R11-C8: the compensating action for DEPRECATE_TERM. The term gets back
+        # its lifecycle and deprecation fields, and exactly the versions the
+        # original moved from APPROVED to DEPRECATED are APPROVED again.
+        #
+        # The version rows are flipped back rather than republished, unlike a
+        # reinstated description, and on purpose. That rule exists so an
+        # AgentRun replays against exactly the text it saw; a deprecation
+        # changed no text, it overwrote a status in place, so its inverse is
+        # the status put back. A deprecated term cannot gain a newer approved
+        # version meanwhile (`create_glossary_term_version` refuses one), so
+        # there is nothing for these to collide with.
+        #
+        # Only a term still deprecated by the original -- same reviewer, same
+        # rationale -- is restored; one reinstated or re-deprecated since is
+        # skipped. Term links the reaper removed after the deprecation's grace
+        # period are not brought back: that was a separate, later change.
+        images = parameters["before_images"]
+        terms_to_restore = (
+            await session.scalars(
+                select(GlossaryTerm).where(
+                    GlossaryTerm.organization_id == operation.organization_id,
+                    GlossaryTerm.id.in_(subject_ids),
+                )
+            )
+        ).all()
+        terms_by_id = {row.id: row for row in terms_to_restore}
+        for subject_id in subject_ids:
+            restore_term = terms_by_id.get(subject_id)
+            image = images.get(str(subject_id))
+            if (
+                restore_term is None
+                or image is None
+                or restore_term.lifecycle_status != "DEPRECATED"
+                or restore_term.deprecated_by != image["written_by"]
+                or restore_term.deprecation_reason != parameters["rationale"]
+            ):
+                continue
+            restore_term.lifecycle_status = image["lifecycle_status"]
+            restore_term.deprecated_by = image["deprecated_by"]
+            restore_term.deprecated_at = _from_instant(image["deprecated_at"])
+            restore_term.deprecation_reason = image["deprecation_reason"]
+            if image["version_ids"]:
+                await session.execute(
+                    update(GlossaryTermVersion)
+                    .where(
+                        GlossaryTermVersion.id.in_([UUID(v) for v in image["version_ids"]]),
+                        GlossaryTermVersion.status == "DEPRECATED",
+                    )
+                    .values(status="APPROVED", updated_at=now)
+                )
+            applied_subjects.append(str(subject_id))
+        event_type = "glossary.term_restored.v1"
+    elif operation.operation_type == "RESTORE_LEAVER_OWNERSHIP":
+        # R11-C8: the compensating action for REASSIGN_LEAVER. `subject_ids` are
+        # the leaver's assignment ids the original moved to REASSIGNED. Each
+        # goes back to ACTIVE; a successor row the original created moves to
+        # WITHDRAWN, and one it reactivated gets back its status and assigner.
+        #
+        # This deliberately makes the leaver the owner again, because that is
+        # what the subject held. Whether that is acceptable for someone who has
+        # left is for the person deciding this reversal -- it is T2 -- and not
+        # something to guess here. Restored only while both rows are as the
+        # original left them: the leaver's still REASSIGNED, the successor's
+        # still ACTIVE and assigned by the original's reviewer. A row moved on
+        # since is skipped and not counted.
+        images = parameters["before_images"]
+        involved_ids = [
+            *subject_ids,
+            *(UUID(image["successor_id"]) for image in images.values()),
+        ]
+        ownership_rows = {
+            row.id: row
+            for row in (
+                await session.scalars(
+                    select(OwnershipAssignment).where(
+                        OwnershipAssignment.organization_id == operation.organization_id,
+                        OwnershipAssignment.id.in_(involved_ids),
+                    )
+                )
+            ).all()
+        }
+        for subject_id in subject_ids:
+            image = images.get(str(subject_id))
+            leaver_row = ownership_rows.get(subject_id)
+            successor = (
+                ownership_rows.get(UUID(image["successor_id"])) if image is not None else None
+            )
+            if (
+                leaver_row is None
+                or successor is None
+                or leaver_row.status != "REASSIGNED"
+                or successor.status != "ACTIVE"
+                or successor.assigned_by != image["written_by"]
+            ):
+                continue
+            leaver_row.status = "ACTIVE"
+            if image["successor_existed"]:
+                successor.status = image["successor_status"]
+                successor.assigned_by = image["successor_assigned_by"]
+            else:
+                successor.status = WITHDRAWN
+            applied_subjects.append(str(subject_id))
+        event_type = "ownership.leaver_reassignment_reversed.v1"
     else:
         raise HTTPException(status_code=422, detail="unsupported stewardship operation")
     operation.status = "APPLIED"
     operation.applied_by = reviewer
     operation.applied_at = now
-    operation.applied_count = applied
-    return event_type, applied
+    # AR-11: the identities, not only the count. Every branch above skips
+    # subjects already in the requested state or gone stale since the request,
+    # so this is a subset of `subject_ids` -- and it is the only record of
+    # which subset, which is what a compensating action has to act on.
+    operation.applied_subject_ids = applied_subjects
+    operation.applied_before_images = before_images
+    operation.applied_count = len(applied_subjects)
+    return event_type, operation.applied_count
+
+
+#: AR-11 / R11-C8: which applied bulk operations have a compensating action,
+#: and what it is. Every forward operation type is here, in two kinds.
+#:
+#: LINK_TERM and CERTIFY_ASSET are *additive*: they add a row that did not
+#: exist, so undoing them needs nothing but the list of rows they added, which
+#: `applied_subject_ids` is.
+#:
+#: The other five *overwrite* state. TAG's `apply_tag_item` updates
+#: `tag_value` on a row that may already have had one; CLASSIFY replaces a
+#: column's classification; ASSIGN_OWNERSHIP reactivates an assignment that
+#: had a status and an expiry before; DEPRECATE_TERM moves a term's lifecycle
+#: and its approved versions; REASSIGN_LEAVER rewrites two assignment rows.
+#: Undoing them needs a before-image of what they replaced. Reversing them
+#: without one -- deleting the tag rather than restoring the value it
+#: replaced -- is a second wrong change dressed as a correction, so since
+#: R11-C8 `apply_bulk_operation` records that image, and an operation applied
+#: before it did is refused rather than guessed at (`_NEEDS_BEFORE_IMAGE`).
+#:
+#: The compensating types have no entry: a reversal is not itself reversed.
+#: Undoing an undo is a fresh operation, authored and reviewed like any other.
+_REVERSAL_OF: dict[str, str] = {
+    "LINK_TERM": "UNLINK_TERM",
+    "CERTIFY_ASSET": "WITHDRAW_CERTIFICATION",
+    "TAG": "RESTORE_TAG",
+    "CLASSIFY": "RESTORE_CLASSIFICATION",
+    "ASSIGN_OWNERSHIP": "WITHDRAW_OWNERSHIP",
+    "DEPRECATE_TERM": "RESTORE_TERM",
+    "REASSIGN_LEAVER": "RESTORE_LEAVER_OWNERSHIP",
+}
+
+#: R11-C8: the reversible types whose undo needs a before-image, not just ids.
+_NEEDS_BEFORE_IMAGE: frozenset[str] = frozenset(
+    {"TAG", "CLASSIFY", "ASSIGN_OWNERSHIP", "DEPRECATE_TERM", "REASSIGN_LEAVER"}
+)
+
+
+async def request_bulk_operation_reversal(
+    session: AsyncSession,
+    original: BulkStewardshipOperation,
+    *,
+    reason: str,
+    requested_by: str,
+    sample: ReviewAuditSample | None = None,
+) -> tuple[BulkStewardshipOperation, GovernanceReview]:
+    """Raise a governed undo of one applied bulk operation (AR-11).
+
+    A reversal is an ordinary `BulkStewardshipOperation` -- same table, same
+    `GovernanceReview`, same maker-checker guard, same audit and outbox path
+    -- because it is the same decision shape, and a parallel "compensation"
+    vocabulary for "governed change to many assets" would be a cost paid
+    forever. What marks it is `reverses_operation_id`, which
+    `review_risk_tiers.risk_tier_for` reads to pin it at T2: no agent may
+    decide a reversal whatever its size, by the same asymmetry that puts
+    DESCRIPTION_WITHDRAWAL above publishing a description. Undoing is not a
+    smaller act than doing.
+
+    `sample` is AR-11's sample-to-correction link. When a human overturns a
+    sampled agent decision and reverses what it did, the reversal carries the
+    sample id, so the correction is reachable from the sample and the sampled
+    decision is reachable from the correction -- rather than the two being
+    joinable only by timestamp and hope.
+
+    Refuses, rather than half-undoing:
+
+    * an operation that was never applied -- there is nothing to compensate,
+      and a reversal of a rejected operation would be a change nobody asked
+      for;
+    * an operation whose type has no sound compensating action (`_REVERSAL_OF`
+      explains which and why);
+    * an operation with no recorded `applied_subject_ids`. This is the
+      important one: it is how a row written before that column existed
+      presents, and its empty list means "not recorded", not "changed
+      nothing". Reversing it would have to fall back to `subject_ids` -- what
+      was *requested* -- and so would strip links and certifications that
+      predated the operation and were never its to remove. Refusing names
+      that limit instead of silently exceeding the original's blast radius;
+    * an operation already reversed, so two stewards racing the same
+      correction do not raise two.
+    """
+    if original.status != "APPLIED":
+        raise HTTPException(
+            status_code=409,
+            detail="only an applied bulk operation can be reversed",
+        )
+    reversal_type = _REVERSAL_OF.get(original.operation_type)
+    if reversal_type is None:
+        reason = (
+            "it is itself a reversal, and undoing one is a fresh, reviewed operation"
+            if original.operation_type in _REVERSAL_OF.values()
+            else "no reversal is defined for it"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"{original.operation_type} has no compensating action: {reason}",
+        )
+    if not original.applied_subject_ids:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this operation did not record which subjects it changed, so a "
+                "reversal cannot be bounded to them"
+            ),
+        )
+    if original.operation_type in _NEEDS_BEFORE_IMAGE:
+        # R11-C8: an overwriting operation is undone by putting back what it
+        # replaced. A subject with no before-image -- every row applied before
+        # the column existed -- has no record of that, and restoring a guess
+        # would be a second wrong change, so the reversal is refused whole.
+        images = original.applied_before_images or {}
+        if any(subject not in images for subject in original.applied_subject_ids):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "this operation did not record what it overwrote, so a "
+                    "reversal cannot restore it"
+                ),
+            )
+    existing = await session.scalar(
+        select(BulkStewardshipOperation).where(
+            BulkStewardshipOperation.reverses_operation_id == original.id,
+            BulkStewardshipOperation.status.in_(("REVIEW_REQUIRED", "APPLIED")),
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="a reversal of this operation is already pending or applied",
+        )
+
+    review = GovernanceReview(
+        organization_id=original.organization_id,
+        object_type="BULK_STEWARDSHIP_OPERATION",
+        object_id=str(uuid4()),  # replaced with the reversal's own id below
+        requested_action=reversal_type,
+        requested_by=requested_by,
+    )
+    session.add(review)
+    await session.flush()
+    reversal = BulkStewardshipOperation(
+        organization_id=original.organization_id,
+        operation_type=reversal_type,
+        subject_type=original.subject_type,
+        # Exactly what the original changed -- never what it was asked to
+        # change. This is the line the whole ledger exists for.
+        subject_ids=list(original.applied_subject_ids),
+        parameters=(
+            {**original.parameters, "before_images": dict(original.applied_before_images)}
+            if original.operation_type in _NEEDS_BEFORE_IMAGE
+            else dict(original.parameters)
+        ),
+        status="REVIEW_REQUIRED",
+        governance_review_id=review.id,
+        requested_by=requested_by,
+        reverses_operation_id=original.id,
+        review_audit_sample_id=sample.id if sample is not None else None,
+    )
+    session.add(reversal)
+    await session.flush()
+    review.object_id = str(reversal.id)
+    await session.flush()
+    return reversal, review
 
 
 async def apply_conflict_resolution(

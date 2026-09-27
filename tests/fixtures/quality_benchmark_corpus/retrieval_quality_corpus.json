@@ -1,5 +1,5 @@
 {
-  "description": "AG-8 retrieval-quality corpus: (question, expected object) pairs run against the real live retrieval path (aida.agent_intelligence.GovernedRetriever.retrieve -> aida.retrieval.hybrid_retrieve_enhanced) over a small deterministic seeded catalog (scripts/quality_benchmark.py::seed_catalog). Object keys reference the fixed slugs that builder assigns -- never raw production data (ADR-0014). min_rank is the worst acceptable 1-based rank of the expected object among returned hits for this corpus item to count as a hit at all (used for the recall@5 metric); every item also feeds hit@1 and MRR regardless of min_rank.",
+  "description": "AG-8 retrieval-quality corpus: (question, expected object) pairs run against the real live retrieval path (aida.agent_intelligence.GovernedRetriever.retrieve -> aida.retrieval.hybrid_retrieve_enhanced) over a small deterministic seeded catalog (scripts/quality_benchmark.py::seed_catalog). Object keys reference the fixed slugs that builder assigns -- never raw production data (ADR-0014). min_rank is the worst acceptable 1-based rank of the expected object among returned hits for this corpus item to count as a hit at all (used for the recall@5 metric); every item also feeds hit@1 and MRR regardless of min_rank. The `semantic-*` cases (added 2026-09-12, R11-B2) share no word stem with their target's name or description, so the lexical channel cannot reach them: they are the only cases in this corpus that measure the vector channel's marginal value rather than fusion over a lexical hit. Before an embedding provider was configured the vector stage was skipped outright, and every case here was lexically solvable -- a corpus that could not fail on the signal it was supposedly fusing.",
   "catalog": "core-warehouse",
   "cases": [
     {
@@ -85,6 +85,41 @@
       "expected_object_type": "GOVERNED_TOOL",
       "expected_object_key": "customer-account-summary",
       "min_rank": 1
+    },
+    {
+      "id": "semantic-deposits-not-balances",
+      "question": "what funds does each depositor have at close of business",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_account_balances",
+      "min_rank": 5
+    },
+    {
+      "id": "semantic-suspicious-not-fraud",
+      "question": "suspicious activity flagged for investigation",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_fraud_alerts",
+      "min_rank": 5
+    },
+    {
+      "id": "semantic-highstreet-not-branch",
+      "question": "where are our high street offices",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_branch",
+      "min_rank": 5
+    },
+    {
+      "id": "semantic-borrow-not-loan",
+      "question": "who has asked to borrow money from us",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_loan_applications",
+      "min_rank": 5
+    },
+    {
+      "id": "semantic-vendors-not-merchant",
+      "question": "vendors we process purchases for",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_merchant",
+      "min_rank": 5
     }
   ]
 }

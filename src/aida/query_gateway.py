@@ -1,6 +1,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Final
 from uuid import UUID
@@ -13,8 +14,14 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
-from aida.connectors.execution_access import open_execution_session
+from aida.connectors.execution_access import open_execution_session, with_pooled_reads
 from aida.connectors.sql_execution import SqlExecutor
+from aida.context_product_execution_scope import (
+    ContextProductExecutionScope,
+    resolve_scope_names,
+)
+from aida.entitlements import blocking_product_revocation
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
 from aida.lob_concurrency import LobConcurrencyDenied, resolve_lob_concurrency_controller
 from aida.models import (
@@ -38,6 +45,7 @@ from aida.security import SecurityContext
 # tests and `sql_redaction.py`'s docstring reference it as `query_gateway.audit_sql_hash`.
 from aida.signing import audit_sql_hash as audit_sql_hash
 from aida.signing import resolve_signing_provider
+from aida.source_concurrency import SourceConcurrencyDenied, source_query_slot
 from aida.sql_guard import SqlGuard, SqlValidationResult
 from aida.sql_redaction import redact_sql_literals as _redact_sql_literals
 from aida.sql_validation import (
@@ -47,6 +55,7 @@ from aida.sql_validation import (
     build_report,
     findings_from_catalog,
     findings_from_columns,
+    findings_from_context_product_scope,
     findings_from_estimate,
     findings_from_guard,
     locally_defined_names,
@@ -100,6 +109,22 @@ class LobConcurrencyRejected(QueryRejected):
         self.waited_seconds = denied.waited_seconds
 
 
+class SourceConcurrencyRejected(QueryRejected):
+    """R11-MP25: the source was at its cross-replica query limit past the wait
+    bound, or the store that counts it was unreachable where that refuses."""
+
+    def __init__(self, denied: SourceConcurrencyDenied) -> None:
+        reason = (
+            "SOURCE_CONCURRENCY_UNAVAILABLE"
+            if denied.unavailable
+            else "SOURCE_CONCURRENCY_LIMIT_EXCEEDED"
+        )
+        super().__init__(f"{reason}:{denied.datasource_id}")
+        self.datasource_id = denied.datasource_id
+        self.limit = denied.limit
+        self.waited_seconds = denied.waited_seconds
+
+
 def sensitive_projection_names(
     sql: str, *, dialect: str, sensitive_source_names: set[str]
 ) -> set[str]:
@@ -116,14 +141,14 @@ def sensitive_projection_names(
     return output_names
 
 
-def redact_sql_literals(sql: str, *, dialect: str) -> str:
+def redact_sql_literals(sql: str, *, dialect: str, strip_comments: bool = False) -> str:
     """Create an evidence-safe SQL representation without user/source literal values.
 
     Re-exported from `aida.sql_redaction`, where the implementation now lives so the
     ingestion path can use it without importing runtime code (an L1-imports-L3 edge).
     Kept as a name here because existing callers and tests reference it.
     """
-    return _redact_sql_literals(sql, dialect=dialect)
+    return _redact_sql_literals(sql, dialect=dialect, strip_comments=strip_comments)
 
 
 def extract_column_lineage(sql: str, *, dialect: str) -> list[dict[str, Any]]:
@@ -304,6 +329,7 @@ class QueryExecutionGateway:
         self.guard = SqlGuard(
             default_row_limit=settings.default_query_row_limit,
             hard_row_limit=settings.hard_query_row_limit,
+            allowed_functions=settings.sql_guard_allowed_functions,
         )
         # QG-3: resolved through the process-wide cache, not stored as a
         # request-scoped registry -- this gateway is constructed fresh per
@@ -326,6 +352,28 @@ class QueryExecutionGateway:
         """
         provider = resolve_signing_provider(self.settings)
         return await provider.sign(sql)
+
+    async def declared_routine_names(
+        self, session: AsyncSession, datasource: DataSource
+    ) -> set[str]:
+        """The names of the routines this source declares, lower-cased.
+
+        R11-FP14 refuses a call the parser does not recognise, but sqlglot models about six
+        hundred function names and models them for every dialect, so a user-defined `nvl` or
+        `median` parsed as a built-in and was trusted. Discovery already read this source's
+        routines, so Atlas can say which of those names are not built-ins here. A statement
+        naming one is refused unless an operator authorized it by name.
+        """
+        rows = (
+            await session.scalars(
+                select(MetadataRoutine.name).where(
+                    MetadataRoutine.datasource_id == datasource.id,
+                    MetadataRoutine.organization_id == datasource.organization_id,
+                    MetadataRoutine.status == "ACTIVE",
+                )
+            )
+        ).all()
+        return {name.lower() for name in rows if name}
 
     async def allowed_tables(self, session: AsyncSession, datasource: DataSource) -> set[str]:
         rows = (
@@ -362,52 +410,8 @@ class QueryExecutionGateway:
         datasource: DataSource,
         referenced_tables: Sequence[str],
     ) -> dict[str, frozenset[str]]:
-        """Active column names for the referenced tables, keyed the way SQL names them.
-
-        Same catalog binding, tenancy filter and ACTIVE-only rule as
-        `allowed_tables`, and keyed with the same qualified/unqualified variants,
-        so a name that authorises as a table resolves as a table here too. The
-        query is bounded by the statement's own table list rather than loading
-        the datasource's whole column catalog.
-        """
-        leaf_names = {table.rsplit(".", 1)[-1].lower() for table in referenced_tables}
-        if not leaf_names:
-            return {}
-        rows = (
-            await session.execute(
-                select(
-                    MetadataCatalog.name,
-                    MetadataSchema.name,
-                    MetadataTable.name,
-                    MetadataColumn.name,
-                )
-                .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
-                .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
-                .join(MetadataColumn, MetadataColumn.table_id == MetadataTable.id)
-                .where(
-                    MetadataCatalog.datasource_id == datasource.id,
-                    MetadataTable.organization_id == datasource.organization_id,
-                    MetadataTable.status == "ACTIVE",
-                    MetadataColumn.organization_id == datasource.organization_id,
-                    MetadataColumn.status == "ACTIVE",
-                    func.lower(MetadataTable.name).in_(leaf_names),
-                )
-            )
-        ).all()
-        by_qualified: dict[str, set[str]] = {}
-        qualified_by_leaf: dict[str, set[str]] = {}
-        for catalog_name, schema_name, table_name, column_name in rows:
-            schema_table = f"{schema_name}.{table_name}".lower()
-            catalog_table = f"{catalog_name}.{schema_name}.{table_name}".lower()
-            for key in (schema_table, catalog_table):
-                by_qualified.setdefault(key, set()).add(column_name.lower())
-            qualified_by_leaf.setdefault(table_name.lower(), set()).add(catalog_table)
-        for leaf, qualified in qualified_by_leaf.items():
-            # An unqualified name is only resolvable when it is unambiguous --
-            # the same rule `allowed_tables` applies.
-            if len(qualified) == 1:
-                by_qualified[leaf] = set(by_qualified[next(iter(qualified))])
-        return {name: frozenset(values) for name, values in by_qualified.items()}
+        """Active column names for the referenced tables; see `catalog_columns`."""
+        return await catalog_columns(session, datasource, referenced_tables)
 
     async def _run_validation(
         self,
@@ -416,6 +420,8 @@ class QueryExecutionGateway:
         datasource: DataSource,
         requested_limit: int | None,
         guard_result: SqlValidationResult,
+        context_product_scope: ContextProductExecutionScope | None = None,
+        run_estimate: bool = True,
     ) -> _ValidationOutcome:
         """The one deterministic validation pipeline (review item N14).
 
@@ -439,6 +445,22 @@ class QueryExecutionGateway:
         freshness attributes onto the gate call (`policy_resource_attributes`)
         -- so the parse happens once, before authorization, and its result is
         threaded through rather than re-parsed after the fact.
+
+        `context_product_scope` (F01) is the optional published-product
+        boundary. It is enforced *here*, inside the pipeline every execution
+        path shares, rather than at each caller: `open_execution_session` is
+        the provable choke point (INV-2, `pyproject.toml`'s
+        "connector SQL execution is reachable only from the query gateway"
+        contract), so a boundary applied here cannot be reached around by a new
+        surface the way the MCP tool-call handler and the direct-SQL endpoint
+        both reached around the orchestrator's own check. It can only
+        *intersect*: the product's findings are appended to the datasource
+        allowlist's, never substituted for them, so no existing refusal is
+        removed and a caller that passes `None` sees the identical pipeline it
+        always did.
+
+        `run_estimate=False` (R11-MP05, `structural_findings` only) stops before the
+        phase that opens a connector: the guard and catalog findings, no dry run.
         """
         dialect = datasource.dialect
         findings: list[SqlFinding] = findings_from_guard(guard_result)
@@ -452,8 +474,14 @@ class QueryExecutionGateway:
             findings.append(limit_finding)
 
         normalized_sql = guard_result.normalized_sql
+        # What is stored and returned as `normalized_sql` is this redacted shape, never the
+        # executable text above. Comments are dropped from it: the statement was typed or drafted
+        # by a caller, and a comment can hold a name, a literal or a secret that the literal
+        # replacement below cannot see. The executable text keeps them; only the record does not.
         redacted_sql = (
-            redact_sql_literals(normalized_sql, dialect=dialect) if normalized_sql else None
+            redact_sql_literals(normalized_sql, dialect=dialect, strip_comments=True)
+            if normalized_sql
+            else None
         )
         column_lineage = (
             extract_column_lineage(normalized_sql, dialect=dialect) if normalized_sql else []
@@ -483,10 +511,37 @@ class QueryExecutionGateway:
                     local_names=locally_defined_names(normalized_sql, dialect=dialect),
                 )
             )
+            if context_product_scope is not None:
+                # F01: the product boundary, in the same phase as the
+                # datasource allowlist and before the phase below opens a
+                # connector. Resolved with this module's own schema-aware,
+                # per-name resolver rather than
+                # `policy_resource_attributes.resolve_referenced_table_ids` --
+                # that function's documented permissiveness is correct for the
+                # ABAC axes it feeds and wrong for a set-membership test, in
+                # both directions (see
+                # `aida.context_product_execution_scope`).
+                resolution = await resolve_scope_names(
+                    session,
+                    datasource,
+                    guard_result.referenced_tables,
+                    table_ids=context_product_scope.table_ids,
+                )
+                findings.extend(
+                    findings_from_context_product_scope(
+                        out_of_scope=resolution.out_of_scope,
+                        unresolved=resolution.unresolved,
+                        product_version_id=str(context_product_scope.version_id),
+                        product_version=context_product_scope.version,
+                    )
+                )
 
-        if normalized_sql is not None and not blocked():
+        if run_estimate and normalized_sql is not None and not blocked():
             dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
-            executor = open_execution_session(datasource.connector_type, dsn)
+            executor = with_pooled_reads(
+                open_execution_session(datasource.connector_type, dsn),
+                enabled=self.settings.source_connection_pooling_enabled,
+            )
             if not executor.capabilities.explain:
                 estimate_outcome = EstimateOutcome(supported=False)
             else:
@@ -528,6 +583,71 @@ class QueryExecutionGateway:
             executor=executor,
         )
 
+    async def structural_findings(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        sql: str,
+        requested_limit: int | None,
+        context_product_scope: ContextProductExecutionScope | None = None,
+    ) -> SqlValidationReport:
+        """R11-MP05: the guard and catalog phases of the one pipeline, nothing more.
+
+        For the orchestrator to decide whether a statement a model just wrote is
+        worth one repair attempt before anything reaches the source. No
+        authorization, no audit row, no connector and no estimate: it reads only
+        this platform's own catalog, and it decides nothing. Whatever statement
+        is finally submitted still goes through `execute`, whole.
+        """
+        guard_result = self.guard.validate(
+            sql,
+            dialect=datasource.dialect,
+            requested_limit=requested_limit,
+            user_defined_functions=await self.declared_routine_names(session, datasource),
+        )
+        outcome = await self._run_validation(
+            session,
+            datasource=datasource,
+            requested_limit=requested_limit,
+            guard_result=guard_result,
+            context_product_scope=context_product_scope,
+            run_estimate=False,
+        )
+        return outcome.report
+
+    async def _gate_product_entitlements(
+        self,
+        session: AsyncSession,
+        context: SecurityContext,
+        *,
+        organization_id: UUID,
+        table_ids: frozenset[UUID],
+        workspace_id: UUID | None,
+    ) -> None:
+        """Refuse a statement that reads a product this principal lost access to.
+
+        Deliberately raises the *gate's* own `AuthorizationDenied` rather than
+        a new exception type, and is called from inside the same `try` as
+        `gate` itself, so a revoked entitlement is refused, audited and
+        translated by exactly the code that already handles every other
+        authorization denial on this path. A second refusal vocabulary is a
+        second thing for an operator to know to query.
+
+        Only revocation and expiry deny here -- see
+        `blocking_product_revocation` for why an entitlement can subtract
+        access at this choke point but never add it.
+        """
+        decision = await blocking_product_revocation(
+            session,
+            context,
+            organization_id=organization_id,
+            table_ids=table_ids,
+            now=datetime.now(UTC),
+        )
+        if decision is not None:
+            raise AuthorizationDenied(decision.reason_code, workspace_id=workspace_id)
+
     async def validate(
         self,
         session: AsyncSession,
@@ -538,6 +658,7 @@ class QueryExecutionGateway:
         sql: str,
         requested_limit: int | None,
         workspace_id: UUID | None = None,
+        context_product_scope: ContextProductExecutionScope | None = None,
     ) -> SqlValidationReport:
         """Run the full deterministic pipeline and return findings, without executing.
 
@@ -561,7 +682,10 @@ class QueryExecutionGateway:
         # freshness onto the decision, and `_run_validation` reuses this same
         # `guard_result` rather than re-parsing.
         guard_result = self.guard.validate(
-            sql, dialect=datasource.dialect, requested_limit=requested_limit
+            sql,
+            dialect=datasource.dialect,
+            requested_limit=requested_limit,
+            user_defined_functions=await self.declared_routine_names(session, datasource),
         )
         table_ids = await resolve_referenced_table_ids(
             session, datasource, guard_result.referenced_tables
@@ -618,6 +742,13 @@ class QueryExecutionGateway:
                 quality_state=resource_attributes.quality_state,
                 freshness_state=resource_attributes.freshness_state,
             )
+            await self._gate_product_entitlements(
+                session,
+                context,
+                organization_id=datasource.organization_id,
+                table_ids=table_ids,
+                workspace_id=workspace_id,
+            )
         except AuthorizationDenied as exc:
             record_audit(
                 session,
@@ -638,6 +769,7 @@ class QueryExecutionGateway:
             datasource=datasource,
             requested_limit=requested_limit,
             guard_result=guard_result,
+            context_product_scope=context_product_scope,
         )
         report = outcome.report
         sql_hash = await self._sign_sql(sql)
@@ -748,7 +880,18 @@ class QueryExecutionGateway:
         requested_limit: int | None,
         semantic_version: str | None,
         workspace_id: UUID | None = None,
+        context_product_scope: ContextProductExecutionScope | None = None,
     ) -> GatewayResult:
+        """Validate, cost and run one statement; `context_product_scope` narrows it.
+
+        F01: when the caller asked through a published context product, the
+        boundary is enforced inside `_run_validation` below -- before the phase
+        that opens a connector -- so a statement reading past the product is
+        refused without an execution session ever existing. The refusal is a
+        `QueryRejected` carrying the product finding, which is the same
+        rejection path every other blocking finding takes, so no caller grows a
+        second branch. Passing `None` is the pre-F01 behaviour, unchanged.
+        """
         execution = QueryExecution(
             organization_id=datasource.organization_id,
             datasource_id=datasource.id,
@@ -784,7 +927,10 @@ class QueryExecutionGateway:
             # classification/certification/quality/freshness attributes before
             # authorization without moving the connector-opening line at all.
             guard_result = self.guard.validate(
-                sql, dialect=datasource.dialect, requested_limit=requested_limit
+                sql,
+                dialect=datasource.dialect,
+                requested_limit=requested_limit,
+                user_defined_functions=await self.declared_routine_names(session, datasource),
             )
             table_ids = await resolve_referenced_table_ids(
                 session, datasource, guard_result.referenced_tables
@@ -819,6 +965,13 @@ class QueryExecutionGateway:
                     quality_state=resource_attributes.quality_state,
                     freshness_state=resource_attributes.freshness_state,
                 )
+                await self._gate_product_entitlements(
+                    session,
+                    context,
+                    organization_id=datasource.organization_id,
+                    table_ids=table_ids,
+                    workspace_id=workspace_id,
+                )
             except AuthorizationDenied as exc:
                 raise AuthorizationRejected(
                     exc.reason_code, workspace_id=exc.workspace_id
@@ -832,6 +985,7 @@ class QueryExecutionGateway:
                 datasource=datasource,
                 requested_limit=requested_limit,
                 guard_result=guard_result,
+                context_product_scope=context_product_scope,
             )
             report = outcome.report
             execution.normalized_sql = report.normalized_sql
@@ -859,15 +1013,22 @@ class QueryExecutionGateway:
             # datasource's LOB (see `aida.lob_concurrency`'s module
             # docstring for why that, not the caller, is this platform's
             # real per-LOB dimension for a query execution).
+            # R11-MP25: inside the LOB slot, one of the source's own slots, counted
+            # across replicas (`aida.source_concurrency`); a no-op unless enabled.
             lob_key = str(datasource.line_of_business_id)
             try:
-                async with self._lob_concurrency.slot(lob_key):
+                async with (
+                    self._lob_concurrency.slot(lob_key),
+                    source_query_slot(self.settings, datasource.id),
+                ):
                     source_result = await connector.execute_read_query(
                         outcome.executable_sql,
                         timeout_seconds=self.settings.query_timeout_seconds,
                     )
             except LobConcurrencyDenied as exc:
                 raise LobConcurrencyRejected(exc) from exc
+            except SourceConcurrencyDenied as exc:
+                raise SourceConcurrencyRejected(exc) from exc
             sensitive_names = await self._sensitive_output_names(
                 session,
                 datasource,
@@ -1017,3 +1178,56 @@ class QueryExecutionGateway:
             )
             await session.commit()
             raise
+
+
+async def catalog_columns(
+    session: AsyncSession,
+    datasource: DataSource,
+    referenced_tables: Sequence[str],
+) -> dict[str, frozenset[str]]:
+    """Active column names for the referenced tables, keyed the way SQL names them.
+
+    Same catalog binding, tenancy filter and ACTIVE-only rule as
+    `allowed_tables`, and keyed with the same qualified/unqualified variants,
+    so a name that authorises as a table resolves as a table here too. The
+    query is bounded by the statement's own table list rather than loading
+    the datasource's whole column catalog.
+    """
+    leaf_names = {table.rsplit(".", 1)[-1].lower() for table in referenced_tables}
+    if not leaf_names:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MetadataCatalog.name,
+                MetadataSchema.name,
+                MetadataTable.name,
+                MetadataColumn.name,
+            )
+            .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
+            .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+            .join(MetadataColumn, MetadataColumn.table_id == MetadataTable.id)
+            .where(
+                MetadataCatalog.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                MetadataTable.status == "ACTIVE",
+                MetadataColumn.organization_id == datasource.organization_id,
+                MetadataColumn.status == "ACTIVE",
+                func.lower(MetadataTable.name).in_(leaf_names),
+            )
+        )
+    ).all()
+    by_qualified: dict[str, set[str]] = {}
+    qualified_by_leaf: dict[str, set[str]] = {}
+    for catalog_name, schema_name, table_name, column_name in rows:
+        schema_table = f"{schema_name}.{table_name}".lower()
+        catalog_table = f"{catalog_name}.{schema_name}.{table_name}".lower()
+        for key in (schema_table, catalog_table):
+            by_qualified.setdefault(key, set()).add(column_name.lower())
+        qualified_by_leaf.setdefault(table_name.lower(), set()).add(catalog_table)
+    for leaf, qualified in qualified_by_leaf.items():
+        # An unqualified name is only resolvable when it is unambiguous --
+        # the same rule `allowed_tables` applies.
+        if len(qualified) == 1:
+            by_qualified[leaf] = set(by_qualified[next(iter(qualified))])
+    return {name: frozenset(values) for name, values in by_qualified.items()}

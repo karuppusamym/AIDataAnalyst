@@ -42,6 +42,9 @@ function statusTone(status: string): Tone {
 function runStatusTone(status: string): Tone {
   if (status === "COMPLETED") return "ok";
   if (status === "REJECTED" || status === "FAILED") return "bad";
+  // A task agent's run its contract stopped before it began (ADR-0029): not a
+  // failure of the agent, but a reason it is not working.
+  if (status === "REFUSED") return "warn";
   return "mute";
 }
 
@@ -189,8 +192,9 @@ function AgentCard({ entry }: { entry: AgentRosterEntryRead }) {
         {expanded &&
           (recent_results.length > 0 ? (
             <ul className="roster__runs">
-              {recent_results.map((run) => (
-                <RecentResultRow key={run.run_id} run={run} />
+              {recent_results.map((run, index) => (
+                // A refused task-agent run has no run id (it never started).
+                <RecentResultRow key={run.run_id ?? `refused-${index}`} run={run} />
               ))}
             </ul>
           ) : (

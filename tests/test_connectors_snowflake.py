@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aida.connectors.discovery import facet_read_scope
 from aida.connectors.registry import connector_registry
 from aida.connectors.snowflake import (
     SnowflakeConnector,
@@ -18,6 +19,19 @@ from aida.connectors.snowflake import (
     _SnowflakeEnvelopeRows,
     _unqualified_name,
 )
+
+
+def _refused(detail: str = "Insufficient privileges to operate on schema 'PUBLIC'") -> Exception:
+    """A Snowflake refusal as the connector raises it: errno 3001, SQLSTATE 42501.
+
+    R11-FP02 follow-through: an envelope axis now absorbs a *refusal* only -- anything
+    else ends the run -- so the tests below that exercise an absorbed axis refuse it the
+    way Snowflake does rather than with an arbitrary exception, and run inside the
+    `facet_read_scope` the discovery activity always binds.
+    """
+    from snowflake.connector import errors as snowflake_errors
+
+    return snowflake_errors.ProgrammingError(msg=detail, errno=3001, sqlstate="42501")
 
 
 def test_quote_identifier() -> None:
@@ -95,7 +109,8 @@ def test_snowflake_registry_definition() -> None:
     assert defn.capabilities["schemas"] is True
     assert defn.capabilities["constraints"] is True
     assert defn.capabilities["explain"] is True
-    assert defn.capabilities["partitions"] is True
+    # INV-9 (R11-C14): the adapter never reads partitions, so the flag is not advertised.
+    assert defn.capabilities["partitions"] is False
 
 
 @pytest.mark.asyncio
@@ -188,9 +203,17 @@ async def test_snowflake_discover_assembly() -> None:
                 "ordinal_position": 1,
             },
         ],
+        # Every envelope 1.1 read after the three above is refused: the catalog
+        # comment, schema comments, views, functions, procedures, sequences and the
+        # one SHOW GRANTS. This used to be an exhausted mock, whose StopIteration the
+        # adapter absorbed like any other failure; only a refusal is absorbed now.
+        *[_refused() for _ in range(7)],
     ]
 
-    with patch.object(connector, "_get_connection", return_value=mock_conn):
+    with (
+        patch.object(connector, "_get_connection", return_value=mock_conn),
+        facet_read_scope(),
+    ):
         catalogs = await connector.discover()
 
     assert len(catalogs) == 1
@@ -295,6 +318,7 @@ def _envelope_fetch_sequence(
     views: object = None,
     functions: object = None,
     procedures: object = None,
+    sequences: object = None,
     view_ddl: list[object] | None = None,
     grants: object = None,
 ) -> list[object]:
@@ -358,6 +382,25 @@ def _envelope_fetch_sequence(
                 }
             ]
         ),
+        # R11-FP01: INFORMATION_SCHEMA.SEQUENCES, read after the two routine
+        # queries and before the GET_DDL pass. `NEXT_VALUE` is offered by that
+        # view and deliberately not selected, so it is absent from this row on
+        # purpose -- a row carrying it would be testing a query this adapter
+        # does not issue.
+        (
+            sequences
+            if sequences is not None
+            else [
+                {
+                    "sequence_schema": "PUBLIC",
+                    "sequence_name": "ORDER_SEQ",
+                    "data_type": "NUMBER(38,0)",
+                    "start_with": "5",
+                    "increment_by": "10",
+                    "comment": "Order numbering",
+                }
+            ]
+        ),
         *(view_ddl if view_ddl is not None else [[{"view_definition": _MVIEW_DDL}]]),
         (
             grants
@@ -382,7 +425,7 @@ async def _discover_with(sequence: list[object]) -> tuple[object, ...]:
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value = mock_cursor
     mock_cursor.fetchall.side_effect = sequence
-    with patch.object(connector, "_get_connection", return_value=mock_conn):
+    with patch.object(connector, "_get_connection", return_value=mock_conn), facet_read_scope():
         return await connector.discover()
 
 
@@ -392,9 +435,48 @@ def test_snowflake_capabilities_declare_every_implemented_envelope_axis() -> Non
     assert capabilities.routines is True
     assert capabilities.object_comments is True
     assert capabilities.grants is True
+    # R11-FP01: sequences yes, triggers no -- and `triggers is False` is not a
+    # gap here. Snowflake has no trigger object at all, which is why
+    # `discovery_selection` answers NOT_APPLICABLE for it; a `True` would claim
+    # an object the engine does not have.
+    assert capabilities.sequences is True
+    assert capabilities.triggers is False
     advertised = connector_registry.definition("snowflake").capabilities
     assert advertised["views"] is True
     assert advertised["grants"] is True
+    assert advertised["sequences"] is True
+    assert advertised["triggers"] is False
+
+
+async def test_a_snowflake_sequence_is_its_declaration_and_never_its_position() -> None:
+    """R11-FP01. `INFORMATION_SCHEMA.SEQUENCES` also carries `NEXT_VALUE`, which
+    is the value the next insert writes into a customer's row -- source data, not
+    metadata (INV-6). The adapter's query does not select it, and
+    `DiscoveredSequence` has no field it could land in.
+    """
+    catalogs = await _discover_with(_envelope_fetch_sequence())
+
+    sequence = next(
+        item for schema in catalogs[0].schemas for item in schema.sequences
+    )
+    assert sequence.name == "ORDER_SEQ"
+    assert sequence.data_type == "NUMBER(38,0)"
+    assert sequence.start_with == "5"
+    assert sequence.increment_by == "10"
+    assert sequence.source_description == "Order numbering"
+    # Snowflake reports no owning column, and says so rather than guessing.
+    assert sequence.owned_by_table is None
+    assert not hasattr(sequence, "next_value")
+
+
+async def test_snowflake_reports_no_triggers_because_it_has_none() -> None:
+    """The absence is asserted, not assumed. A schema with an empty trigger tuple
+    on an engine whose `triggers` flag is False is how `discovery_selection`
+    reaches NOT_APPLICABLE; a trigger appearing here would mean the axis had been
+    wired to an engine that cannot have one.
+    """
+    catalogs = await _discover_with(_envelope_fetch_sequence())
+    assert all(schema.triggers == () for schema in catalogs[0].schemas)
 
 
 @pytest.mark.parametrize(
@@ -469,7 +551,12 @@ async def test_a_secure_view_is_unavailable_rather_than_empty() -> None:
                     "check_option": "NONE",
                 }
             ],
-            view_ddl=[RuntimeError("SQL access control error")],
+            # The materialized view after it still needs its GET_DDL answer: an
+            # exhausted mock used to be absorbed like any other failure, and is not now.
+            view_ddl=[
+                _refused("SQL access control error: Insufficient privileges"),
+                [{"view_definition": _MVIEW_DDL}],
+            ],
         )
     )
 
@@ -484,13 +571,10 @@ async def test_a_secure_view_is_unavailable_rather_than_empty() -> None:
 async def test_a_refused_views_query_still_leaves_a_reason_on_the_view() -> None:
     catalogs = await _discover_with(
         _envelope_fetch_sequence(
-            views=RuntimeError("Object 'VIEWS' does not exist"),
+            views=_refused("Object 'VIEWS' does not exist or not authorized"),
             # With the VIEWS query refused, every view-shaped object falls through to
             # the GET_DDL pass, so both of them need a response.
-            view_ddl=[
-                RuntimeError("Insufficient privileges"),
-                RuntimeError("Insufficient privileges"),
-            ],
+            view_ddl=[_refused(), _refused()],
         )
     )
 
@@ -499,8 +583,60 @@ async def test_a_refused_views_query_still_leaves_a_reason_on_the_view() -> None
     assert view.view_definition is not None
     assert view.view_definition.definition_sql is None
     assert view.view_definition.unavailable_reason is not None
-    assert "Insufficient privileges" in view.view_definition.unavailable_reason
+    # R11-FP02 follow-through (INV-6): the reason names the read that was refused and
+    # nothing the driver said -- it used to carry the driver's own sentence verbatim.
+    assert "GET_DDL" in view.view_definition.unavailable_reason
+    assert "Insufficient privileges" not in view.view_definition.unavailable_reason
     assert "views" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+async def test_a_view_hidden_from_get_ddl_is_a_refusal_not_a_failed_run() -> None:
+    """Snowflake refuses GET_DDL on a view the role may not see the text of with error
+    2003, "does not exist or not authorized" -- SQLSTATE 02000, not 42501. The view was
+    listed by this same scan, so "does not exist" is ruled out and the adapter passes
+    `known_relations=True`: it is read as the refusal it must be, and absorbed, rather
+    than ending the run under the follow-through's narrower absorption."""
+    from snowflake.connector import errors as snowflake_errors
+
+    hidden = snowflake_errors.ProgrammingError(
+        msg="Object 'TEST_DB.PUBLIC.ACTIVE_CUSTOMERS' does not exist or not authorized.",
+        errno=2003,
+        sqlstate="02000",
+    )
+    catalogs = await _discover_with(
+        _envelope_fetch_sequence(
+            views=[
+                {
+                    "table_schema": "PUBLIC",
+                    "table_name": "ACTIVE_CUSTOMERS",
+                    "view_definition": None,
+                    "is_secure": "YES",
+                    "is_updatable": "NO",
+                    "check_option": "NONE",
+                }
+            ],
+            view_ddl=[hidden, [{"view_definition": _MVIEW_DDL}]],
+        )
+    )
+
+    view = next(t for t in catalogs[0].schemas[0].tables if t.name == "ACTIVE_CUSTOMERS")
+    assert view.view_definition is not None
+    assert view.view_definition.definition_sql is None
+
+
+async def test_an_envelope_failure_that_is_not_a_refusal_now_ends_the_run() -> None:
+    """R11-FP02 follow-through: the behaviour change. A failure of an envelope axis used
+    to be absorbed into a per-axis reason whatever it was, so a dropped connection on
+    INFORMATION_SCHEMA.VIEWS left every view definition missing -- and a FULL run retired
+    them, because an UNAVAILABLE facet is not protected the way a refused one is. A
+    failure no code identifies as a refusal now ends the run."""
+    from snowflake.connector import errors as snowflake_errors
+
+    dropped = snowflake_errors.OperationalError(
+        msg="Connection reset by peer", errno=253006, sqlstate="08001"
+    )
+    with pytest.raises(snowflake_errors.OperationalError):
+        await _discover_with(_envelope_fetch_sequence(views=dropped))
 
 
 def test_a_view_definition_over_the_cap_is_a_flagged_prefix() -> None:
@@ -591,12 +727,14 @@ async def test_schema_grants_land_on_the_schema() -> None:
 
 async def test_a_refused_show_grants_is_recorded_rather_than_read_as_no_grants() -> None:
     catalogs = await _discover_with(
-        _envelope_fetch_sequence(grants=RuntimeError("Insufficient privileges on schema"))
+        _envelope_fetch_sequence(grants=_refused())
     )
 
     assert catalogs[0].schemas[0].grants == ()
     recorded = catalogs[0].attributes["envelope_v11_unavailable"]
-    assert "Insufficient privileges on schema" in recorded["grants:PUBLIC"]
+    # Value-free since R11-FP02's follow-through: the read, not the driver's sentence.
+    assert "SHOW GRANTS" in recorded["grants:PUBLIC"]
+    assert "Insufficient privileges" not in recorded["grants:PUBLIC"]
 
 
 def test_show_grants_object_names_are_unqualified() -> None:

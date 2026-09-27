@@ -21,6 +21,7 @@ Endpoints:
   stamped and an audit + outbox record written.
 """
 
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -131,6 +132,9 @@ async def discover_composite_key_candidates(
             null_count=profile.null_count,
             non_null_count=profile.non_null_count,
             approximate_distinct_count=profile.approximate_distinct_count,
+            # R11-FP04: the stored facet, so key inference and join validation
+            # read one answer instead of two derivations of the same rule.
+            stored_distinct_ratio=profile.distinct_ratio,
         )
         for profile in column_profiles
         if profile.column_id in columns_by_id
@@ -163,7 +167,16 @@ async def discover_composite_key_candidates(
             organization_id=table.organization_id,
             datasource_id=table.datasource_id,
             table_id=table.id,
+            table_profile_id=latest_profile.id,
             column_ids=column_id_strings,
+            # R11-FP06: these four are NOT NULL in the database. The in-memory test double
+            # never enforced that, so discovery failed on every real insert.
+            column_names=list(proposal.column_names),
+            column_count=len(column_id_strings),
+            key_fingerprint=hashlib.sha256(
+                "|".join([str(table.id), *key]).encode("utf-8")
+            ).hexdigest(),
+            estimated_distinctness_ratio=float(proposal.evidence["min_member_distinct_ratio"]),
             detection_rule=proposal.detection_rule,
             confidence=proposal.confidence,
             evidence=proposal.evidence,

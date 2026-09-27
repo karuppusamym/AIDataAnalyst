@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { MarketplaceProductRead } from "../lib/ui-types";
 import type { MarketplaceAccessRequestRead } from "../lib/types";
 import { ApiError } from "../lib/api";
@@ -17,6 +17,17 @@ const fetchMarketplaceProducts = vi.fn<
 const requestMarketplaceAccess = vi.fn<
   (versionId: string, body: unknown, signal?: AbortSignal) => Promise<MarketplaceAccessRequestRead>
 >();
+const fetchMarketplaceAccessRequests = vi.fn<
+  (query?: unknown, signal?: AbortSignal) => Promise<{
+    items: MarketplaceAccessRequestRead[];
+    limit: number;
+    offset: number;
+    total: number;
+  }>
+>();
+const revokeMarketplaceAccess = vi.fn<
+  (requestId: string, signal?: AbortSignal) => Promise<MarketplaceAccessRequestRead>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -26,8 +37,24 @@ vi.mock("../lib/api", async (importOriginal) => {
       fetchMarketplaceProducts(query, signal),
     requestMarketplaceAccess: (versionId: string, body: unknown, signal?: AbortSignal) =>
       requestMarketplaceAccess(versionId, body, signal),
+    fetchMarketplaceAccessRequests: (query?: unknown, signal?: AbortSignal) =>
+      fetchMarketplaceAccessRequests(query, signal),
+    revokeMarketplaceAccess: (requestId: string, signal?: AbortSignal) =>
+      revokeMarketplaceAccess(requestId, signal),
   };
 });
+
+const GRANT: MarketplaceAccessRequestRead = {
+  id: "mar_1", organization_id: "org1", data_product_version_id: "dpv_1",
+  requested_by: "analyst@tenant.example", purpose: "quarterly close", duration_days: 90,
+  status: "APPROVED", governance_review_id: "gr_1", decided_by: "steward",
+  decision_reason: "Approved.", decided_at: "2026-09-03T00:00:00Z",
+  expires_at: "2026-12-02T00:00:00Z", revoked_by: null, revoked_at: null,
+  fulfillment_status: "PROVISIONED", fulfillment_provider: "outbox",
+  fulfillment_reference: "local:mar_1", fulfillment_error: null,
+  fulfilled_at: "2026-09-03T00:00:00Z", created_at: "2026-09-02T00:00:00Z",
+  updated_at: "2026-09-03T00:00:00Z",
+};
 
 const PRODUCT: MarketplaceProductRead = {
   id: "dpv_1", organization_id: "org1", product_id: "dp_1", product_key: "finance-revenue-model",
@@ -50,7 +77,12 @@ async function loadScreen() {
 beforeEach(() => {
   fetchMarketplaceProducts.mockReset();
   requestMarketplaceAccess.mockReset();
+  fetchMarketplaceAccessRequests.mockReset();
+  revokeMarketplaceAccess.mockReset();
   fetchMarketplaceProducts.mockResolvedValue({ items: [], limit: 50, offset: 0, total: 0 });
+  fetchMarketplaceAccessRequests.mockResolvedValue({
+    items: [], limit: 100, offset: 0, total: 0,
+  });
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -134,6 +166,91 @@ describe("MarketplaceScreen against the real CX-9 endpoint", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("A purpose is required");
     expect(requestMarketplaceAccess).not.toHaveBeenCalled();
+  });
+
+  /* R11-B4 — revoking a granted entitlement. */
+
+  const GRANTED_PRODUCT: MarketplaceProductRead = {
+    ...PRODUCT,
+    access_status: "REQUEST_APPROVED",
+  };
+
+  async function openGrantedDetail() {
+    fetchMarketplaceProducts.mockResolvedValue({
+      items: [GRANTED_PRODUCT], limit: 50, offset: 0, total: 1,
+    });
+    fetchMarketplaceAccessRequests.mockResolvedValue({
+      items: [GRANT], limit: 100, offset: 0, total: 1,
+    });
+    const MarketplaceScreen = await loadScreen();
+    render(<MarketplaceScreen />);
+    await waitFor(() => expect(screen.getByText("Finance revenue model")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance revenue model/ }));
+    await screen.findByLabelText("Detail for Finance revenue model");
+  }
+
+  it("offers Revoke for a granted entitlement, resolved through the access-request list", async () => {
+    await openGrantedDetail();
+
+    expect(await screen.findByRole("button", { name: "Revoke access" })).toBeInTheDocument();
+    expect(fetchMarketplaceAccessRequests).toHaveBeenCalled();
+  });
+
+  it("does not offer Revoke when nothing is granted", async () => {
+    fetchMarketplaceProducts.mockResolvedValue({ items: [PRODUCT], limit: 50, offset: 0, total: 1 });
+    const MarketplaceScreen = await loadScreen();
+    render(<MarketplaceScreen />);
+    await waitFor(() => expect(screen.getByText("Finance revenue model")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Finance revenue model/ }));
+    await screen.findByLabelText("Detail for Finance revenue model");
+
+    expect(screen.queryByRole("button", { name: "Revoke access" })).not.toBeInTheDocument();
+    expect(fetchMarketplaceAccessRequests).not.toHaveBeenCalled();
+  });
+
+  it("confirms before revoking, and revokes the resolved request", async () => {
+    await openGrantedDetail();
+    revokeMarketplaceAccess.mockResolvedValue({ ...GRANT, status: "REVOKED" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke access" }));
+
+    // The confirmation is a real gate: nothing is called until it is accepted.
+    expect(await screen.findByText("Revoke this access grant?")).toBeInTheDocument();
+    expect(revokeMarketplaceAccess).not.toHaveBeenCalled();
+
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke access" }));
+
+    await waitFor(() => expect(revokeMarketplaceAccess).toHaveBeenCalledWith("mar_1", undefined));
+    // The list is reloaded so the access pill reflects the new state.
+    await waitFor(() => expect(fetchMarketplaceProducts.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("cancelling the confirmation revokes nothing", async () => {
+    await openGrantedDetail();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke access" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(revokeMarketplaceAccess).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's refusal text when a revoke is denied", async () => {
+    await openGrantedDetail();
+    revokeMarketplaceAccess.mockRejectedValue(
+      new ApiError(403, "only approved access can be revoked"),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke access" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke access" }));
+
+    // The server's own words, not a client-side guess at eligibility.
+    expect(await screen.findByText("only approved access can be revoked")).toBeInTheDocument();
+    // Still open, so the refusal is read before the pane closes.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("surfaces a fetch error with a retry action", async () => {

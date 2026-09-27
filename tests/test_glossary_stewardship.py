@@ -1051,3 +1051,66 @@ async def test_generate_glossary_link_proposals_filters_matches_below_minimum_co
     assert page.total == 0
     assert not any(isinstance(value, GlossaryLinkProposal) for value in session.added)
     assert session.timeline == ["commit"]
+
+
+async def test_generate_glossary_link_proposals_never_raises_a_decided_link_again() -> None:
+    """R11-FP10: a link a reviewer rejected, or approved and a steward later removed, is not
+    proposed again, even after the annotation's labels change. A table carries one business
+    annotation, which follows the table through a merged rename (`identity_merge`), so a
+    proposal's (table, term, annotation) key already names the link itself."""
+    organization_id = uuid4()
+    term = _sample_glossary_term(organization_id=organization_id, term_key="net_revenue")
+    version = GlossaryTermVersion(
+        id=uuid4(),
+        organization_id=organization_id,
+        term_id=term.id,
+        version=1,
+        status="APPROVED",
+        display_name="Net Revenue",
+        definition="Revenue after returns and discounts.",
+        synonyms=["Net Sales"],
+        created_by="admin",
+    )
+    rejected_table = _sample_metadata_table(organization_id=organization_id, name="fact_revenue")
+    removed_table = _sample_metadata_table(organization_id=organization_id, name="fact_sales")
+    # Its business name now matches the term's display name; the refused proposal matched a
+    # synonym. New evidence for the same link is still the same link.
+    rejected_annotation = _sample_business_annotation(
+        organization_id=organization_id,
+        table_id=rejected_table.id,
+        business_name="Net Revenue",
+        synonyms=[],
+    )
+    removed_annotation = _sample_business_annotation(
+        organization_id=organization_id,
+        table_id=removed_table.id,
+        business_name="Sales",
+        synonyms=["Net Sales"],
+    )
+    session = _LinkProposalSession(
+        term_rows=[(term, version)],
+        annotations=[rejected_annotation, removed_annotation],
+        # The approved link on `removed_table` was since removed by a steward.
+        link_rows=[],
+        proposal_rows=[
+            (rejected_table.id, term.id, rejected_annotation[0].id),
+            (removed_table.id, term.id, removed_annotation[0].id),
+        ],
+        tables=[rejected_table, removed_table],
+    )
+    context = SecurityContext(
+        principal_id="steward",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"DataSteward"}),
+    )
+
+    page = await generate_glossary_link_proposals(
+        organization_id,
+        GlossaryLinkProposalGenerate(),
+        context,
+        session,  # type: ignore[arg-type]
+    )
+
+    assert page.total == 0
+    assert not any(isinstance(value, GlossaryLinkProposal) for value in session.added)

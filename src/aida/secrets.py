@@ -274,3 +274,17 @@ class SecretResolver:
                 self._cache.clear()
             else:
                 self._cache.pop(reference, None)
+
+
+def vault_data_field(body: dict[str, object], field: str) -> object:
+    """`body["data"][field]`, tolerating a malformed shape rather than raising.
+
+    A `KeyError`/`TypeError` here would have to be told apart from a genuinely
+    bad value by every caller, so both collapse to None and the caller raises
+    its own domain error. Lives here because this module owns the Vault client;
+    `signing` and `tokenization` each had a byte-identical private copy.
+    """
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return None
+    return data.get(field)

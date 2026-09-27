@@ -1,0 +1,906 @@
+import { useCallback, useMemo, useState } from "react";
+
+import {
+  ApiError,
+  createAnalysisRun,
+  fetchDatasourceAnalysisRuns,
+  fetchScanPolicy,
+  resumeAnalysisRun,
+  testDatasourceConnection,
+  upsertScanPolicy,
+} from "../lib/api";
+import type { AnalysisRunRead, DataSourceRead, ScanPolicyRead, ScanPolicyUpsert } from "../lib/types";
+import { useSession } from "../lib/session";
+import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import type { Tone } from "../components/primitives";
+import { LoadingPanel, useAsyncResource, useSubmitAction } from "../components/screenState";
+import { DiscoveryScope } from "./SourcesScreenDiscoveryScope";
+
+/* ---------------------------------------------------------------------------
+   Source administration — operating a source that ALREADY EXISTS (R11-B7).
+
+   THE GAP this closes: the rescan/schedule/retry backend has been merged for
+   some time and nothing in this client could reach it. `FirstSourceSetup`
+   (review 2026-09-05, T15) starts the FIRST scan of a source that has never
+   been scanned, and that was the only caller. A source past its first scan
+   could not be re-scanned, its schedule could not be read let alone changed,
+   and a failed run could only be retried by calling the API by hand.
+
+   FOUR ENDPOINTS, each already merged, none composed or invented:
+
+     POST /v1/datasources/{id}/test         connection probe (424 on failure)
+     GET  /v1/datasources/{id}/scan-policy  the schedule (404 = never scheduled)
+     PUT  /v1/datasources/{id}/scan-policy  create/replace the whole schedule
+     POST /v1/datasources/{id}/analysis-runs   run a scan now (409 on admission)
+     POST /v1/analysis-runs/{run_id}/resume    retry an interrupted run (409)
+
+   THE INVARIANT, and the reason this panel is worth its size: EVERY FACT ON
+   SCREEN IS THE SERVER'S. `next_run_at`, `last_triggered_at`, the run's
+   status and its counts are read back from the server after every action, and
+   the row is never edited in place to say what the click hoped for. A 202 is
+   an accepted request, not a finished scan; a resume returns a DIFFERENT run
+   id from the one retried (`resumed_from_run_id`), so mutating the failed row
+   would be a lie twice over.
+
+   THE SECOND INVARIANT: a refusal is an answer. Every one of these endpoints
+   has a state machine behind it that says no in words -- "only interrupted or
+   failed runs can resume", whatever run admission says when a scan is already
+   in flight, "datasource connection test failed" with the source's status
+   committed to CONNECTION_FAILED. `failureText` (not `describeError`) is used
+   throughout so the server's own sentence reaches the dialog the operator is
+   looking at, rather than being paraphrased into "something went wrong".
+
+   Split out of `SourcesScreen.tsx` rather than added to it: the detail pane
+   was already a health read model, and this is a write surface with its own
+   confirmation, validation and re-read cycle.
+--------------------------------------------------------------------------- */
+
+/** Roles `test_datasource` accepts (`connectivity/router.py`, surface matrix).
+ *
+ *  R11-S13 (M5): exported because `create_datasource` (`api.py:1021`) accepts
+ *  the same two roles, and `SourcesScreen` now mounts the registration form
+ *  beside this pane. One constant, so the gate on "register a source" and the
+ *  gate on "test the source you just registered" cannot drift apart into a
+ *  screen that offers step one and hides step two. */
+export const CONNECTION_ROLES = ["PlatformAdmin", "DataAdmin"];
+/** Roles the scan, resume and scan-policy writes accept. */
+const SCAN_ROLES = ["PlatformAdmin", "MetadataAdmin", "DataAdmin"];
+
+/**
+ * Whether a session holding `roles` may use a surface `accepted` guards.
+ *
+ * `undefined` is "the session has not answered yet", NOT "no roles": this
+ * deliberately fails OPEN while `GET /v1/me` is in flight, so a slow identity
+ * request does not render as a permissions problem. The server's 403 is the
+ * authority; this only decides what is worth offering.
+ *
+ * R11-S13 (M5): lifted out of the pane below so the registration form in
+ * `SourcesScreen` applies the identical rule rather than a second copy of it.
+ */
+export function roleAllows(
+  roles: readonly string[] | undefined,
+  accepted: readonly string[],
+): boolean {
+  return roles === undefined || roles.some((role) => accepted.includes(role));
+}
+
+/** The server's own retry gate, copied from `aida.api.resume_analysis_run`.
+ *  A status outside this set is refused with a 409 — so the button is not
+ *  offered for it, and the 409 is still rendered if the run moved underneath. */
+const RESUMABLE = new Set(["FAILED", "CANCELLED", "CANCELLATION_REQUESTED", "SUBMISSION_FAILED"]);
+
+const RUN_SUCCEEDED = new Set(["COMPLETED", "SUCCEEDED"]);
+const RUN_IN_FLIGHT = new Set(["QUEUED", "PENDING", "RUNNING", "PROFILING", "CANCELLATION_REQUESTED"]);
+
+const runTone = (status: string): Tone =>
+  RUN_SUCCEEDED.has(status) ? "ok" : RUN_IN_FLIGHT.has(status) ? "info" : "bad";
+
+const connectionTone = (status: string): Tone =>
+  status === "ACTIVE" || status === "CONNECTION_VERIFIED"
+    ? "ok"
+    : status === "CONNECTION_FAILED" || status === "DISABLED"
+      ? "bad"
+      : "mute";
+
+const stamp = (iso: string | null): string =>
+  iso ? `${iso.slice(0, 16).replace("T", " ")} UTC` : "never";
+
+/** "every 6h", "every 90m" — the interval as an operator states it. */
+function intervalWords(minutes: number): string {
+  if (minutes % 1440 === 0) return `every ${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `every ${minutes / 60}h`;
+  return `every ${minutes}m`;
+}
+
+interface ReceiptCode {
+  support?: string;
+  captured?: number;
+  withheld?: number;
+  truncated?: number;
+  /** R11-FP02: this facet's own read outcome, in the shared vocabulary
+   *  `aida.capability_states` defines, with the closed reason code beside it. Absent on a
+   *  receipt written before version 3, which reads as "that run did not tell these
+   *  outcomes apart" -- not as a clean read. */
+  state?: string;
+  reason?: string;
+}
+
+/** Every facet a receipt records an outcome for (`discovery_receipt.RECEIPT_FACETS`), in the
+ *  words an operator uses for it. Keyed by the server's own facet names so the facet a
+ *  connector attributes a refused read to and the facet this card names cannot drift apart. */
+const FACET_WORDS: Record<string, string> = {
+  inventory: "the object inventory",
+  view_definitions: "view code",
+  routine_bodies: "routine code",
+  constraints: "constraints",
+  indexes: "indexes",
+  partitions: "partitions",
+  grants: "grants",
+  object_comments: "source comments",
+  object_visibility: "what this login cannot see",
+};
+
+const facetWords = (facet: string): string =>
+  FACET_WORDS[facet] ?? facet.toLowerCase().replace(/_/g, " ");
+
+/* ---------------------------------------------------------------------------
+   R11-FP02 -- the four answers to "should I look into this?", and their order.
+
+   A receipt facet can give four different answers, and three of them make the
+   counters beside them zero *by construction*:
+
+     UNSUPPORTED        this connector does not collect the facet at all
+     PERMISSION_DENIED  the source refused this read for this login
+     UNAVAILABLE        a read was attempted and did not get it
+     (a read completed) the counters mean what they say
+
+   Only the fourth licenses "0 captured", and there it is a finding: asked, and
+   there are none. Under the other three it prints an absence of evidence as
+   evidence of absence, which is the one reading this receipt exists to prevent.
+   UNAVAILABLE is where that is most dangerous, not least:
+   `connectors.discovery.classify_read_failure` deliberately under-claims, so a
+   driver that reports no SQLSTATE -- Oracle's ORA-01031, SQL Server's error 229,
+   both privilege errors -- lands here rather than on PERMISSION_DENIED. An
+   UNAVAILABLE facet may be a refusal nobody could prove, and "0 captured" would
+   then be wrong twice over.
+
+   Precedence, first match wins. It is deliberately the server's own order
+   (`discovery_receipt.as_json`'s `facet_state`) read back out rather than a
+   second one invented here: if the card and the receipt disagreed about which
+   answer wins, one of them would be lying about the same run.
+
+     1. UNSUPPORTED       there was no read, so nothing about one can be true.
+                          Nothing done to this source or this login changes it.
+     2. PERMISSION_DENIED a read happened and was refused. Names the single
+                          thing to change: grant it to this login, rescan.
+     3. UNAVAILABLE       a read happened and did not complete. Actionable --
+                          rescan, and check the grant anyway, per the
+                          under-claim above -- but not yet diagnosed.
+     4. the counters.
+
+   Read as "what does the operator do next", that is narrowest remedy first:
+   nothing, then one grant, then a retry, then read the numbers.
+
+   Two things this order is careful about:
+
+   * UNAVAILABLE carries two answers, told apart by the reason code.
+     `ADAPTER_NOT_IMPLEMENTED` is not a failed read -- it is how a facet with no
+     capability flag of its own reports what UNSUPPORTED reports, and it is how
+     `object_visibility` says this adapter has no unfiltered catalog to ask. A
+     question that could not be put is classified with UNSUPPORTED, not with the
+     failures, so a rescan is never suggested for something a rescan cannot fix.
+   * A receipt written before version 3 carries no `state`. Its counters are
+     printed with no state claim beside them, because that run genuinely did not
+     tell these outcomes apart (`ReceiptCode.state`); `support` still decides
+     UNSUPPORTED, a key that predates version 3. Inventing the distinction
+     retroactively would be a worse lie than the bare counters are.
+--------------------------------------------------------------------------- */
+
+/** `CapabilityState.PERMISSION_DENIED`: the source would not tell us, as opposed to any
+ *  state that means "there are none". */
+const REFUSED = "PERMISSION_DENIED";
+/** `CapabilityState.UNAVAILABLE`: the read was attempted and did not complete. */
+const INCOMPLETE = "UNAVAILABLE";
+/** `capability_states.REASON_ADAPTER_NOT_IMPLEMENTED` -- the one UNAVAILABLE that is not a
+ *  failure: the question could not be put to the source at all. */
+const CANNOT_ASK = "ADAPTER_NOT_IMPLEMENTED";
+
+type FacetAnswer = "UNSUPPORTED" | "REFUSED" | "INCOMPLETE" | "READ";
+
+/** One facet's answer, by the precedence above. The only place that order is decided. */
+function facetAnswer(facet: ReceiptCode): FacetAnswer {
+  if (facet.support === "UNSUPPORTED" || facet.state === "UNSUPPORTED") return "UNSUPPORTED";
+  if (facet.state === REFUSED) return "REFUSED";
+  if (facet.state === INCOMPLETE) return facet.reason === CANNOT_ASK ? "UNSUPPORTED" : "INCOMPLETE";
+  return "READ";
+}
+
+function codeWords(label: string, facet: ReceiptCode | undefined): string | null {
+  if (!facet) return null;
+  const answer = facetAnswer(facet);
+  if (answer === "UNSUPPORTED") return `${label}: not collected by this connector`;
+  // A refused read returns no rows at all, so `captured`, `withheld` and `truncated` are
+  // all 0 beside it. The refusal is stated in the counters' place, never beside them.
+  if (answer === "REFUSED") return `${label}: refused by the source, so not read`;
+  if (answer === "INCOMPLETE") {
+    // The same rule one state along, and the defect this clause fixes: the read failed, so
+    // of course nothing was captured, and "0 captured" told the reader there was nothing
+    // there. Where `withheld` is non-zero the read did reach objects and got no text back
+    // from any of them, which is a real count and more use than "the read failed" alone.
+    const withheld = facet.withheld ?? 0;
+    return withheld > 0
+      ? `${label}: no text arrived for ${withheld} object(s), so none was captured`
+      : `${label}: the read did not complete, so nothing was captured`;
+  }
+  const parts = [`${facet.captured ?? 0} captured`];
+  if (facet.withheld) parts.push(`${facet.withheld} withheld`);
+  if (facet.truncated) parts.push(`${facet.truncated} truncated`);
+  return `${label}: ${parts.join(", ")}`;
+}
+
+/** R11-FP02: the run's receipt in one line -- what the source refused, what it was asked for
+ *  and did not hand over, how completely it took in code, and whether its stream finished.
+ *  `null` for a run from before receipts, which is not "found nothing". */
+export function receiptWords(receipt: unknown): string | null {
+  if (!receipt || typeof receipt !== "object") return null;
+  const body = receipt as {
+    stream?: { state?: string; batches?: number };
+    facets?: Record<string, ReceiptCode | undefined>;
+    kinds?: Record<string, { invisible?: number | null }>;
+    changes?: Record<string, number>;
+  };
+  // R11-FP01 / R11-FP02: what was *not* read leads, ahead of everything this run did take
+  // in, refusals before failures as the precedence above orders them. A facet the source
+  // refused for this login came back with nothing, so every counter the receipt keeps for
+  // it reads 0 -- and a reader who is shown those zeros concludes there is nothing there
+  // rather than that one grant is missing. Naming the facet is the whole value of a
+  // per-facet outcome: one missing grant now costs one facet instead of the whole scan,
+  // which only helps somebody who can see which facet to go and grant.
+  //
+  // A facet whose read did not complete is named here for a second reason: most facets
+  // (constraints, indexes, partitions, grants, source comments) have no counters on the
+  // receipt at all, so before this clause a failed read of one of them was not mis-stated
+  // as "0 captured" -- it was not stated anywhere, and the card read as a clean scan.
+  // Silence is the same lie with fewer words. UNSUPPORTED facets are deliberately not
+  // listed: that is a property of the connector rather than of this run, and there is
+  // nothing for an operator to do about it.
+  const unread = (answer: FacetAnswer): string[] =>
+    Object.entries(body.facets ?? {})
+      .filter(([, facet]) => facet !== undefined && facetAnswer(facet) === answer)
+      .map(([facet]) => facetWords(facet));
+  const refused = unread("REFUSED");
+  const incomplete = unread("INCOMPLETE");
+  const parts: string[] = [];
+  if (refused.length > 0) {
+    parts.push(
+      `the source refused ${refused.length} read(s) for this login — unread, not empty: ` +
+        `${refused.join(", ")}. Granting the read and rescanning is what fills ` +
+        `${refused.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (incomplete.length > 0) {
+    parts.push(
+      `${incomplete.length} read(s) did not complete — unread, not empty: ` +
+        `${incomplete.join(", ")}. Rescanning is what retries ` +
+        `${incomplete.length === 1 ? "it" : "them"}; a refusal the driver did not spell out ` +
+        `lands here too, so the grant is worth checking.`,
+    );
+  }
+  parts.push(
+    ...[
+      codeWords("view code", body.facets?.view_definitions),
+      codeWords("routine code", body.facets?.routine_bodies),
+    ].filter((part): part is string => part !== null),
+  );
+  // R11-FP02: what the source holds that this run's login may not see. Only stated when the
+  // source could be asked: a null is "we could not ask", which is not "nothing is hidden".
+  // A visibility question the source *refused*, or one whose read did not complete, also
+  // nulls these counts and is named by the two clauses above rather than by silence here --
+  // while an adapter with no unfiltered catalog to ask is still silent, because there was no
+  // read to report on (`facetAnswer`'s `CANNOT_ASK`).
+  const invisible = Object.entries(body.kinds ?? {})
+    .map(([kind, counts]) => [kind, counts?.invisible ?? 0] as const)
+    .filter(([, count]) => count > 0);
+  if (invisible.length > 0) {
+    const total = invisible.reduce((sum, [, count]) => sum + count, 0);
+    const detail = invisible.map(([kind, count]) => `${count} ${kind.toLowerCase().replace(/_/g, " ")}`);
+    parts.push(`${total} object(s) this login may not see: ${detail.join(", ")}`);
+  }
+  // R11-FP15: what this run found changed, by kind of change.
+  const changes = Object.entries(body.changes ?? {}).filter(([, count]) => count > 0);
+  if (changes.length > 0) {
+    const total = changes.reduce((sum, [, count]) => sum + count, 0);
+    const detail = changes.map(([type, count]) => `${count} ${type.toLowerCase().replace(/_/g, " ")}`);
+    parts.push(`${total} change signal(s): ${detail.join(", ")}`);
+  }
+  const state = body.stream?.state;
+  if (state && state !== "COMPLETE") {
+    parts.push(`stream ${state.toLowerCase().replace(/_/g, " ")} after ${body.stream?.batches ?? 0} batch(es)`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function windowWords(start: number | null, end: number | null): string {
+  if (start === null || end === null) return "any time of day";
+  const pad = (h: number) => `${String(h).padStart(2, "0")}:00`;
+  return `${pad(start)}–${pad(end)} UTC`;
+}
+
+/* ---------------------------------------------------------------------------
+   The policy editor's form state.
+
+   `PUT scan-policy` is an UPSERT of the WHOLE document, not a patch: a field
+   the caller omits falls back to the schema default rather than keeping what
+   the server holds. So the form is always seeded from the current policy (or
+   from the schema's own defaults when there is none), and every field is sent
+   on every save -- editing the interval must not silently clear a maintenance
+   window somebody else configured.
+--------------------------------------------------------------------------- */
+
+export interface PolicyFormState {
+  enabled: boolean;
+  intervalMinutes: string;
+  mode: "FULL" | "INCREMENTAL";
+  priority: string;
+  usageBoostEnabled: boolean;
+  windowStart: string;
+  windowEnd: string;
+  /** A `datetime-local` value, or empty for "leave the next run where it is". */
+  startAt: string;
+}
+
+/** Schema defaults from `ScanPolicyUpsert` (`profiling/schemas.py`), so a
+ *  source with no policy opens on what the server would itself have used. */
+export const POLICY_DEFAULTS: PolicyFormState = {
+  enabled: true,
+  intervalMinutes: "1440",
+  mode: "INCREMENTAL",
+  priority: "50",
+  usageBoostEnabled: false,
+  windowStart: "",
+  windowEnd: "",
+  startAt: "",
+};
+
+export function policyToForm(policy: ScanPolicyRead | null): PolicyFormState {
+  if (!policy) return POLICY_DEFAULTS;
+  return {
+    enabled: policy.enabled,
+    intervalMinutes: String(policy.interval_minutes),
+    mode: policy.mode === "FULL" ? "FULL" : "INCREMENTAL",
+    // The admin's own choice, never the scheduler-visible boosted value: the
+    // server keeps them apart as `base_priority`/`priority` precisely so an
+    // edit does not compound a previous usage boost (ADR-0017 SS8).
+    priority: String(policy.base_priority),
+    usageBoostEnabled: policy.usage_boost_enabled,
+    windowStart: policy.maintenance_start_hour_utc === null ? "" : String(policy.maintenance_start_hour_utc),
+    windowEnd: policy.maintenance_end_hour_utc === null ? "" : String(policy.maintenance_end_hour_utc),
+    startAt: "",
+  };
+}
+
+/**
+ * The server's own validation rules, checked before the request.
+ *
+ * Not a replacement for the server's answer -- a 422 is still rendered if one
+ * gets through -- but a maintenance window is the one field pair whose rule
+ * ("both or neither, and not equal") is invisible in the UI, and discovering
+ * it as a rejected save after typing one hour is a worse way to learn it.
+ * Returns `null` when the form is sendable.
+ */
+export function validatePolicyForm(form: PolicyFormState): string | null {
+  const interval = Number(form.intervalMinutes);
+  if (!Number.isInteger(interval) || interval < 5 || interval > 525_600) {
+    return "Interval must be a whole number of minutes between 5 and 525600 (one year).";
+  }
+  const priority = Number(form.priority);
+  if (!Number.isInteger(priority) || priority < 0 || priority > 100) {
+    return "Priority must be a whole number between 0 and 100.";
+  }
+  const hasStart = form.windowStart !== "";
+  const hasEnd = form.windowEnd !== "";
+  if (hasStart !== hasEnd) return "Give both maintenance-window hours, or neither.";
+  if (hasStart && hasEnd) {
+    const start = Number(form.windowStart);
+    const end = Number(form.windowEnd);
+    if (!Number.isInteger(start) || start < 0 || start > 23 || !Number.isInteger(end) || end < 0 || end > 23) {
+      return "Maintenance-window hours are whole hours from 0 to 23, in UTC.";
+    }
+    if (start === end) return "The maintenance window cannot start and end in the same hour.";
+  }
+  if (form.startAt !== "" && Number.isNaN(new Date(form.startAt).getTime())) {
+    return "The next-run time could not be read as a date.";
+  }
+  return null;
+}
+
+/** The form as the endpoint wants it. `start_at` must carry a timezone — the
+ *  handler 422s a naive datetime — and `toISOString()` is always UTC-suffixed,
+ *  which is why the `datetime-local` value is converted rather than sent. */
+export function policyFormToBody(form: PolicyFormState): ScanPolicyUpsert {
+  const hasWindow = form.windowStart !== "" && form.windowEnd !== "";
+  return {
+    enabled: form.enabled,
+    interval_minutes: Number(form.intervalMinutes),
+    mode: form.mode,
+    priority: Number(form.priority),
+    usage_boost_enabled: form.usageBoostEnabled,
+    maintenance_start_hour_utc: hasWindow ? Number(form.windowStart) : null,
+    maintenance_end_hour_utc: hasWindow ? Number(form.windowEnd) : null,
+    ...(form.startAt === "" ? {} : { start_at: new Date(form.startAt).toISOString() }),
+  };
+}
+
+/** What the operator is being asked to confirm. Every state-changing action on
+ *  this panel goes through one of these — none of them fires on the click. */
+type Pending =
+  | { kind: "test" }
+  | { kind: "scan"; mode: "FULL" | "INCREMENTAL" }
+  | { kind: "policy"; body: ScanPolicyUpsert; creating: boolean }
+  | { kind: "retry"; run: AnalysisRunRead };
+
+export function SourceAdministration({
+  source,
+  onSourceChanged,
+}: {
+  source: DataSourceRead;
+  /** The fleet list holds this source's status; a connection test changes it,
+   *  so the list is re-read rather than patched from the response here. */
+  onSourceChanged: () => void;
+}) {
+  const roles = useSession().me?.roles;
+  // `undefined` is "the session has not answered yet", not "no roles". Matching
+  // the workbook gate this pane already uses: offer the action and let the
+  // server's 403 be the authority, rather than hiding it on a guess.
+  const allowed = useCallback(
+    (accepted: readonly string[]) => roleAllows(roles, accepted),
+    [roles],
+  );
+  const mayTest = allowed(CONNECTION_ROLES);
+  const mayScan = allowed(SCAN_ROLES);
+
+  /* The schedule. A 404 here is an ANSWER — "this source has never been
+     scheduled" — and is the state that offers to create a policy, so it is
+     classified into `null` rather than left to the resource's error path. */
+  const policy = useAsyncResource<ScanPolicyRead | null>(
+    async (signal) => {
+      try {
+        return await fetchScanPolicy(source.id, signal);
+      } catch (reason) {
+        if (reason instanceof ApiError && reason.status === 404) return null;
+        throw reason;
+      }
+    },
+    [source.id],
+  );
+
+  const runs = useAsyncResource<AnalysisRunRead[]>(
+    async (signal) => (await fetchDatasourceAnalysisRuns(source.id, { limit: 5 }, signal)).items,
+    [source.id],
+  );
+
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<PolicyFormState>(POLICY_DEFAULTS);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [scanMode, setScanMode] = useState<"FULL" | "INCREMENTAL">("INCREMENTAL");
+  const [notice, setNotice] = useState<string | null>(null);
+  const action = useSubmitAction<unknown>();
+
+  const setField = useCallback(<K extends keyof PolicyFormState>(key: K, value: PolicyFormState[K]) => {
+    setForm((previous) => ({ ...previous, [key]: value }));
+  }, []);
+
+  const openEditor = useCallback(() => {
+    setForm(policyToForm(policy.data ?? null));
+    setFormError(null);
+    setEditing(true);
+  }, [policy.data]);
+
+  const askToSave = useCallback(() => {
+    const invalid = validatePolicyForm(form);
+    if (invalid) {
+      setFormError(invalid);
+      return;
+    }
+    setFormError(null);
+    setPending({ kind: "policy", body: policyFormToBody(form), creating: !policy.data });
+  }, [form, policy.data]);
+
+  const latest = runs.data?.[0] ?? null;
+  /* The most recent run the SERVER would accept a resume for. Offering retry
+     on an older failed run when a newer one succeeded would ask to re-run work
+     that has since been redone. */
+  const retryable = useMemo(
+    () => (latest && RESUMABLE.has(latest.status) ? latest : null),
+    [latest],
+  );
+
+  const confirmed = useCallback(async () => {
+    if (!pending) return;
+    setNotice(null);
+    if (pending.kind === "test") {
+      const tested = await action.run(() => testDatasourceConnection(source.id));
+      if (!tested) return;
+      setPending(null);
+      // The server's status for this source, not "it worked": a probe that
+      // succeeds on an unverified source lands on CONNECTION_VERIFIED, and an
+      // already-ACTIVE one stays ACTIVE.
+      setNotice(`Connection verified. This source now reports ${(tested as DataSourceRead).status}.`);
+      onSourceChanged();
+      return;
+    }
+    if (pending.kind === "scan") {
+      const created = await action.run(() => createAnalysisRun(source.id, { mode: pending.mode }));
+      if (!created) return;
+      setPending(null);
+      setNotice(
+        `Scan accepted (${pending.mode.toLowerCase()}). A 202 is an accepted request, not a finished scan — the run below is read back from the server.`,
+      );
+      runs.reload();
+      return;
+    }
+    if (pending.kind === "retry") {
+      const resumed = await action.run(() => resumeAnalysisRun(pending.run.id));
+      if (!resumed) return;
+      setPending(null);
+      // A resume reserves a NEW run; saying "retried" without saying that
+      // would leave the operator looking for the old id to change status.
+      setNotice(
+        `Retry accepted. The server started a new run resumed from ${pending.run.id.slice(0, 8)}; the failed run stays as it is.`,
+      );
+      runs.reload();
+      return;
+    }
+    const saved = await action.run(() => upsertScanPolicy(source.id, pending.body));
+    if (!saved) return;
+    setPending(null);
+    setEditing(false);
+    setNotice(pending.creating ? "Scan policy created." : "Scan policy updated.");
+    policy.reload();
+  }, [action, onSourceChanged, pending, policy, runs, source.id]);
+
+  const confirmTitle =
+    pending?.kind === "test"
+      ? "Test this connection"
+      : pending?.kind === "scan"
+        ? "Start a scan now"
+        : pending?.kind === "retry"
+          ? "Retry this run"
+          : pending?.kind === "policy"
+            ? pending.creating
+              ? "Create this scan policy"
+              : "Replace this scan policy"
+            : "";
+
+  const confirmDescription =
+    pending?.kind === "test"
+      ? `Opens a live connection to ${source.name} using its stored credential and rewrites its status: CONNECTION_VERIFIED if the probe succeeds, CONNECTION_FAILED if it does not. A failing source is not scanned.`
+      : pending?.kind === "scan"
+        ? pending.mode === "FULL"
+          ? `Re-reads every object in ${source.name} from scratch. A full scan costs the connector more than an incremental one and may be refused while another run is in flight.`
+          : `Scans ${source.name} for what has changed since its last successful run. May be refused while another run is in flight.`
+        : pending?.kind === "retry"
+          ? `Starts a NEW run resumed from the ${pending.run.status.toLowerCase()} one, with the same mode and priority. The failed run is kept as it is — nothing is rewritten.`
+          : pending?.kind === "policy"
+            ? pending.creating
+              ? `Schedules ${source.name} to be scanned ${intervalWords(pending.body.interval_minutes)} from now on.`
+              : `Replaces the whole schedule for ${source.name}. Every field below is sent, including the ones you did not change.`
+            : undefined;
+
+  return (
+    <section className="srcadmin" aria-labelledby="srcadmin-heading">
+      <div className="evp__sub" id="srcadmin-heading">Source administration</div>
+
+      {/* ------------------------------------------------ connection -------- */}
+      <div className="srcadmin__block">
+        <div className="srcadmin__blockhead">
+          <h3 className="srcadmin__h3">Connection</h3>
+          <Pill tone={connectionTone(source.status)}>{source.status.toLowerCase().replace(/_/g, " ")}</Pill>
+        </div>
+        <p className="srcadmin__note">
+          The status beside this heading is what the fleet endpoint reports, not the result of the
+          last button pressed here.
+        </p>
+        <div className="srcadmin__actions">
+          <Button disabled={!mayTest || action.submitting} onClick={() => setPending({ kind: "test" })}>
+            Test connection
+          </Button>
+          {mayTest ? null : (
+            <span className="srcadmin__denied">
+              Testing a connection requires Data Admin or Platform Admin.
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ------------------------------------------------ scan policy ------- */}
+      <div className="srcadmin__block">
+        <div className="srcadmin__blockhead">
+          <h3 className="srcadmin__h3">Scan policy</h3>
+          {policy.data ? (
+            <Pill tone={policy.data.enabled ? "ok" : "mute"}>
+              {policy.data.enabled ? "scheduled" : "paused"}
+            </Pill>
+          ) : null}
+        </div>
+
+        {policy.error ? (
+          <ErrorState
+            title="Scan policy could not be read"
+            detail={policy.error}
+            onRetry={() => policy.reload()}
+          />
+        ) : policy.loading || policy.data === undefined ? (
+          /* `undefined` is "no answer yet" and `null` is "the server answered
+             404" — two different sentences, and only one of them is "this
+             source is never scanned on a schedule". */
+          <LoadingPanel label="Reading the scan policy…" />
+        ) : policy.data === null ? (
+          <Empty
+            title="This source has no scan policy"
+            hint="It is never scanned on a schedule. Anyone can still start a scan by hand below."
+          />
+        ) : (
+          <dl className="srcadmin__facts">
+            <div>
+              <dt>Interval</dt>
+              <dd>
+                {intervalWords(policy.data.interval_minutes)} · {policy.data.mode.toLowerCase()}
+              </dd>
+            </div>
+            <div>
+              <dt>Maintenance window</dt>
+              <dd>{windowWords(policy.data.maintenance_start_hour_utc, policy.data.maintenance_end_hour_utc)}</dd>
+            </div>
+            <div>
+              <dt>Priority</dt>
+              <dd>
+                {policy.data.base_priority} as set
+                {policy.data.usage_boost_enabled
+                  ? ` · ${policy.data.priority} after a +${policy.data.computed_usage_boost} usage boost`
+                  : " · usage boost off"}
+              </dd>
+            </div>
+            <div>
+              <dt>Next run</dt>
+              <dd>{stamp(policy.data.next_run_at)}</dd>
+            </div>
+            <div>
+              <dt>Last triggered</dt>
+              <dd>{stamp(policy.data.last_triggered_at)}</dd>
+            </div>
+          </dl>
+        )}
+
+        {editing ? (
+          <div className="srcadmin__form" role="group" aria-label="Scan policy">
+            <div className="srcadmin__grid">
+              <Field label="Interval (minutes)">
+                <input
+                  type="number"
+                  min={5}
+                  max={525600}
+                  value={form.intervalMinutes}
+                  onChange={(e) => setField("intervalMinutes", e.target.value)}
+                />
+              </Field>
+              <Field label="Mode">
+                <select
+                  value={form.mode}
+                  onChange={(e) => setField("mode", e.target.value as "FULL" | "INCREMENTAL")}
+                >
+                  <option value="INCREMENTAL">incremental</option>
+                  <option value="FULL">full</option>
+                </select>
+              </Field>
+              <Field label="Priority (0–100)">
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={form.priority}
+                  onChange={(e) => setField("priority", e.target.value)}
+                />
+              </Field>
+              <Field label="Window start hour (UTC)">
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  placeholder="any"
+                  value={form.windowStart}
+                  onChange={(e) => setField("windowStart", e.target.value)}
+                />
+              </Field>
+              <Field label="Window end hour (UTC)">
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  placeholder="any"
+                  value={form.windowEnd}
+                  onChange={(e) => setField("windowEnd", e.target.value)}
+                />
+              </Field>
+              <Field label="Next run at (optional)">
+                <input
+                  type="datetime-local"
+                  value={form.startAt}
+                  onChange={(e) => setField("startAt", e.target.value)}
+                />
+              </Field>
+            </div>
+            <label className="srcadmin__check">
+              <input
+                type="checkbox"
+                checked={form.enabled}
+                onChange={(e) => setField("enabled", e.target.checked)}
+              />
+              <span>Scheduled — the scheduler may start runs for this source</span>
+            </label>
+            <label className="srcadmin__check">
+              <input
+                type="checkbox"
+                checked={form.usageBoostEnabled}
+                onChange={(e) => setField("usageBoostEnabled", e.target.checked)}
+              />
+              <span>Let usage raise this source&rsquo;s priority above the value set here</span>
+            </label>
+            <p className="srcadmin__note">
+              Saving replaces the whole policy — every field above is sent, including the ones you
+              did not touch. Leave &ldquo;next run at&rdquo; empty to keep the schedule where it is.
+            </p>
+            {formError ? (
+              <p className="srcadmin__err" role="alert">
+                {formError}
+              </p>
+            ) : null}
+            <div className="srcadmin__actions">
+              <Button variant="primary" disabled={action.submitting} onClick={askToSave}>
+                {policy.data ? "Save scan policy" : "Create scan policy"}
+              </Button>
+              <Button
+                disabled={action.submitting}
+                onClick={() => {
+                  setEditing(false);
+                  setFormError(null);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="srcadmin__actions">
+            <Button disabled={!mayScan || policy.loading} onClick={openEditor}>
+              {policy.data ? "Edit scan policy" : "Create a scan policy"}
+            </Button>
+            {mayScan ? null : (
+              <span className="srcadmin__denied">
+                Changing a schedule requires Data Admin, Metadata Admin or Platform Admin.
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ------------------------------------------------ discovery scope --- */}
+      <DiscoveryScope source={source} mayEdit={mayScan} />
+
+      {/* ------------------------------------------------ runs -------------- */}
+      <div className="srcadmin__block">
+        <div className="srcadmin__blockhead">
+          <h3 className="srcadmin__h3">Scans</h3>
+        </div>
+
+        <div className="srcadmin__actions">
+          <Field label="Mode">
+            <select
+              value={scanMode}
+              onChange={(e) => setScanMode(e.target.value as "FULL" | "INCREMENTAL")}
+            >
+              <option value="INCREMENTAL">incremental</option>
+              <option value="FULL">full</option>
+            </select>
+          </Field>
+          <Button
+            variant="primary"
+            disabled={!mayScan || action.submitting}
+            onClick={() => setPending({ kind: "scan", mode: scanMode })}
+          >
+            Re-scan now
+          </Button>
+          {retryable ? (
+            <Button
+              disabled={!mayScan || action.submitting}
+              onClick={() => setPending({ kind: "retry", run: retryable })}
+              title={`Resume the ${retryable.status.toLowerCase()} run from ${stamp(retryable.updated_at)}`}
+            >
+              Retry the {retryable.status.toLowerCase()} run
+            </Button>
+          ) : null}
+        </div>
+
+        {runs.error ? (
+          <ErrorState
+            title="Scan history could not be read"
+            detail={runs.error}
+            onRetry={() => runs.reload()}
+          />
+        ) : runs.loading ? (
+          <LoadingPanel label="Reading scan history…" />
+        ) : (runs.data?.length ?? 0) === 0 ? (
+          <Empty
+            title="This source has never been scanned"
+            hint="Start one above; nothing reaches the catalog until a scan completes."
+          />
+        ) : (
+          <ol className="srcadmin__runs">
+            {runs.data!.map((run) => (
+              <li key={run.id} className="srcadmin__run" aria-label={`${run.mode} run ${run.id}`}>
+                <div className="srcadmin__runhead">
+                  <Pill tone={runTone(run.status)}>{run.status.toLowerCase().replace(/_/g, " ")}</Pill>
+                  <Pill tone="mute">{run.mode.toLowerCase()}</Pill>
+                  <Pill tone="mute">{run.trigger_type.toLowerCase()}</Pill>
+                  <span className="srcadmin__runtime">{stamp(run.updated_at)}</span>
+                </div>
+                <div className="srcadmin__runmeta">
+                  {run.discovered_tables} tables discovered · {run.created_objects} created ·{" "}
+                  {run.changed_objects} changed
+                  {run.excluded_objects ? ` · ${run.excluded_objects} left out by the discovery scope` : ""}
+                  {run.resumed_from_run_id ? ` · resumed from ${run.resumed_from_run_id.slice(0, 8)}` : ""}
+                </div>
+                {receiptWords(run.discovery_receipt) ? (
+                  <div className="srcadmin__runmeta">{receiptWords(run.discovery_receipt)}</div>
+                ) : null}
+                {run.error_message ? (
+                  <div className="srcadmin__runerr" role="alert">
+                    {run.error_class ? <b>{run.error_class}: </b> : null}
+                    {run.error_message}
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
+      {notice ? (
+        <p className="srcadmin__notice" role="status">
+          {notice}
+        </p>
+      ) : null}
+
+      {pending ? (
+        <ConfirmDialog
+          title={confirmTitle}
+          description={confirmDescription}
+          confirmLabel={
+            pending.kind === "test"
+              ? "Run the test"
+              : pending.kind === "scan"
+                ? "Start the scan"
+                : pending.kind === "retry"
+                  ? "Retry the run"
+                  : pending.creating
+                    ? "Create policy"
+                    : "Replace policy"
+          }
+          destructive={pending.kind !== "test"}
+          busy={action.submitting}
+          /* The dialog stays open on a refusal, holding the server's own
+             sentence, because that sentence IS the answer: "only interrupted
+             or failed runs can resume" and a run-admission rejection send an
+             operator to two different places. */
+          error={action.error}
+          onCancel={() => {
+            setPending(null);
+            action.reset();
+          }}
+          onConfirm={() => void confirmed()}
+        />
+      ) : null}
+    </section>
+  );
+}

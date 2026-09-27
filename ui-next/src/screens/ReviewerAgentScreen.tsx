@@ -4,11 +4,14 @@ import type {
   DisagreementReportRead,
   ReviewAuditSampleRead,
   ReviewerAgentStateRead,
+  RiskTierDisagreementRateRead,
+  SampleDownstreamImpactRead,
 } from "../lib/types";
 import {
   ApiError,
   fetchDisagreementRates,
   fetchReviewerAgentSamples,
+  fetchSampleDownstreamImpact,
   fetchReviewerAgentState,
   resolveAuditSample,
   resumeReviewerAgent,
@@ -41,7 +44,10 @@ import "./ReviewerAgentScreen.css";
      2. manual triggers for pre-review and the actual auto-decide run, each
         showing the real counts the endpoint returned;
      3. the disagreement-rate report — ADR-0027's 5% revisit trigger, as a
-        number per object type, reporting only, never suspending by itself;
+        number per object type, reporting only, never suspending by itself —
+        with the same samples by risk tier (AR-11: only approvals are
+        sampled, so that is the sampled false-approval rate) and how long
+        the sample waits for a human verdict;
      4. the sampled-decision audit queue, where a human resolves one sampled
         auto-decision at a time with a mandatory rationale.
 --------------------------------------------------------------------------- */
@@ -53,6 +59,13 @@ const SAMPLES_LIMIT = 20;
 
 function percent(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;
+}
+
+/** A duration in hours as a person would say it: hours up to two days, then days. */
+function hours(value: number | null): string {
+  if (value === null) return "—";
+  if (value < 48) return `${Number(value.toFixed(1))}h`;
+  return `${Math.round(value / 24)}d`;
 }
 
 function relative(iso: string): string {
@@ -107,6 +120,104 @@ function DisagreementRow({ row }: { row: DisagreementRateRead }) {
   );
 }
 
+function TierRow({ row }: { row: RiskTierDisagreementRateRead }) {
+  return (
+    <li className="revagent__row">
+      <span className="revagent__rowhead">
+        <Pill tone={tierTone(row.risk_tier)}>{row.risk_tier}</Pill>
+        {!row.sufficient_sample && <Pill tone="mute">insufficient sample</Pill>}
+      </span>
+      <span className="revagent__meta">
+        <span>resolved {row.resolved}</span>
+        <span>disagreed {row.disagreed}</span>
+        <span>pending {row.pending}</span>
+        <span>
+          false-approval rate <b>{percent(row.disagreement_rate)}</b>
+        </span>
+      </span>
+    </li>
+  );
+}
+
+const BASIS_LABEL: Record<string, string> = {
+  EXACT_VERSION: "cited the exact version",
+  ASSET_IN_CONTEXT: "consulted the asset",
+};
+const IMPACT_SHOWN = 10;
+
+/* R11-C8: a correction undoes the catalog change; this is where an owner sees
+   the answers it cannot undo -- the runs that cited or consulted what the
+   disputed decision changed while it stood. Loaded on request, not with the
+   queue: it scans runs, and most samples are never disputed. */
+function SampleImpact({ sampleId }: { sampleId: string }) {
+  const organizationId = useOrgId();
+  const [impact, setImpact] = useState<SampleDownstreamImpactRead | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setImpact(await fetchSampleDownstreamImpact(organizationId, sampleId));
+    } catch (err: unknown) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [organizationId, sampleId]);
+
+  if (impact === null) {
+    return (
+      <span className="revagent__impact">
+        <Button disabled={busy} onClick={() => void load()}>
+          {busy ? "Checking answers…" : "Answers that relied on it"}
+        </Button>
+        {error && (
+          <span className="revagent__impacterror" role="alert">
+            {error}
+          </span>
+        )}
+      </span>
+    );
+  }
+  if (!impact.reaches_answers) {
+    return (
+      <span className="revagent__impact" role="status">
+        This change cannot reach an answer: nothing an answer consults carries ownership.
+      </span>
+    );
+  }
+  const count = impact.affected_runs.length;
+  return (
+    <span className="revagent__impact" role="status">
+      <span>
+        <b>
+          {count} {count === 1 ? "answer" : "answers"}
+        </b>{" "}
+        {impact.window_end ? "relied on it while it stood" : "relied on it so far — the change still stands"} ·{" "}
+        {impact.scanned_runs} scanned{impact.truncated ? ", later runs not scanned" : ""}
+      </span>
+      {count > 0 && (
+        <ul className="revagent__impactlist">
+          {impact.affected_runs.slice(0, IMPACT_SHOWN).map((run) => (
+            <li key={run.agent_run_id}>
+              <a href={`?run=${encodeURIComponent(run.agent_run_id)}#/analyst`}>
+                Answer {run.agent_run_id.slice(0, 8)}
+              </a>
+              <span className="revagent__muted">
+                {run.principal_id} · {relative(run.created_at)} ·{" "}
+                {run.bases.map((basis) => BASIS_LABEL[basis] ?? basis.toLowerCase()).join(", ")}
+              </span>
+            </li>
+          ))}
+          {count > IMPACT_SHOWN && <li className="revagent__muted">and {count - IMPACT_SHOWN} more</li>}
+        </ul>
+      )}
+    </span>
+  );
+}
+
 function SampleRow({
   sample,
   onResolve,
@@ -125,8 +236,12 @@ function SampleRow({
       <span className="revagent__meta">
         <span>by {sample.agent_principal_id}</span>
         <span>{relative(sample.sampled_at)}</span>
+        <a href={`?review=${encodeURIComponent(sample.governance_review_id)}#/governance`}>
+          Open the review
+        </a>
         {sample.human_rationale && <span className="revagent__muted">{sample.human_rationale}</span>}
       </span>
+      {sample.human_outcome === "DISAGREED" && <SampleImpact sampleId={sample.sample_id} />}
       {sample.human_outcome === "PENDING" && (
         <span className="revagent__actions">
           <Button onClick={() => onResolve(sample, "AGREED")}>Agree</Button>
@@ -375,6 +490,9 @@ export function ReviewerAgentScreen() {
                   {state.suspended ? "suspended" : "active"}
                 </Pill>
                 <Pill tone={tierTone(state.max_tier)}>max tier {state.max_tier}</Pill>
+                {state.audit_backlog_exceeded && (
+                  <Pill tone="bad">stopped: audit sample unread</Pill>
+                )}
               </div>
               <dl className="revagent__facts">
                 <div>
@@ -384,6 +502,14 @@ export function ReviewerAgentScreen() {
                 <div>
                   <dt>Acts as</dt>
                   <dd className="revagent__mono">{state.agent_principal_id}</dd>
+                </div>
+                <div>
+                  <dt>Unread audit sample</dt>
+                  <dd>
+                    {state.max_unresolved_samples > 0
+                      ? `${state.unresolved_samples} of ${state.max_unresolved_samples}`
+                      : `${state.unresolved_samples} (no bound)`}
+                  </dd>
                 </div>
               </dl>
               <div className="revagent__actions">
@@ -457,11 +583,34 @@ export function ReviewerAgentScreen() {
               hint="This is not evidence the reviewer agent is performing well — it means no sampled decision has a human verdict yet."
             />
           ) : disagreement ? (
-            <ul className="revagent__list">
-              {disagreement.by_object_type.map((row) => (
-                <DisagreementRow key={row.object_type} row={row} />
-              ))}
-            </ul>
+            <>
+              <ul className="revagent__list">
+                {disagreement.by_object_type.map((row) => (
+                  <DisagreementRow key={row.object_type} row={row} />
+                ))}
+              </ul>
+              <h3 className="revagent__subhead">By risk tier</h3>
+              <ul className="revagent__list">
+                {disagreement.by_risk_tier.map((row) => (
+                  <TierRow key={row.risk_tier} row={row} />
+                ))}
+              </ul>
+              <h3 className="revagent__subhead">Time to a human verdict</h3>
+              <dl className="revagent__facts">
+                <div>
+                  <dt>Median</dt>
+                  <dd>{hours(disagreement.resolution.median_hours)}</dd>
+                </div>
+                <div>
+                  <dt>90th percentile</dt>
+                  <dd>{hours(disagreement.resolution.p90_hours)}</dd>
+                </div>
+                <div>
+                  <dt>Oldest unread</dt>
+                  <dd>{hours(disagreement.resolution.oldest_pending_hours)}</dd>
+                </div>
+              </dl>
+            </>
           ) : null}
         </div>
       </section>

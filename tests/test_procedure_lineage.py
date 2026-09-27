@@ -26,7 +26,7 @@ from aida.procedure_lineage import (
 
 
 def test_tsql_procedure_with_control_flow_is_not_silently_truncated() -> None:
-    # sql_lineage_parser.parse_procedure_lineage (AT-D5) hands this whole
+    # sql_lineage_parser.parse_view_lineage (AT-D5) hands this whole
     # body to a single sqlglot.parse call, which falls back to an opaque
     # Command node at the first unsupported token (the IF/BEGIN) and drops
     # everything after it -- proven directly against that module below.
@@ -100,10 +100,16 @@ def test_tsql_procedure_with_control_flow_is_not_silently_truncated() -> None:
 
 
 def test_the_generic_flat_parser_silently_truncates_the_same_body() -> None:
-    """Pins AT-D5's exact defect so a future change to the generic parser
-    that accidentally "fixes" this without anyone noticing doesn't silently
-    make this module's own docstring claims stale."""
-    from aida.sql_lineage_parser import parse_procedure_lineage as generic_parse
+    """Pins AT-D5's exact defect so a future change to the flat parser that
+    accidentally "fixes" this without anyone noticing doesn't silently make
+    this module's own docstring claims stale.
+
+    R11-X5 removed `sql_lineage_parser.parse_procedure_lineage`, which was a
+    second name for `parse_view_lineage` and is what this test used to call.
+    The defect it pins is the flat parser's, not that alias's, so the test
+    now calls the surviving function directly.
+    """
+    from aida.sql_lineage_parser import parse_view_lineage as flat_parse
 
     sql = """
     CREATE PROCEDURE dbo.usp_x AS
@@ -114,8 +120,8 @@ def test_the_generic_flat_parser_silently_truncates_the_same_body() -> None:
         END
     END
     """
-    result = generic_parse(sql, dialect="tsql")
-    assert result.edges == []  # the INSERT is invisible to the generic parser
+    result = flat_parse(sql, dialect="tsql")
+    assert result.edges == []  # the INSERT is invisible to the flat parser
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +341,43 @@ def test_tsql_update_from_resolves_the_alias_target_through_the_from_clause() ->
     assert ("dbo.staging", "total", "dbo.totals", "total") in edges
     filtered = [e for e in result.edges if e.transformation_type == "FILTERED"]
     assert any(e.source_table == "dbo.staging" and e.source_column == "ready" for e in filtered)
+
+
+def test_a_where_subquerys_alias_does_not_shadow_the_target() -> None:
+    # R11-FP07, "also noticed" 2026-09-20: `_collect_table_aliases_with_temp`
+    # used to walk the *entire* statement with one `find_all(exp.Table)`, so a
+    # WHERE subquery reusing the outer alias overwrote it in that one flat
+    # map. Here the EXISTS subquery's own `dbo.other t` silently became both
+    # the UPDATE's target and `t.qty`'s source, though the statement never
+    # writes `dbo.other` and reads it only inside its own EXISTS.
+    sql = (
+        "CREATE PROCEDURE dbo.usp_x AS BEGIN "
+        "UPDATE t SET t.total = t.qty * 2 "
+        "FROM dbo.totals t "
+        "WHERE t.id IN (SELECT s.id FROM dbo.staging s) "
+        "AND EXISTS (SELECT 1 FROM dbo.other t WHERE t.flag = 1); END"
+    )
+    result = parse_procedure_lineage(sql, dialect="tsql")
+    assert result.is_fully_parsed is True
+    edges = {
+        (e.source_table, e.source_column, e.target_table, e.target_column, e.transformation_type)
+        for e in result.edges
+    }
+    assert ("dbo.totals", "qty", "dbo.totals", "total", "DERIVED") in edges
+    # The EXISTS subquery's own alias stays local to it -- `t.flag` still
+    # reads `dbo.other`, the table it is actually declared against inside the
+    # subquery -- but every edge's target is the statement's real target.
+    filtered = {
+        (e.source_table, e.source_column)
+        for e in result.edges
+        if e.transformation_type == "FILTERED"
+    }
+    assert {("dbo.totals", "id"), ("dbo.staging", "id"), ("dbo.other", "flag")} <= filtered
+    assert all(
+        e.target_table == "dbo.totals"
+        for e in result.edges
+        if e.transformation_type == "FILTERED"
+    )
 
 
 def test_delete_is_a_write_even_with_no_column_level_edges() -> None:

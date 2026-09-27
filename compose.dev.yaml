@@ -21,8 +21,10 @@ services:
       CHOKIDAR_USEPOLLING: "true"
       VITE_API_PROXY_TARGET: http://api:8000
     # Replace the production image's 3001:80 mapping while this service runs
-    # Vite directly on 5174.
-    ports: !reset
+    # Vite directly on 5174. `!override`, not `!reset`: `!reset` empties the
+    # list and discards the entry below it, so the overlay published no ports
+    # at all and the documented http://localhost:5174 was unreachable.
+    ports: !override
       - "5174:5174"
     volumes:
       - ./ui-next:/app

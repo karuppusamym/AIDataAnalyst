@@ -121,3 +121,7 @@ Consumes catalog, relationship, semantic, lineage, tool, and quality events. Emi
 | KG-5 | Saved perspectives per persona | P2 |
 | KG-6 | Rebuild timing drill and published SLO | P0 |
 | KG-7 | Scheduled reconciliation with alerting | P1 |
+
+KG-5 was once part-built as a persistence-only API (`graph_perspectives_api.py`, five routes
+and a `graph_perspective` table) with no screen behind it. R11-X5 removed it on 2026-09-11
+rather than leave an unreachable surface; the item is open, not partly done.

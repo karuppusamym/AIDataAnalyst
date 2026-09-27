@@ -1,7 +1,8 @@
 import { navigateTo } from "../lib/navigate";
 import { useState } from "react";
-import { fetchOrgDatasources, fetchTablesLegacy, get, postJson, putJson } from "../lib/api";
-import type { DataSourceRead, SemanticModelVersionRead, SemanticMetricVersionRead } from "../lib/types";
+import { fetchTablesLegacy, get, postJson, putJson } from "../lib/api";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
+import type { SemanticModelVersionRead, SemanticMetricVersionRead } from "../lib/types";
 import type { MetadataTableRead } from "../lib/ui-types";
 import { Button, Field } from "./primitives";
 
@@ -15,8 +16,18 @@ export function SemanticAuthor({ org, projectId, models, onSaved }: {
   const [tables, setTables] = useState<MetadataTableRead[]>([]);
   const [columns, setColumns] = useState<{ id: string; name: string }[]>([]);
   const [query, setQuery] = useState("");
-  const [sources, setSources] = useState<DataSourceRead[]>([]);
   const [sourceId, setSourceId] = useState("");
+  /* A metric is defined against a source in THIS delivery project, so the
+     list is the tenant's narrowed by `project_id` -- the same rule legacy's
+     `populateProjectSources` applied. Deferred until the panel is opened,
+     which is what the `onToggle` fetch this replaced was for. */
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const { datasources, error: sourcesError } = useDatasourcePicker(org, {
+    reach: "organization",
+    enabled: pickerOpen,
+    selectedId: sourceId,
+  });
+  const sources = datasources.filter((s) => s.project_id === projectId);
   const [editableMetrics, setEditableMetrics] = useState<SemanticMetricVersionRead[]>([]);
   const [editing, setEditing] = useState<SemanticMetricVersionRead | null>(null);
   const [metric, setMetric] = useState({ slug: "", name: "", description: "", aggregation: "COUNT", grain: "", source_table_id: "", measure_column_id: "", default_time_column_id: "", allowed_dimension_column_ids: [] as string[] });
@@ -24,7 +35,7 @@ export function SemanticAuthor({ org, projectId, models, onSaved }: {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const run = async (action: () => Promise<void>) => { setBusy(true); setMessage(""); try { await action(); } catch (e) { setMessage((e as Error).message); } finally { setBusy(false); } };
-  return <details className="workflow-author" onToggle={e => { if (e.currentTarget.open) void run(async () => setSources((await fetchOrgDatasources(org)).items.filter(s => s.project_id === projectId))); }}><summary>Create definitions and review metric suggestions</summary>
+  return <details className="workflow-author" onToggle={e => { if (e.currentTarget.open) setPickerOpen(true); }}><summary>Create definitions and review metric suggestions</summary>
     <p>Business annotations describe meaning. Semantic models define reusable measures and aggregations. Create a draft, add metrics, then submit the model for independent review.</p>
     <Field label="Model name"><input value={name} onChange={e => setName(e.target.value)} /></Field>
     <Field label="Change summary"><input value={summary} onChange={e => setSummary(e.target.value)} /></Field>
@@ -91,7 +102,7 @@ export function SemanticAuthor({ org, projectId, models, onSaved }: {
         await postJson(`/v1/metric-suggestions/${s.id}/submit`, {}); setSuggestions(prev => prev.map(x => x.id === s.id ? { ...x, status: "PENDING_APPROVAL" } : x)); setMessage("Suggestion submitted for review.");
       })}>Submit suggestion for review</Button> : null}
     </article>)}
-    {message ? <p role="status">{message}</p> : null}
+    {message || sourcesError ? <p role="status">{message || sourcesError}</p> : null}
   </details>;
 }
 
@@ -114,17 +125,24 @@ export function BusinessGeneration({
    *  only one and stays. */
   externallyScoped?: boolean;
 }) {
-  const [sources, setSources] = useState<DataSourceRead[]>([]);
   const [selected, setSelected] = useState(datasourceId ?? "");
   const source = datasourceId || selected;
   const showOwnPicker = !externallyScoped;
+  /* Only fetched when this component owns the picker: when the caller already
+     has one, the list would be built and never rendered. */
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const { datasources: sources, error: sourcesError } = useDatasourcePicker(org, {
+    reach: "organization",
+    enabled: pickerOpen && showOwnPicker,
+    selectedId: selected,
+  });
   const [model, setModel] = useState(false);
   const [proposals, setProposals] = useState<BusinessProposal[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const run = async (action: () => Promise<void>) => { setBusy(true); setMessage(""); try { await action(); } catch (e) { setMessage((e as Error).message); } finally { setBusy(false); } };
   const load = async () => { setProposals((await get<{ items: BusinessProposal[] }>(`/v1/datasources/${source}/metadata-enrichment-proposals?limit=100`)).items); };
-  return <details className="workflow-author" onToggle={e => { if (e.currentTarget.open && showOwnPicker) void run(async () => setSources((await fetchOrgDatasources(org)).items)); }}>
+  return <details className="workflow-author" onToggle={e => { if (e.currentTarget.open) setPickerOpen(true); }}>
     <summary>Generate business meaning and reusable tool blueprints</summary>
     <p>Completed scans automatically propose business meaning. Generate again on demand, review the evidence, then promote an approved blueprint into a draft tool. Publication needs a separate tool review.</p>
     {showOwnPicker ? (
@@ -144,6 +162,6 @@ export function BusinessGeneration({
         await postJson(`/v1/metadata-enrichment-proposals/${p.id}/promote-tool`, {}); await load(); setMessage("Draft tool created. Open Tool registry to inspect and submit it for review.");
       })}>Create draft tool from blueprint</Button> : null}
     </article>)}
-    {message ? <p role="status">{message}</p> : null}
+    {message || sourcesError ? <p role="status">{message || sourcesError}</p> : null}
   </details>;
 }

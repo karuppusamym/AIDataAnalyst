@@ -32,7 +32,8 @@ export interface AccessPolicyCreate {
   status?: "DRAFT" | "ACTIVE";
 }
 
-export interface AccessPolicyRead {
+/** R11-AUD02: what `POST /v1/organizations/{id}/access-policies` answers. */
+export interface AccessPolicyProposalRead {
   id: string;
   organization_id: string;
   code: string;
@@ -51,6 +52,17 @@ export interface AccessPolicyRead {
   created_by: string;
   created_at: string;
   updated_at: string;
+  governance_review_id: string;
+}
+
+export interface AffectedRunRead {
+  agent_run_id: string;
+  created_at: string;
+  datasource_id: string;
+  principal_id: string;
+  status: string;
+  bases: string[];
+  matched_object_ids: string[];
 }
 
 export interface AgentAnalysisRequest {
@@ -59,12 +71,16 @@ export interface AgentAnalysisRequest {
   preferred_tool_version_id?: string | null;
   tool_parameters?: Record<string, unknown>;
   max_rows?: number | null;
+  context_product_key?: string | null;
+  conversation_id?: string | null;
 }
 
 export interface AgentAnalysisResponse {
   agent_run_id: string;
   status: string;
   generation_source: string;
+  conversation_id?: string | null;
+  conversation_turn?: number | null;
   semantic_version: string | null;
   policy_version: string;
   step_trace: Record<string, unknown>[];
@@ -267,7 +283,7 @@ export interface AgentRunGroundingReceiptsRead {
 
 /** One recent `AgentRun`'s outcome -- the "live results" half of this */
 export interface AgentRunOutcomeRead {
-  run_id: string;
+  run_id: string | null;
   status: string;
   strategy: string | null;
   confidence: number | null;
@@ -349,7 +365,7 @@ export interface AiAssetCreate {
   evaluation_evidence?: Record<string, unknown>;
   runtime_evidence?: Record<string, unknown>;
   asset_key: string;
-  asset_kind: "AI_USE_CASE" | "MODEL" | "AGENT";
+  asset_kind: "AI_USE_CASE" | "MODEL" | "AGENT" | "PROMPT";
 }
 
 export interface AiAssetDefinition {
@@ -510,6 +526,9 @@ export interface AnalysisRunRead {
   created_objects: number;
   changed_objects: number;
   deprecated_objects: number;
+  discovery_selection_fingerprint?: string | null;
+  excluded_objects?: number;
+  discovery_receipt?: Record<string, unknown> | null;
   profiled_tables: number;
   profiled_columns: number;
   error_class: string | null;
@@ -692,6 +711,15 @@ export interface AssetTermLinkRead {
   created_at: string;
 }
 
+export interface AuditResolutionTimeRead {
+  resolved: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  max_hours: number | null;
+  pending: number;
+  oldest_pending_hours: number | null;
+}
+
 export interface AuthorizationProbeRead {
   allowed: boolean;
   reason_code: string;
@@ -866,6 +894,9 @@ export interface BulkStewardshipOperationRead {
   applied_by: string | null;
   applied_at: string | null;
   applied_count: number;
+  applied_subject_ids: string[];
+  reverses_operation_id: string | null;
+  review_audit_sample_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -977,6 +1008,7 @@ export interface CapabilityEnvelopeModel {
   tool_slugs?: string[];
   context_product_ids?: string[];
   write_lanes?: string[];
+  native_tools?: string[];
 }
 
 export interface CatalogBulkActionItemRead {
@@ -1062,6 +1094,73 @@ export interface CertificationRevokeRequest {
   column_id?: string | null;
 }
 
+/** Full evidence and diff for one row, fetched on demand when a reviewer opens it. */
+export interface ChangeQueueDetailRead {
+  item: ChangeQueueItemRead;
+  evidence: EvidenceItemRead[];
+  diff: GovernanceReviewDiffRead | null;
+}
+
+export interface ChangeQueueDetailsRead {
+  items: ChangeQueueDetailRead[];
+}
+
+export interface ChangeQueueFilterRead {
+  status: string | null;
+  object_types: string[];
+  families: string[];
+  change_kinds: string[];
+  object_id: string | null;
+  table_id: string | null;
+  decidable_only: boolean;
+}
+
+/** One queue row: enough to triage and select it, not its full evidence. */
+export interface ChangeQueueItemRead {
+  review_id: string;
+  object_type: string;
+  object_id: string;
+  review_family: string;
+  change_kind: string;
+  status: string;
+  requested_by: string;
+  created_at: string;
+  risk_tier: string;
+  confidence: number | null;
+  diffable: boolean;
+  evidence_count: number;
+  evidence_preview: EvidenceItemRead[];
+  evidence_fingerprint: string;
+  decide_blocker: string | null;
+  approve_gate: string | null;
+  approve_evidence_required: string[];
+  approve_evidence_missing: string[];
+  target_unavailable: boolean;
+}
+
+export interface ChangeQueuePageRead {
+  organization_id: string;
+  filters: ChangeQueueFilterRead;
+  generated_at: string;
+  limit: number;
+  next_cursor: string | null;
+  total: number | null;
+  items: ChangeQueueItemRead[];
+}
+
+export interface ChangeSignalRead {
+  id: string;
+  analysis_run_id: string | null;
+  subject_kind: string;
+  subject_id: string;
+  signal_type: string;
+  change_class: string | null;
+  related_subject_id: string | null;
+  status: string;
+  detected_at: string;
+  processed_at: string | null;
+}
+
 export interface ClassificationDecisionRead {
   classification: string;
   decision: string;
@@ -1091,6 +1190,65 @@ export interface ClassificationFeedRecord {
   note?: string | null;
 }
 
+export interface ColumnDescriptionDraftBulkSubmitResult {
+  submitted_review_ids: string[];
+  skipped_below_threshold: number;
+}
+
+export interface ColumnDescriptionDraftEdit {
+  drafted_text: string;
+  expected_text: string;
+}
+
+/** Draft descriptions for the columns of up to 50 tables at once. */
+export interface ColumnDescriptionDraftGenerate {
+  table_ids: string[];
+  include_described?: boolean;
+  model_assist?: boolean;
+}
+
+/** What a generation call did, and each thing it deliberately did not do. */
+export interface ColumnDescriptionDraftGenerateResult {
+  drafts: ColumnDescriptionDraftRead[];
+  created: number;
+  skipped_open: number;
+  skipped_described: number;
+  skipped_duplicate_rejected: number;
+  below_review_threshold: number;
+  tables_skipped: number;
+  model_drafted?: number;
+  model_fallbacks?: number;
+  model_withheld?: number;
+  replaced_thin_drafts?: number;
+  model_note?: string | null;
+}
+
+export interface ColumnDescriptionDraftRead {
+  id: string;
+  organization_id: string;
+  table_id: string;
+  table_name: string;
+  column_id: string;
+  column_name: string;
+  drafted_text: string;
+  accuracy_score: number;
+  clarity_score: number;
+  style_score: number;
+  completeness_score: number;
+  overall_score: number;
+  reviewable: boolean;
+  evidence: Record<string, unknown>;
+  status: string;
+  base_description_version: number | null;
+  governance_review_id: string | null;
+  published_version_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ColumnProfileRead {
   column_id: string;
   column_name: string;
@@ -1100,6 +1258,18 @@ export interface ColumnProfileRead {
   approximate_distinct_count: number;
   min_length: number | null;
   max_length: number | null;
+  distinct_ratio?: number | null;
+  effectively_unique?: boolean | null;
+  cardinality_class?: string | null;
+  blank_count?: number | null;
+  whitespace_only_count?: number | null;
+  length_bucket_scheme?: string | null;
+  length_bucket_counts?: number[] | null;
+  frequency_entropy_bits?: number | null;
+  unavailable_facets?: ProfileFacetStatusRead[];
+  facets_withheld?: boolean;
+  withheld_marker?: string | null;
+  withheld_reason_code?: string | null;
 }
 
 export interface CompliancePackRead {
@@ -1128,9 +1298,13 @@ export interface CompositeKeyCandidateRead {
   organization_id: string;
   datasource_id: string;
   table_id: string;
+  table_profile_id: string | null;
   column_ids: string[];
+  column_names: string[];
+  column_count: number;
   detection_rule: string;
   confidence: number;
+  estimated_distinctness_ratio: number;
   evidence: Record<string, unknown>;
   status: string;
   created_by: string;
@@ -1172,6 +1346,22 @@ export interface CompositeRelationshipCandidateRead {
   updated_at: string;
 }
 
+export interface Concept {
+  key: string;
+  name: string;
+  description: string;
+  aliases?: string[];
+  deprecated?: boolean;
+}
+
+/** Why one capability flag reads as it does (INV-9). */
+export interface ConnectorCapabilityEvidenceRead {
+  claimed: boolean;
+  status?: string | null;
+  tier?: string | null;
+  held?: boolean;
+}
+
 export interface ConnectorCapabilityRead {
   connector_type: string;
   display_name: string;
@@ -1182,6 +1372,7 @@ export interface ConnectorCapabilityRead {
   version: string;
   notes: string;
   capabilities: Record<string, boolean>;
+  capability_evidence?: Record<string, ConnectorCapabilityEvidenceRead>;
 }
 
 export interface ConnectorCertificationRead {
@@ -1293,6 +1484,24 @@ export interface ContextCompilationValidationRead {
   findings: string[];
 }
 
+/** The same reading for every product in a project, so a list can carry it without a click. */
+export interface ContextProductChangesSummaryListRead {
+  project_id: string;
+  generated_at: string;
+  truncated: boolean;
+  items: ContextProductChangesSummaryRead[];
+}
+
+/** R11-FP12: how much of one version's coverage has moved since it was published. */
+export interface ContextProductChangesSummaryRead {
+  product_id: string;
+  version_id: string;
+  version: number;
+  status: string;
+  changed_subjects: number | null;
+  meaning_moved: number;
+}
+
 /** AT-7(b): pin `consumer_principal_id` (the path parameter) to this */
 export interface ContextProductConsumerBindingCreate {
   bound_version_id: string;
@@ -1320,6 +1529,8 @@ export interface ContextProductCreate {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1351,6 +1562,17 @@ export interface ContextProductRead {
   updated_at: string;
 }
 
+/** R11-FP12: one routine a context product draft in this project may name. */
+export interface ContextProductRoutineOptionRead {
+  id: string;
+  datasource_id: string;
+  datasource_name: string;
+  schema_name: string;
+  name: string;
+  routine_type: string;
+  signature: string;
+}
+
 /** Both ADR-0017 SS9 axes for one context product version, composed for an */
 export interface ContextProductScopeRead {
   context_product_version_id: string;
@@ -1373,6 +1595,8 @@ export interface ContextProductVersionCreate {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1391,6 +1615,8 @@ export interface ContextProductVersionRead {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1425,6 +1651,8 @@ export interface ContextProductVersionUpdate {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1446,6 +1674,39 @@ export interface ContractQualityRuleDefinition {
   field_name?: string | null;
   severity?: "INFO" | "WARNING" | "CRITICAL";
   parameters?: Record<string, unknown>;
+}
+
+export interface ConversationRead {
+  id: string;
+  datasource_id: string;
+  title: string;
+  turn_count: number;
+  created_at: string;
+  last_turn_at: string;
+  turns: ConversationTurnRead[];
+}
+
+export interface ConversationSummary {
+  id: string;
+  datasource_id: string;
+  title: string;
+  turn_count: number;
+  created_at: string;
+  last_turn_at: string;
+}
+
+export interface ConversationTurnRead {
+  turn: number;
+  agent_run_id: string | null;
+  question: string;
+  asked_at: string;
+}
+
+export interface CorrectionStateRead {
+  kind: string;
+  correction_id: string;
+  status: string;
+  effective_at: string | null;
 }
 
 export interface CostShowbackRead {
@@ -1744,7 +2005,7 @@ export interface DataQualitySummaryRead {
   last_observed_at: string | null;
   metadata_scan_age_minutes: number | null;
   metadata_scan_status: string;
-  source_freshness_status: "NOT_CONFIGURED";
+  source_freshness_status: "FRESH" | "STALE" | "AWAITING_APPROVAL" | "NOT_CONFIGURED";
 }
 
 export interface DataSourceBulkOnboardItemRead {
@@ -1817,6 +2078,13 @@ export interface DataSourceUpdate {
   enabled?: boolean | null;
   max_concurrency?: number | null;
   network_zone?: string | null;
+}
+
+export interface DatasourceFootprintGapsRead {
+  datasource_id: string;
+  datasource_name: string;
+  gaps: FootprintGapRead[];
+  oldest_pending_signal_minutes?: number | null;
 }
 
 export interface DbtArtifactImportRead {
@@ -1900,7 +2168,7 @@ export interface DbtProjectRead {
   updated_at: string;
 }
 
-/** One edge from the procedure-aware parser (N3) -- richer than */
+/** One edge from the procedure-aware parser (N3) -- richer than a flat */
 export interface DeepProcedureLineageEdgeRead {
   source_table: string;
   source_column: string;
@@ -1916,6 +2184,17 @@ export interface DeepProcedureLineageEdgeRead {
   control_flow_context?: string | null;
   unparsed_reason?: string | null;
   via_temp_table?: string | null;
+  via_routine?: string | null;
+  via_routine_id?: string | null;
+  review_status?: string | null;
+  statement_range?: StatementRangeRead | null;
+  statement_range_status?: string | null;
+  statement_text_digest?: string | null;
+  source_token_range?: TokenRangeRead | null;
+  target_token_range?: TokenRangeRead | null;
+  package_member?: string | null;
+  member_attribution?: string | null;
+  member_routine_id?: string | null;
 }
 
 export interface DeepProcedureLineageParseResponse {
@@ -1928,6 +2207,9 @@ export interface DeepProcedureLineageParseResponse {
   is_fully_parsed: boolean;
   is_read_only: boolean;
   persisted_edge_count?: number;
+  statement_text_digest?: string | null;
+  member_attribution?: string | null;
+  member_fallback_reason?: string | null;
 }
 
 export interface DelegationCreate {
@@ -2015,6 +2297,39 @@ export interface DisagreementReportRead {
   minimum_resolved_for_signal: number;
   breaching_object_types: string[];
   by_object_type: DisagreementRateRead[];
+  by_risk_tier: RiskTierDisagreementRateRead[];
+  resolution: AuditResolutionTimeRead;
+}
+
+/** What discovery takes in. Every list empty means unrestricted. */
+export interface DiscoverySelection {
+  object_kinds?: ("TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "SEQUENCE")[];
+  include_schemas?: string[];
+  exclude_schemas?: string[];
+  include_objects?: string[];
+  exclude_objects?: string[];
+}
+
+export interface DiscoverySelectionPreviewRead {
+  datasource_id: string;
+  restricted: boolean;
+  fingerprint: string | null;
+  basis?: "LAST_SCAN";
+  schemas: SelectionCountRead;
+  kinds: SelectionCountRead[];
+  unmatched_include_patterns: string[];
+  truncated: boolean;
+  capabilities: ObjectKindCapabilityRead[];
+  capability_source: "CONNECTION_TEST" | "CONNECTOR_DEFAULT";
+}
+
+export interface DiscoverySelectionRead {
+  datasource_id: string;
+  selection: DiscoverySelection;
+  restricted: boolean;
+  fingerprint: string | null;
+  capabilities: ObjectKindCapabilityRead[];
+  capability_source: "CONNECTION_TEST" | "CONNECTOR_DEFAULT";
 }
 
 export interface DocumentCreate {
@@ -2057,6 +2372,89 @@ export interface DomainLineageGraphRead {
   truncated?: boolean;
   truncation_reasons?: string[];
   withheld_cross_boundary_domain_ids?: string[];
+  withheld_datasource_count?: number;
+}
+
+export interface EnforcementReadinessRead {
+  organization_id: string;
+  window_days: number;
+  declared_posture: string;
+  unresolved_scope_outcome: string;
+  workspaces_total: number;
+  workspaces_enforcing: number;
+  workspaces_observing: number;
+  datasources_total: number;
+  datasources_resolvable: number;
+  datasources_unbound: number;
+  datasources_ambiguous: number;
+  unresolved_datasources: UnresolvedDatasourceRead[];
+  unresolved_datasources_truncated: boolean;
+  workspaces: WorkspaceReadinessRead[];
+  blockers: string[];
+  ready: boolean;
+}
+
+/** What the connector registry says about one engine, and how far it is proven. */
+export interface EngineCapabilityEngineRead {
+  engine: string;
+  display_name: string;
+  dialect: string;
+  adapter_version: string;
+  implementation_status: string;
+  maturity: string;
+  parser_dialect_supported: boolean;
+  live_validation: string;
+  flags: Record<string, string>;
+  overridden_methods: string[];
+  notes: string;
+}
+
+/** One (engine, native object kind, facet) answer. */
+export interface EngineCapabilityFacetRead {
+  facet: string;
+  state: string;
+  reason: string;
+  evidence: string;
+}
+
+export interface EngineCapabilityMatrixRead {
+  matrix_key: string[];
+  facets: string[];
+  states: string[];
+  generated_at: string;
+  engines: EngineCapabilityEngineRead[];
+  rows: EngineCapabilityObjectKindRead[];
+  source_mapping: EngineSourceMappingRead;
+  dbt_coverage: EngineDbtCoverageRead[];
+  parser_degradation_reasons: string[];
+  declared_gaps: string[];
+}
+
+/** One native object kind on one engine, with its six facet answers. */
+export interface EngineCapabilityObjectKindRead {
+  engine: string;
+  native_object_kind: string;
+  graph_category: string;
+  native_concept: boolean;
+  note: string;
+  facets: EngineCapabilityFacetRead[];
+}
+
+/** Bounded coverage reporting for one dbt aspect (macros, hooks). */
+export interface EngineDbtCoverageRead {
+  aspect: string;
+  state: string;
+  reason: string;
+  evidence: string;
+}
+
+/** How precisely a parsed fact can be located in its source text. */
+export interface EngineSourceMappingRead {
+  granularity: string;
+  state: string;
+  reason: string;
+  evidence: string;
+  rationale: string;
 }
 
 export interface EntitlementOperation {
@@ -2109,6 +2507,48 @@ export interface ExecutionRead {
   updated_at: string;
 }
 
+export interface ExternalMcpDiscoveryRead {
+  server_id: string;
+  listed: number;
+  new: number;
+  changed: number;
+  withdrawn: number;
+  quarantined: number;
+}
+
+export interface ExternalMcpServerCreate {
+  name: string;
+  base_url: string;
+  credential_reference?: string | null;
+}
+
+export interface ExternalMcpServerRead {
+  id: string;
+  organization_id: string;
+  name: string;
+  base_url: string;
+  uses_credential_reference: boolean;
+  status: string;
+  server_name: string | null;
+  protocol_version: string | null;
+  last_discovered_at: string | null;
+  last_discovery_error: string | null;
+  discovered_tool_count: number;
+}
+
+export interface ExternalMcpToolRead {
+  id: string;
+  server_id: string;
+  name: string;
+  description: string | null;
+  input_schema: Record<string, unknown>;
+  screening_status: string;
+  screening_reason_codes: string[];
+  status: string;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
 /** Normalized inbound envelope for a third-party detector quality signal. */
 export interface ExternalQualitySignalIngest {
   detector_vendor: string;
@@ -2156,6 +2596,39 @@ export interface FleetSummaryRead {
   pending_outbox_events: number;
   dead_letter_outbox_events: number;
   generated_at: string;
+}
+
+export interface FootprintGapDetailRead {
+  datasource_id: string;
+  kind: string;
+  resolution: string;
+  owner: string;
+  explanation: string;
+  objects: FootprintGapObjectRead[];
+  truncated: boolean;
+  note?: string | null;
+}
+
+export interface FootprintGapObjectRead {
+  object_type: string;
+  object_id: string;
+  qualified_name: string;
+  detail?: string | null;
+}
+
+export interface FootprintGapRead {
+  kind: string;
+  count: number;
+  resolution: string;
+  owner: string;
+  explanation: string;
+}
+
+export interface FootprintGapsRead {
+  organization_id: string;
+  generated_at: string;
+  datasources: DatasourceFootprintGapsRead[];
+  totals: Record<string, number>;
 }
 
 export interface FreshnessConfigRead {
@@ -2440,6 +2913,8 @@ export interface GovernedToolVersionRead {
   approved_at: string | null;
   created_at: string;
   updated_at: string;
+  source_routine_id?: string | null;
+  source_view_table_id?: string | null;
   usage_count?: number;
 }
 
@@ -2472,34 +2947,18 @@ export interface GraphNodeRead {
   outbound_edge_count?: number;
 }
 
-/** Opaque frontend Graph Explorer state, plus queryable metadata. */
-export interface GraphPerspectiveCreate {
-  datasource_id?: string | null;
-  name: string;
-  description?: string | null;
-  allowed_viewer_roles?: string[];
-  view_state?: Record<string, unknown>;
+/** One error. `message` is the code; nothing object-specific is ever in it. */
+export interface GraphQLErrorRead {
+  message: string;
+  path?: (string | number)[] | null;
+  extensions?: Record<string, unknown>;
 }
 
-export interface GraphPerspectiveRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string | null;
-  name: string;
-  description: string | null;
-  owner_principal: string;
-  allowed_viewer_roles: string[];
-  view_state: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-}
-
-/** All fields optional: only owner-supplied fields are applied (owner-only, see the API). */
-export interface GraphPerspectiveUpdate {
-  name?: string | null;
-  description?: string | null;
-  allowed_viewer_roles?: string[] | null;
-  view_state?: Record<string, unknown> | null;
+/** The response envelope. `data` is absent when the document was refused. */
+export interface GraphQLResponseRead {
+  data?: Record<string, unknown> | null;
+  errors?: GraphQLErrorRead[] | null;
+  extensions?: Record<string, unknown>;
 }
 
 export interface GraphSearchRead {
@@ -2557,6 +3016,12 @@ export interface ImpactAnalysisRead {
   downstream_object_count: number;
 }
 
+export interface ImpactSubjectRead {
+  object_type: string;
+  object_id: string;
+  annotation_version_id?: string | null;
+}
+
 export interface InboxAgent {
   ai_asset_id: string;
   version_id: string | null;
@@ -2585,6 +3050,7 @@ export interface InboxAutoApplied {
 export interface InboxBudget {
   daily_token_cap: number | null;
   daily_tokens_estimated: number | null;
+  daily_tokens_charged?: number | null;
 }
 
 export interface InboxPendingItem {
@@ -2695,15 +3161,11 @@ export interface LineOfBusinessRead {
   updated_at: string;
 }
 
-/** One column-level lineage edge extracted from SQL. */
-export interface LineageEdgeRead {
-  source_table: string;
-  source_column: string;
-  target_table: string;
-  target_column: string;
-  transformation_type: string;
-  confidence: string;
-  dialect: string;
+export interface LineageAgentRunRequest {
+  capabilities?: ("VIEW_LINEAGE" | "PROCEDURE_LINEAGE" | "TRIGGER_LINEAGE")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
 }
 
 export interface LobCostRowRead {
@@ -2747,6 +3209,16 @@ export interface MarketplaceAccessRequestRead {
   fulfilled_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** R11-B4: the answer to "may I use this product, and on what basis". */
+export interface MarketplaceConsumptionRead {
+  data_product_version_id: string;
+  principal_id: string;
+  basis: "ROLE" | "ENTITLEMENT";
+  access_request_id: string | null;
+  expires_at: string | null;
+  ports: DataProductPortDefinition[];
 }
 
 /** HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same */
@@ -2836,7 +3308,7 @@ export interface MetadataGrantEnvelope {
   grantee: string;
   grantee_type?: "USER" | "ROLE" | "GROUP" | "PUBLIC";
   privilege: string;
-  object_type?: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SCHEMA" | "SEQUENCE";
+  object_type?: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "SCHEMA" | "SEQUENCE";
   object_name: string;
   schema_name?: string | null;
   is_grantable?: boolean;
@@ -2934,7 +3406,7 @@ export interface MetadataIngestionRead {
 /** A stored procedure or function, with its body when the source exposes it. */
 export interface MetadataRoutineEnvelope {
   name: string;
-  routine_type: "FUNCTION" | "PROCEDURE";
+  routine_type: "FUNCTION" | "PROCEDURE" | "PACKAGE";
   language?: string | null;
   body_sql?: string | null;
   parameters?: MetadataRoutineParameterEnvelope[];
@@ -3008,6 +3480,7 @@ export interface ModelImportBatchRead {
   uploaded_by: string;
   reviewed_by?: string | null;
   reviewed_at?: string | null;
+  reverses_batch_id?: string | null;
 }
 
 export interface ModelImportExclusionRequest {
@@ -3018,13 +3491,13 @@ export interface ModelImportExclusionRequest {
 export interface ModelRouteConfigurationCreate {
   route_key: string;
   display_name: string;
-  provider_type: "OPENAI" | "GOOGLE_GEMINI" | "AZURE_OPENAI" | "AWS_BEDROCK" | "GOOGLE_VERTEX" | "OPENAI_COMPATIBLE_PRIVATE" | "ON_PREM";
+  provider_type: "OPENAI" | "GOOGLE_GEMINI" | "AZURE_OPENAI" | "AWS_BEDROCK" | "GOOGLE_VERTEX" | "OPENAI_COMPATIBLE_PRIVATE" | "ON_PREM" | "ANTHROPIC" | "OPENROUTER";
   model_id: string;
   endpoint_alias: string;
   credential_reference?: string | null;
   data_residency: string;
   retention_policy: "ZERO_RETENTION" | "BANK_MANAGED" | "PROVIDER_CONTRACT";
-  capabilities: ("SQL_GENERATION" | "EXPLANATION" | "EMBEDDINGS" | "CLASSIFICATION")[];
+  capabilities: ("SQL_GENERATION" | "EXPLANATION" | "EMBEDDINGS" | "CLASSIFICATION" | "DECISION")[];
   max_input_tokens?: number;
   max_output_tokens?: number;
   timeout_seconds?: number;
@@ -3058,6 +3531,33 @@ export interface ModelRouteConfigurationRead {
   updated_at: string;
 }
 
+/** R11-MP11: one route's record over a window of Ask runs. */
+export interface ModelRouteOutcomeRead {
+  route_key: string;
+  runs: number;
+  completed: number;
+  rejected: number;
+  failed: number;
+  fallback_runs: number;
+  circuit_skips: number;
+  repairs_attempted: number;
+  repairs_valid: number;
+  candidates_compared: number;
+  candidates_identical: number;
+  candidates_same_sources: number;
+  candidates_different: number;
+  stated_cost_usd: number | null;
+  cached_input_tokens: number;
+}
+
+export interface ModelRouteOutcomesRead {
+  organization_id: string;
+  since: string;
+  runs_considered: number;
+  truncated: boolean;
+  routes: ModelRouteOutcomeRead[];
+}
+
 /** SM-5: request a deterministically-rendered multi-table JOIN tool */
 export interface MultiTableToolBlueprintRequest {
   slug: string;
@@ -3067,11 +3567,6 @@ export interface MultiTableToolBlueprintRequest {
   semantic_model_version_id?: string | null;
   table_ids: string[];
   allowed_roles: string[];
-}
-
-export interface NativePolicySyncDecisionRequest {
-  decision: "APPROVE" | "REJECT";
-  reason?: string | null;
 }
 
 export interface NativePolicySyncTableRequest {
@@ -3120,8 +3615,8 @@ export interface NegativeAssertionRead {
 export interface NotificationEventRead {
   id: string;
   organization_id: string;
-  incident_id: string;
-  rule_id: string;
+  incident_id: string | null;
+  rule_id: string | null;
   channel: string;
   recipients: string[];
   status: string;
@@ -3170,6 +3665,378 @@ export interface NotificationTestResult {
   organization_id: string;
   enabled: boolean;
   outcomes: Record<string, string>;
+}
+
+export interface ObjectKindCapabilityRead {
+  kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "SEQUENCE";
+  inventory: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
+  definition: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
+}
+
+/** One document in an OKF bundle: where it sits, its digest and its size. */
+export interface OkfBundleFileRead {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** An OKF bundle's Atlas manifest plus its file index -- never the documents themselves. */
+export interface OkfBundleRead {
+  okf_version: string;
+  spec_revision: string;
+  spec_conformance: string;
+  profile: string;
+  content_snapshot_digest: string;
+  bundle_content_digest: string;
+  scope_digest: string;
+  document_count: number;
+  valid: boolean;
+  findings: string[];
+  files: OkfBundleFileRead[];
+  manifest: Record<string, unknown>;
+  publication: OkfPublicationRead;
+  validated_at: string;
+}
+
+/** What one stored publication changed against the publication before it (R11-OKF02). */
+export interface OkfChangeSummaryRead {
+  added: string[];
+  changed: string[];
+  removed: string[];
+  changed_subjects: number;
+  marked_subjects: number;
+  full_render: boolean;
+}
+
+/** A document the question matched (`hop` 0) or one linked from such a document (`hop` 1). */
+export interface OkfContextDocumentRead {
+  citation: string;
+  path: string;
+  sha256: string;
+  type: string;
+  title: string;
+  status: string | null;
+  description: string | null;
+  hop: number;
+  score: number;
+  matched_terms: string[];
+  linked_from: string | null;
+  approved_statements: string[];
+  derived_statements: string[];
+  sections: OkfContextSectionRead[];
+}
+
+/** A section the budget or the row filter left out, so nothing is dropped silently. */
+export interface OkfContextOmissionRead {
+  path: string;
+  anchor: string;
+  reason: string;
+  chars: number;
+}
+
+/** Question-specific context from a stored OKF publication, with exact receipts (OKF-E). */
+export interface OkfContextRead {
+  context_product_version_id: string;
+  product_key: string;
+  product_version: number;
+  publication: OkfPublicationRead;
+  status: string;
+  question_terms: string[];
+  documents: OkfContextDocumentRead[];
+  omitted: OkfContextOmissionRead[];
+  omitted_count: number;
+  ambiguous: string[];
+  max_chars: number;
+  used_chars: number;
+  guidance: string;
+  markdown: string;
+}
+
+/** A question to select knowledge for, from one product version's stored OKF bundle. */
+export interface OkfContextRequest {
+  question: string;
+  max_chars?: number | null;
+  publication_id?: string | null;
+}
+
+/** One section of one document, cut at a top-level heading (`anchor` is its slug). */
+export interface OkfContextSectionRead {
+  anchor: string;
+  heading: string;
+  text: string;
+  rows_shown?: number | null;
+  rows_total?: number | null;
+}
+
+/** One document of one stored OKF publication, with its exact bytes (R11-OKF02). */
+export interface OkfDocumentRead {
+  publication_id: string;
+  publication_sequence: number;
+  path: string;
+  sha256: string;
+  bytes: number;
+  rendered_in_sequence: number;
+  subject_key: string | null;
+  content: string;
+}
+
+export interface OkfImportBaseRead {
+  publication_id: string;
+  sequence: number;
+  is_current: boolean;
+  bundle_content_digest: string;
+  content_snapshot_digest: string;
+}
+
+export interface OkfImportBatchRead {
+  batch_id: string;
+  datasource_id: string;
+  governance_review_id: string;
+  change_count: number;
+}
+
+/** One edit and its decision. `current_value`/`proposed_value` are for the importing user's */
+export interface OkfImportItemRead {
+  item_id: string;
+  path: string;
+  family: string;
+  kind: string;
+  field: string;
+  outcome: string;
+  reason_code?: string | null;
+  target_type?: string | null;
+  target_id?: string | null;
+  target_label?: string | null;
+  datasource_id?: string | null;
+  ontology_key?: string | null;
+  concept_key?: string | null;
+  expected_version?: number | null;
+  current_version?: number | null;
+  current_value?: string | null;
+  proposed_value?: string | null;
+  added_aliases: string[];
+  removed_aliases?: string[];
+  detail?: string | null;
+}
+
+export interface OkfImportMeaningRead {
+  ontology_version_id: string;
+  ontology_key: string;
+  version: number;
+  base_version: number;
+  governance_review_id: string;
+  concept_count: number;
+}
+
+/** A change that is not proposed: refused, unsupported, a claim, tolerated or ignored. */
+export interface OkfImportNoteRead {
+  path?: string | null;
+  outcome: string;
+  reason_code: string;
+  field?: string | null;
+  detail?: string | null;
+}
+
+export interface OkfImportPreviewRead {
+  context_product_version_id: string;
+  import_enabled: boolean;
+  archive_sha256: string;
+  preview_digest: string;
+  base_publication: OkfImportBaseRead;
+  counts: Record<string, number>;
+  items: OkfImportItemRead[];
+  notes: OkfImportNoteRead[];
+  authority: string;
+}
+
+export interface OkfImportRead {
+  preview: OkfImportPreviewRead;
+  description_batches: OkfImportBatchRead[];
+  meaning_versions: OkfImportMeaningRead[];
+  routine_drafts: OkfImportRoutineRead[];
+}
+
+/** One proposed change and what approving it will do, predicted from the approval's own */
+export interface OkfImportReviewChangeRead {
+  change_id: string;
+  subject_type: string;
+  subject_id: string;
+  field: string;
+  label: string;
+  before_value?: string | null;
+  proposed_value?: string | null;
+  expected_version?: number | null;
+  current_version?: number | null;
+  current_value?: string | null;
+  status: string;
+  skip_reason?: string | null;
+  state: string;
+  reason_code?: string | null;
+  target_active?: boolean | null;
+  approval_effect: string;
+}
+
+/** The changes about one object: a table (with its columns) or a routine. */
+export interface OkfImportReviewDocumentRead {
+  document_id: string;
+  label: string;
+  object_type: string;
+  conflicts: number;
+  changes: OkfImportReviewChangeRead[];
+}
+
+export interface OkfImportReviewRead {
+  review_id: string;
+  object_type: string;
+  object_id: string;
+  review_status: string;
+  requested_by: string;
+  proposal_status: string;
+  datasource_id: string;
+  filename?: string | null;
+  archive_sha256?: string | null;
+  counts: Record<string, number>;
+  offset: number;
+  limit: number;
+  total_documents: number;
+  documents: OkfImportReviewDocumentRead[];
+  authority: string;
+}
+
+export interface OkfImportRoutineRead {
+  draft_id: string;
+  routine_id: string;
+  datasource_id: string;
+  governance_review_id: string;
+}
+
+/** One catalog object's document, as one context product's stored bundle holds it. */
+export interface OkfObjectKnowledgeItemRead {
+  context_product_version_id: string;
+  product_key: string;
+  product_version: number;
+  product_name: string;
+  publication: OkfPublicationRead;
+  document: OkfDocumentRead;
+  coverage: Record<string, unknown>;
+}
+
+/** One catalog object's stored knowledge: product bundles, else its source's (R11-OKF02). */
+export interface OkfObjectKnowledgeRead {
+  table_id: string;
+  items: OkfObjectKnowledgeItemRead[];
+  source?: OkfObjectSourceRead | null;
+}
+
+/** What a datasource's own stored OKF bundle says about one catalog object (R11-OKF02). */
+export interface OkfObjectSourceRead {
+  state: "DOCUMENT" | "NOT_IN_BUNDLE" | "REFUSED";
+  reason?: string | null;
+  datasource_id?: string | null;
+  datasource_name?: string | null;
+  publication?: OkfPublicationRead | null;
+  document?: OkfDocumentRead | null;
+  coverage?: Record<string, unknown> | null;
+}
+
+/** The reader's own lineage of stored publications for one version, newest first. */
+export interface OkfPublicationHistoryRead {
+  context_product_version_id: string;
+  items: OkfPublicationRead[];
+}
+
+/** One stored, immutable OKF publication in the reader's own lineage (R11-OKF02). */
+export interface OkfPublicationRead {
+  publication_id: string;
+  sequence: number;
+  trigger: string;
+  captured_at: string;
+  is_current: boolean;
+  bundle_content_digest: string;
+  content_snapshot_digest: string;
+  document_count: number;
+  rendered_count: number;
+  carried_count: number;
+  valid: boolean;
+  changes: OkfChangeSummaryRead;
+}
+
+/** R11-OKF02: question-specific context from one datasource's stored OKF bundle. */
+export interface OkfSourceContextRead {
+  datasource_id: string;
+  datasource_name: string;
+  publication: OkfPublicationRead;
+  status: string;
+  question_terms: string[];
+  documents: OkfContextDocumentRead[];
+  omitted: OkfContextOmissionRead[];
+  omitted_count: number;
+  ambiguous: string[];
+  max_chars: number;
+  used_chars: number;
+  guidance: string;
+  markdown: string;
+}
+
+/** R11-OKF02: the reader's own lineage of stored publications for one datasource's bundle, */
+export interface OkfSourcePublicationHistoryRead {
+  datasource_id: string;
+  items: OkfPublicationRead[];
+}
+
+export interface OntologyCreate {
+  ontology_key: string;
+  base_version?: number;
+  definition: OntologyDefinition;
+}
+
+export interface OntologyDefinition {
+  name: string;
+  owner: string;
+  provenance: string;
+  lifecycle?: "ACTIVE" | "DEPRECATED";
+  concepts: Concept[];
+  relations?: OntologyRelation[];
+  mappings?: OntologyMapping[];
+}
+
+export interface OntologyMapping {
+  concept: string;
+  subject_type: "TABLE" | "VIEW" | "COLUMN" | "ROUTINE";
+  subject_id: string;
+}
+
+export interface OntologyMappingValidityRead {
+  concept: string;
+  subject_type: string;
+  subject_id: string;
+  status: "VALID" | "TARGET_MISSING" | "TARGET_DEPRECATED" | "KIND_MISMATCH";
+  datasource_id?: string | null;
+  superseded_by_id?: string | null;
+}
+
+export interface OntologyRead {
+  id: string;
+  ontology_key?: string;
+  published_version?: number;
+  ontology_id: string;
+  version: number;
+  base_version: number;
+  status: string;
+  definition: OntologyDefinition;
+  created_by: string;
+  approved_by?: string | null;
+  governance_review_id?: string | null;
+  mapping_validity?: OntologyMappingValidityRead[];
+}
+
+export interface OntologyRelation {
+  key: string;
+  source: string;
+  target: string;
+  description: string;
+  cardinality: "ONE_TO_ONE" | "ONE_TO_MANY" | "MANY_TO_ONE" | "MANY_TO_MANY";
+  deprecated?: boolean;
 }
 
 export interface OpenLineageColumnEdgeRead {
@@ -3353,7 +4220,7 @@ export interface Page {
 
 export interface ParsedLineageEdgeBulkDecisionItem {
   edge_id: string;
-  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN" | "TRIGGER";
 }
 
 export interface ParsedLineageEdgeBulkDecisionItemRead {
@@ -3388,7 +4255,7 @@ export interface ParsedLineageEdgeDecisionRead {
 
 /** Decision on one PROPOSED parsed-lineage edge. */
 export interface ParsedLineageEdgeDecisionRequest {
-  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN" | "TRIGGER";
   decision: "APPROVED" | "REJECTED";
   reason: string;
 }
@@ -3396,7 +4263,7 @@ export interface ParsedLineageEdgeDecisionRequest {
 /** One PROPOSED parsed-lineage edge as it appears in the review queue. */
 export interface ParsedLineageEdgeReviewQueueItemRead {
   edge_id: string;
-  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN" | "TRIGGER";
   organization_id: string;
   created_at: string;
   created_by: string | null;
@@ -3436,6 +4303,35 @@ export interface PlanStepCreate {
   expected_cost?: number;
 }
 
+/** R11-REV01: how this playbook's action is actually applied -- per action, not a */
+export interface PlaybookActionAutomationRead {
+  action: string;
+  subject_type: string;
+  has_automatic_branch: boolean;
+  automatic_branch_enabled: boolean;
+  automatic_when: string;
+  automatic_path: string;
+  automatic_principal: string;
+  involves_model: boolean;
+  reviewed_operation_type: string;
+  compensating_operation_when_reviewed: string;
+  compensating_operation_when_automatic: string | null;
+  automatic_correction_reason: string | null;
+}
+
+export interface PlaybookBoundRunCreate {
+  require_match?: boolean;
+}
+
+/** R11-REV01: a run bound to a stored preview -- or the reason it did not run. */
+export interface PlaybookBoundRunRead {
+  dry_run_id: string;
+  ran: boolean;
+  refusal_code: string | null;
+  binding: PlaybookPreviewBindingRead;
+  run: PlaybookRunResultRead | null;
+}
+
 export interface PlaybookCreate {
   name: string;
   action: "TAG" | "CLASSIFY" | "OWN" | "CERTIFY";
@@ -3447,6 +4343,44 @@ export interface PlaybookCreate {
   schedule_interval_minutes: number;
   auto_apply_max_items?: number;
   enabled?: boolean;
+}
+
+export interface PlaybookDryRunItemRead {
+  subject_type: string;
+  subject_id: string;
+  qualified_name: string;
+  current_value: string | null;
+  proposed_value: string | null;
+  change: string;
+  evidence_version: string;
+}
+
+/** R11-REV01: what a run would do now, without doing it. */
+export interface PlaybookDryRunRead {
+  playbook_id: string;
+  action: string;
+  enabled: boolean;
+  rule_version: string;
+  evaluated_at: string;
+  matched_count: number;
+  tables_truncated: boolean;
+  columns_truncated: boolean;
+  auto_apply_max_items: number;
+  predicted_disposition: string;
+  automation: PlaybookActionAutomationRead;
+  items: PlaybookDryRunItemRead[];
+}
+
+export interface PlaybookPreviewBindingRead {
+  status: string;
+  rule_version_matches: boolean;
+  match_set_matches: boolean;
+  evidence_matches: boolean;
+  added_count: number;
+  removed_count: number;
+  changed_count: number;
+  moved_subject_ids: string[];
+  reasons: string[];
 }
 
 export interface PlaybookRead {
@@ -3477,6 +4411,26 @@ export interface PlaybookRunResultRead {
   governance_review_id: string | null;
 }
 
+/** R11-REV01: a dry-run that was stored, so a run can be bound to it. `match_digest` is */
+export interface PlaybookStoredDryRunRead {
+  playbook_id: string;
+  action: string;
+  enabled: boolean;
+  rule_version: string;
+  evaluated_at: string;
+  matched_count: number;
+  tables_truncated: boolean;
+  columns_truncated: boolean;
+  auto_apply_max_items: number;
+  predicted_disposition: string;
+  automation: PlaybookActionAutomationRead;
+  items: PlaybookDryRunItemRead[];
+  dry_run_id: string;
+  match_digest: string;
+  evidence_digest: string;
+  change_counts: Record<string, number>;
+}
+
 export interface PlaybookUpdate {
   match_pattern?: string | null;
   column_name_pattern?: string | null;
@@ -3484,34 +4438,6 @@ export interface PlaybookUpdate {
   schedule_interval_minutes?: number | null;
   auto_apply_max_items?: number | null;
   enabled?: boolean | null;
-}
-
-export interface PolicyNativeSyncRequestCreate {
-  schema_name: string;
-  table_name: string;
-  reason: string;
-}
-
-export interface PolicyNativeSyncRequestRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string;
-  connector_type: string;
-  schema_name: string;
-  table_name: string;
-  statements: Record<string, unknown>[];
-  row_policy_count: number;
-  column_policy_count: number;
-  unsupported: string[];
-  status: string;
-  requested_by: string;
-  request_reason: string;
-  decided_by: string | null;
-  decision_reason: string | null;
-  decided_at: string | null;
-  applied_at: string | null;
-  apply_error: string | null;
-  created_at: string;
 }
 
 export interface PortfolioAccessRead {
@@ -3645,26 +4571,6 @@ export interface ProcedureCapabilityMatrixRead {
   unparsed_reasons: string[];
 }
 
-export interface ProcedureLineageEdgeRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string;
-  source_table: string;
-  source_column: string;
-  target_table: string;
-  target_column: string;
-  source_table_id: string | null;
-  source_column_id: string | null;
-  target_table_id: string | null;
-  target_column_id: string | null;
-  transformation_type: string;
-  confidence: string;
-  dialect: string;
-  sql_hash: string;
-  created_at: string;
-  updated_at: string;
-}
-
 /** N12: request a deterministically-rendered procedure-to-tool draft. */
 export interface ProcedureToolBlueprintRequest {
   slug: string;
@@ -3674,6 +4580,13 @@ export interface ProcedureToolBlueprintRequest {
   semantic_model_version_id?: string | null;
   routine_id: string;
   allowed_roles: string[];
+}
+
+/** R11-FP04: one facet that is absent from a profile, and why. */
+export interface ProfileFacetStatusRead {
+  facet: string;
+  status: "UNSUPPORTED" | "NOT_APPLICABLE" | "PERMISSION_DENIED" | "UNAVAILABLE";
+  reason_code: string;
 }
 
 export interface ProfilingExceptionDecisionRequest {
@@ -3729,6 +4642,13 @@ export interface ProjectRead {
   updated_at: string;
 }
 
+export interface QualityAgentRunRequest {
+  capabilities?: ("ROW_COUNT_FLOOR" | "NULL_RATE_CEILING")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
+}
+
 export interface QualityRulePackRead {
   name: string;
   enabled?: boolean;
@@ -3782,6 +4702,7 @@ export interface QueryExecutionRequest {
   sql: string;
   max_rows?: number | null;
   semantic_version?: string | null;
+  context_product_key?: string | null;
   workspace_id?: string | null;
 }
 
@@ -3826,6 +4747,9 @@ export interface QueryLineageRead {
   column_lineage: Record<string, unknown>[];
   semantic_version: string | null;
   policy_version: string;
+  normalized_sql?: string | null;
+  row_count?: number | null;
+  elapsed_ms?: number | null;
 }
 
 /** `/health/ready`'s body. */
@@ -3838,6 +4762,11 @@ export interface ReadinessResponse {
   optional?: Record<string, string>;
   controls?: Record<string, string>;
   signals?: Record<string, string>;
+}
+
+export interface ReasonCodeCount {
+  reason_code: string;
+  count: number;
 }
 
 export interface RelationshipCandidateBulkDecisionItemRead {
@@ -3951,6 +4880,66 @@ export interface RelationshipCandidateReviewQueueRead {
   truncated: boolean;
 }
 
+export interface RelationshipEvidenceClassRead {
+  name: string;
+  corroborating: boolean;
+  detail: string;
+  sample_bounded: boolean;
+}
+
+export interface RelationshipObservationBoundsRead {
+  table_profile_id: string;
+  profiled_at: string;
+  sampled_row_count: number;
+  row_count_estimate: number | null;
+  scope: "FULL" | "SAMPLE" | "UNKNOWN";
+}
+
+export interface RelationshipOptionalityColumnRead {
+  column_name: string;
+  declared_nullable: boolean;
+  observed_null_count: number | null;
+  observed_non_null_count: number | null;
+}
+
+export interface RelationshipSideUniquenessRead {
+  unique: boolean;
+  basis: "DECLARED_KEY" | "UNIQUE_INDEX" | "DECLARED_FOREIGN_KEY" | "APPROVED_KEY" | "PROFILED" | null;
+  sample_bounded: boolean;
+}
+
+/** R11-FP06: what supports a proposed join, derived from the catalog as it is now. */
+export interface RelationshipValidationRead {
+  subject_type: "RELATIONSHIP_CANDIDATE" | "COMPOSITE_RELATIONSHIP_CANDIDATE";
+  subject_id: string;
+  status: string;
+  validation_version: string;
+  outcome: "CORROBORATED" | "NAME_MATCH_ONLY";
+  approvable: boolean;
+  evidence_classes: RelationshipEvidenceClassRead[];
+  source_key_columns: string[];
+  target_key_columns: string[];
+  join_condition: string;
+  cardinality: "ONE_TO_ONE" | "MANY_TO_ONE" | "ONE_TO_MANY" | "UNKNOWN";
+  direction: "SOURCE_REFERENCES_TARGET" | "TARGET_REFERENCES_SOURCE" | "EITHER" | "UNDETERMINED";
+  source_uniqueness: RelationshipSideUniquenessRead;
+  target_uniqueness: RelationshipSideUniquenessRead;
+  referencing_side: "SOURCE" | "TARGET";
+  optionality: "MANDATORY" | "OPTIONAL" | "NULLABLE_NONE_OBSERVED" | "UNKNOWN";
+  optionality_columns: RelationshipOptionalityColumnRead[];
+  source_observation: RelationshipObservationBoundsRead | null;
+  target_observation: RelationshipObservationBoundsRead | null;
+  inclusion_check_status: "NOT_RUN";
+  inclusion_check_reason: string;
+  grain_warnings: string[];
+  source_queries_executed: number;
+  values_inspected: boolean;
+  fingerprint: string;
+  recorded_fingerprint: string | null;
+  recorded_at: string | null;
+  drift: "NOT_RECORDED" | "UNCHANGED" | "CHANGED" | "CORROBORATION_LOST";
+}
+
 export interface RenameCandidateDecision {
   decision: "APPROVE" | "REJECT";
   reason?: string | null;
@@ -3980,6 +4969,7 @@ export interface RenameCandidateRead {
 export interface ResolveSampleRequest {
   human_outcome: "AGREED" | "DISAGREED";
   rationale: string;
+  reverse_applied_changes?: boolean;
 }
 
 export interface ReviewAuditSampleRead {
@@ -3994,6 +4984,114 @@ export interface ReviewAuditSampleRead {
   human_principal_id: string | null;
   human_rationale: string | null;
   resolved_at: string | null;
+}
+
+export interface ReviewBatchCorrectionRead {
+  kind: string;
+  available: boolean;
+  method: string | null;
+  path: string | null;
+  subject_type: string | null;
+  subject_id: string | null;
+  reason_code: string | null;
+}
+
+/** Exactly one of: `items` (explicit, accumulated across queue pages) or `filter` (a */
+export interface ReviewBatchCreate {
+  items?: ReviewBatchSelectionWrite[] | null;
+  filter?: ReviewBatchFilterWrite | null;
+}
+
+export interface ReviewBatchDecisionCreate {
+  decision: "APPROVE" | "REJECT";
+  reason?: string | null;
+  rationale_by_review_id?: Record<string, string> | null;
+}
+
+export interface ReviewBatchDecisionMemberRead {
+  review_id: string;
+  position: number;
+  object_type: string | null;
+  review_family: string | null;
+  frozen_status: string | null;
+  evidence_fingerprint: string | null;
+  eligibility: string;
+  exclusion_code: string | null;
+  approve_gate_code: string | null;
+  outcome: string;
+  reason_code: string | null;
+  decided_at: string | null;
+  correction: ReviewBatchCorrectionRead;
+  detail?: string | null;
+  decided_in_this_call?: boolean;
+}
+
+export interface ReviewBatchDecisionRead {
+  batch: ReviewBatchRead;
+  overall: string;
+  applied_count: number;
+  refused_count: number;
+  skipped_count: number;
+  resumed: boolean;
+  decided_in_this_call_count: number;
+  members: ReviewBatchDecisionMemberRead[];
+}
+
+export interface ReviewBatchFilterWrite {
+  status?: string;
+  object_types?: string[];
+  families?: ("DESCRIPTION" | "SEMANTIC" | "STEWARDSHIP" | "PUBLICATION" | "ACCESS" | "OTHER")[];
+  change_kinds?: string[];
+  object_id?: string | null;
+  table_id?: string | null;
+  decidable_only?: boolean;
+}
+
+export interface ReviewBatchItemPageRead {
+  batch_id: string;
+  next_cursor: string | null;
+  items: ReviewBatchItemRead[];
+}
+
+export interface ReviewBatchItemRead {
+  review_id: string;
+  position: number;
+  object_type: string | null;
+  review_family: string | null;
+  frozen_status: string | null;
+  evidence_fingerprint: string | null;
+  eligibility: string;
+  exclusion_code: string | null;
+  approve_gate_code: string | null;
+  outcome: string;
+  reason_code: string | null;
+  decided_at: string | null;
+  correction: ReviewBatchCorrectionRead;
+}
+
+export interface ReviewBatchRead {
+  id: string;
+  organization_id: string;
+  created_by: string;
+  selection_mode: string;
+  selection_truncated: boolean;
+  status: string;
+  item_count: number;
+  eligible_count: number;
+  selection_fingerprint: string;
+  decision: string | null;
+  decided_at: string | null;
+  created_at: string;
+  exclusion_counts: Record<string, number>;
+  approve_gate_counts: Record<string, number>;
+  outcome_counts: Record<string, number>;
+  excluded_count: number;
+  resumable: boolean;
+}
+
+export interface ReviewBatchSelectionWrite {
+  review_id: string;
+  evidence_fingerprint?: string | null;
 }
 
 /** One governance-review-queue proposal: its own review/decision fields */
@@ -4058,6 +5156,157 @@ export interface ReviewerAgentStateRead {
   sampling_rate: number;
   agent_principal_id: string;
   evidence_max_age_minutes: number;
+  unresolved_samples: number;
+  max_unresolved_samples: number;
+  audit_backlog_exceeded: boolean;
+  oldest_pending_sample_hours: number | null;
+  max_sample_age_hours: number;
+  sample_age_exceeded: boolean;
+}
+
+export interface RiskTierDisagreementRateRead {
+  risk_tier: string;
+  sampled: number;
+  resolved: number;
+  agreed: number;
+  disagreed: number;
+  pending: number;
+  disagreement_rate: number | null;
+  sufficient_sample: boolean;
+}
+
+/** R11-FP03: one routine's captured definitions, newest first. */
+export interface RoutineDefinitionHistoryRead {
+  routine_id: string;
+  routine_qualified_name: string;
+  routine_type: string;
+  signature: string;
+  status: string;
+  dialect: string;
+  footprint_basis: string;
+  footprint_parse_budget: number;
+  versions: RoutineDefinitionVersionRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** R11-FP03: one captured definition of a routine, described without its text. */
+export interface RoutineDefinitionVersionRead {
+  version_id: string;
+  version_number: number;
+  captured_at: string;
+  analysis_run_id: string | null;
+  availability: string;
+  unavailable_reason: string | null;
+  truncated: boolean;
+  change_class: string | null;
+  redaction_status: string;
+  screening_status: string;
+  definition_digest: string | null;
+  previous_definition_digest: string | null;
+  body_released: boolean;
+  withheld_marker: string | null;
+  withheld_reason_code: string | null;
+  footprint_state: string;
+  parse_completed: boolean | null;
+  unparsed_reason_codes: string[];
+  reads_table_names: string[];
+  writes_table_names: string[];
+  reads_added: string[];
+  reads_removed: string[];
+  writes_added: string[];
+  writes_removed: string[];
+}
+
+export interface RoutineDescriptionDraftEdit {
+  drafted_text: string;
+  expected_text: string;
+}
+
+/** Draft descriptions for up to 100 routines at once. */
+export interface RoutineDescriptionDraftGenerate {
+  routine_ids: string[];
+  include_described?: boolean;
+}
+
+/** What a generation call did, and each thing it deliberately did not do. */
+export interface RoutineDescriptionDraftGenerateResult {
+  drafts: RoutineDescriptionDraftRead[];
+  created: number;
+  skipped_open: number;
+  skipped_described: number;
+  skipped_duplicate_rejected: number;
+  below_review_threshold: number;
+  routines_skipped: number;
+}
+
+export interface RoutineDescriptionDraftRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  routine_id: string;
+  routine_qualified_name: string;
+  routine_type: string;
+  drafted_text: string;
+  accuracy_score: number;
+  clarity_score: number;
+  style_score: number;
+  completeness_score: number;
+  overall_score: number;
+  reviewable: boolean;
+  evidence: Record<string, unknown>;
+  status: string;
+  base_description_version: number | null;
+  governance_review_id: string | null;
+  published_version_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A routine detail read's one description field, and where it came from. */
+export interface RoutineDescriptionRead {
+  routine_id: string;
+  routine_qualified_name: string;
+  description: string | null;
+  description_is_proposed: boolean;
+  documentation_withdrawn: boolean;
+  description_is_source_comment: boolean;
+}
+
+/** R11-FP07 / finding F06.4: how completely one routine body was understood. */
+export interface RoutineParseCoverageRead {
+  routine_id: string;
+  state: string;
+  parse_completed: boolean;
+  is_read_only: boolean;
+  statement_count: number;
+  unparsed_statement_count: number;
+  unparsed_reason_codes: string[];
+  dialect: string;
+  confidence: string;
+  source_mapping_granularity: string;
+  parsed_at: string;
+  member_attribution?: string | null;
+  member_fallback_reason?: string | null;
+}
+
+/** R11-C8: the answers that relied on a sampled decision while it stood. */
+export interface SampleDownstreamImpactRead {
+  sample_id: string;
+  object_type: string;
+  human_outcome: string;
+  window_start: string;
+  window_end: string | null;
+  correction: CorrectionStateRead | null;
+  reaches_answers: boolean;
+  subjects: ImpactSubjectRead[];
+  scanned_runs: number;
+  truncated: boolean;
+  affected_runs: AffectedRunRead[];
 }
 
 export interface ScanPolicyRead {
@@ -4092,6 +5341,26 @@ export interface ScanPolicyUpsert {
   start_at?: string | null;
 }
 
+export interface SchedulerPassStatusListRead {
+  generated_at: string;
+  stale_after_seconds: number;
+  failing: number;
+  stale: number;
+  never_run: number;
+  items: SchedulerPassStatusRead[];
+}
+
+/** One fleet-scheduler pass as it last ran (R11-VAL04). */
+export interface SchedulerPassStatusRead {
+  pass_name: string;
+  state: "OK" | "FAILING" | "STALE" | "NEVER_RUN";
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error_class: string | null;
+  consecutive_failures: number;
+}
+
 /** Typeahead suggestion for command palette. */
 export interface SearchSuggestion {
   text: string;
@@ -4100,6 +5369,12 @@ export interface SearchSuggestion {
   display_name: string;
   qualified_name?: string | null;
   score: number;
+}
+
+export interface SelectionCountRead {
+  kind: string;
+  in_scope: number;
+  excluded: number;
 }
 
 /** One field-level difference, as returned to a reviewer. */
@@ -4222,39 +5497,6 @@ export interface SlaStatusResponse {
   period_end: string;
 }
 
-export interface SloBudgetRead {
-  slo_id: string;
-  slo_key: string;
-  name: string;
-  target: number;
-  current_value: number | null;
-  budget_remaining: number | null;
-  window_days: number;
-  status: string;
-}
-
-export interface SloDefinitionCreate {
-  slo_key: string;
-  name: string;
-  target: number;
-  window_days: number;
-  threshold: number;
-}
-
-export interface SloDefinitionRead {
-  id: string;
-  organization_id: string;
-  slo_key: string;
-  name: string;
-  target: number;
-  window_days: number;
-  threshold: number;
-  status: string;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface SourceBindingCreate {
   datasource_id: string;
   purpose: string;
@@ -4302,6 +5544,66 @@ export interface SourceEntitlementRead {
   expires_at: string | null;
 }
 
+/** One named parameter: the type it is declared as and the value bound to it. */
+export interface SqlDraftParameter {
+  name: string;
+  parameter_type: "STRING" | "INTEGER" | "NUMBER" | "BOOLEAN" | "DATE";
+  value?: string | boolean | number | null;
+}
+
+export interface SqlDraftReceiptRead {
+  id: string;
+  origin: string;
+  status: string;
+  statement_digest: string;
+  redacted_sql?: string | null;
+  context_product_version_id?: string | null;
+  workspace_id?: string | null;
+  max_rows?: number | null;
+  applied_row_limit?: number | null;
+  referenced_tables: string[];
+  agent_run_id?: string | null;
+  query_execution_id?: string | null;
+  failure_reason?: string | null;
+  created_at: string;
+  expires_at: string;
+  executed_at?: string | null;
+}
+
+/** A question to draft SQL for, or a statement to validate -- exactly one. */
+export interface SqlDraftRequest {
+  question?: string | null;
+  sql?: string | null;
+  parameters?: SqlDraftParameter[];
+  max_rows?: number | null;
+  context_product_key?: string | null;
+  workspace_id?: string | null;
+}
+
+export interface SqlDraftResponse {
+  origin: string;
+  sql?: string | null;
+  agent_run_id?: string | null;
+  generation_source?: string | null;
+  reason?: string | null;
+  selected_tool_version_id?: string | null;
+  validation?: GatewaySqlValidationResponse | null;
+  receipt?: SqlDraftReceiptRead | null;
+}
+
+export interface SqlDraftRunRequest {
+  sql: string;
+  parameters?: SqlDraftParameter[];
+  max_rows?: number | null;
+  context_product_key?: string | null;
+  workspace_id?: string | null;
+}
+
+export interface SqlDraftRunResponse {
+  receipt: SqlDraftReceiptRead;
+  execution: QueryExecutionResponse;
+}
+
 export interface SqlFindingRead {
   code: string;
   severity: string;
@@ -4323,6 +5625,23 @@ export interface SqlValidationResponse {
   referenced_columns: string[];
   violations: string[];
   applied_row_limit: number | null;
+}
+
+/** R11-FP07: a statement's span in the stored body. Half-open code-point */
+export interface StatementRangeRead {
+  start_offset: number;
+  end_offset: number;
+  start_line: number;
+  start_column: number;
+  end_line: number;
+  end_column: number;
+}
+
+export interface StewardAgentRunRequest {
+  capabilities?: ("TABLE_DESCRIPTION" | "COLUMN_DESCRIPTION" | "GLOSSARY_LINK")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
 }
 
 export interface StewardshipCoverageRead {
@@ -4479,14 +5798,11 @@ export interface StudioParameterContractValidateResult {
 }
 
 export interface StudioTestResultRead {
-  id: string;
   change_set_id: string;
   started_at: string;
   completed_at: string | null;
   passed: boolean;
   evidence: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
 }
 
 /** One table's authored documentation, in the same shape the column pane */
@@ -4540,12 +5856,94 @@ export interface TableProfileRead {
   status: string;
   created_at: string;
   columns: ColumnProfileRead[];
+  observation_scope?: "FULL" | "SAMPLE" | "UNKNOWN" | null;
+  uncomputed_facets?: ProfileFacetStatusRead[];
+  withheld_column_count?: number;
 }
 
 /** A resolved table reference; the return type of ``resolve_canonical``. */
 export interface TableRef {
   table_id: string;
   qualified_name: string;
+}
+
+export interface TaskAgentCapabilityRead {
+  capability: string;
+  object_type: string;
+  review_queue: string;
+  risk_tier: string | null;
+  producer: string;
+}
+
+export interface TaskAgentOutcomeRead {
+  object_type: string;
+  pending: number;
+  approved: number;
+  rejected: number;
+  other: number;
+  acceptance_rate: number | null;
+}
+
+export interface TaskAgentRunItemRead {
+  capability: string;
+  subject_id: string;
+  subject_name: string;
+  action: "PROPOSED" | "WOULD_PROPOSE" | "SKIPPED" | "FAILED";
+  reason: string | null;
+  object_type: string | null;
+  object_id: string | null;
+  review_id: string | null;
+  task_id: string | null;
+  confidence: number | null;
+  rank: number | null;
+  related_id: string | null;
+  related_name: string | null;
+}
+
+export interface TaskAgentRunRead {
+  run_id: string;
+  agent_key: string;
+  organization_id: string;
+  agent_principal_id: string;
+  ai_asset_version_id: string;
+  autonomy_tier: string;
+  mode: "OBSERVE" | "PROPOSE";
+  dry_run: boolean;
+  limit: number;
+  capabilities: string[];
+  started_at: string;
+  finished_at: string;
+  proposed: number;
+  would_propose: number;
+  skipped: number;
+  failed: number;
+  skipped_by_reason: Record<string, number>;
+  stopped_reason: string | null;
+  items: TaskAgentRunItemRead[];
+}
+
+export interface TaskAgentStateRead {
+  agent_key: string;
+  organization_id: string;
+  agent_principal_id: string;
+  registered: boolean;
+  refusal_reason: string | null;
+  ai_asset_version_id: string | null;
+  agent_name: string | null;
+  autonomy_tier: string | null;
+  mode: "OBSERVE" | "PROPOSE" | null;
+  supervisor_persona: string | null;
+  kill_engaged: boolean | null;
+  blocking_reason: string | null;
+  method: string;
+  uses_model: boolean;
+  capabilities: TaskAgentCapabilityRead[];
+  max_proposals_per_run: number;
+  max_pending_proposals: number;
+  pending_proposals: number;
+  wall_clock_seconds_cap: number | null;
+  interval_minutes: number;
+  outcomes: TaskAgentOutcomeRead[];
 }
 
 export interface TermSemanticBindingCreate {
@@ -4573,6 +5971,13 @@ export interface TermSemanticBindingRead {
   updated_at: string;
 }
 
+/** R11-FP07 token grain: where, inside its statement, one end of an edge is */
+export interface TokenRangeRead {
+  kind: string;
+  start_offset: number;
+  end_offset: number;
+}
+
 export interface TokenRevocationRead {
   token_identifier: string;
   subject: string;
@@ -4585,6 +5990,13 @@ export interface TokenRevocationRead {
 export interface TokenRevocationRequest {
   token: string;
   reason: string;
+}
+
+export interface ToolAgentRunRequest {
+  capabilities?: ("VIEW_TOOL" | "PROCEDURE_TOOL")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
 }
 
 export interface ToolCertificationCaseCreate {
@@ -4794,6 +6206,22 @@ export interface ToolPlanStepRead {
   error_message: string | null;
 }
 
+/** R11-FP01: how completely one trigger's body was understood, as last measured. */
+export interface TriggerParseCoverageRead {
+  trigger_id: string;
+  routine_id: string | null;
+  state: string;
+  parse_completed: boolean;
+  is_read_only: boolean;
+  statement_count: number;
+  unparsed_statement_count: number;
+  unparsed_reason_codes: string[];
+  dialect: string;
+  confidence: string;
+  source_mapping_granularity: string;
+  parsed_at: string;
+}
+
 /** Governed runs in this organization that no registered agent owns. */
 export interface UnattributedRunsRead {
   method: AgentMethodSummaryRead;
@@ -4804,7 +6232,7 @@ export interface UnattributedRunsRead {
 /** One typed edge merged from declared FKs, approved/candidate column */
 export interface UnifiedLineageEdgeRead {
   id: string;
-  edge_source: "FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION";
+  edge_source: "FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE" | "TRIGGER_DEFINITION";
   source_node_id: string;
   target_node_id: string;
   source_label: string;
@@ -4831,11 +6259,11 @@ export interface UnifiedLineageGraphRead {
 
 export interface UnifiedLineageImpactNodeRead {
   node_id: string;
-  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET";
+  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET" | "BI_WORKBOOK" | "BI_DASHBOARD" | "BI_SHEET" | "BI_REPORT" | "BI_PAGE";
   label: string;
   qualified_name: string;
   depth: number;
-  contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION")[];
+  contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE" | "TRIGGER_DEFINITION")[];
   quality_state?: string;
 }
 
@@ -4843,7 +6271,7 @@ export interface UnifiedLineageImpactNodeRead {
 export interface UnifiedLineageImpactRead {
   datasource_id: string;
   focus_node_id: string;
-  focus_node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET";
+  focus_node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET" | "BI_WORKBOOK" | "BI_DASHBOARD" | "BI_SHEET" | "BI_REPORT" | "BI_PAGE";
   focus_label: string;
   upstream: UnifiedLineageImpactNodeRead[];
   downstream: UnifiedLineageImpactNodeRead[];
@@ -4856,7 +6284,7 @@ export interface UnifiedLineageImpactRead {
 /** One node in the merged lineage graph: a catalog table, or -- when a dbt */
 export interface UnifiedLineageNodeRead {
   id: string;
-  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET";
+  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET" | "BI_WORKBOOK" | "BI_DASHBOARD" | "BI_SHEET" | "BI_REPORT" | "BI_PAGE";
   label: string;
   qualified_name: string;
   matched_table_id?: string | null;
@@ -4899,6 +6327,13 @@ export interface UnownedAssetEscalationRead {
   updated_at: string;
 }
 
+export interface UnresolvedDatasourceRead {
+  datasource_id: string;
+  name: string;
+  reason_code: string;
+  live_bindings: number;
+}
+
 export interface ValidationError {
   loc: (string | number)[];
   msg: string;
@@ -4939,40 +6374,6 @@ export interface VectorIndexStatusRead {
   max_age_minutes: number;
 }
 
-export interface ViewLineageEdgeRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string;
-  source_table: string;
-  source_column: string;
-  target_table: string;
-  target_column: string;
-  source_table_id: string | null;
-  source_column_id: string | null;
-  target_table_id: string | null;
-  target_column_id: string | null;
-  transformation_type: string;
-  confidence: string;
-  dialect: string;
-  sql_hash: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ViewLineageParseRequest {
-  sql: string;
-  dialect?: string;
-}
-
-export interface ViewLineageParseResponse {
-  edges: LineageEdgeRead[];
-  confidence: string;
-  dialect: string;
-  sql_hash: string;
-  errors?: string[];
-  persisted_edge_count?: number;
-}
-
 /** N11: request a deterministically-rendered single-view tool draft */
 export interface ViewToolBlueprintRequest {
   slug: string;
@@ -4984,11 +6385,20 @@ export interface ViewToolBlueprintRequest {
   allowed_roles: string[];
 }
 
+export interface WorksheetColumnEdit {
+  column_id: string;
+  description: string;
+  expected_version?: number | null;
+}
+
+export interface WorksheetSave {
+  changes: WorksheetColumnEdit[];
+}
+
 export interface WorkspaceCreate {
   name: string;
   slug: string;
   purpose?: string;
-  isolation_boundary_id?: string | null;
   monthly_cost_ceiling?: number | null;
 }
 
@@ -5004,11 +6414,12 @@ export interface WorkspaceEntitlementRead {
 export interface WorkspaceMembershipCreate {
   principal_id: string;
   principal_kind?: "HUMAN" | "AGENT" | "SERVICE";
-  role: "viewer" | "analyst" | "steward" | "reviewer" | "workspace_owner";
+  role: "viewer" | "analyst" | "steward" | "reviewer" | "auditor" | "workspace_owner";
   expires_at?: string | null;
 }
 
-export interface WorkspaceMembershipRead {
+/** R11-AUD02: what `POST /v1/workspaces/{id}/members` answers. */
+export interface WorkspaceMembershipProposalRead {
   id: string;
   organization_id: string;
   workspace_id: string;
@@ -5020,12 +6431,12 @@ export interface WorkspaceMembershipRead {
   status: string;
   created_at: string;
   updated_at: string;
+  governance_review_id: string;
 }
 
 export interface WorkspaceRead {
   id: string;
   organization_id: string;
-  isolation_boundary_id: string | null;
   name: string;
   slug: string;
   purpose: string;
@@ -5033,4 +6444,14 @@ export interface WorkspaceRead {
   monthly_cost_ceiling: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkspaceReadinessRead {
+  workspace_id: string;
+  name: string;
+  authorization_mode: string;
+  would_be_denials: number;
+  distinct_principals_affected: number;
+  top_reason_codes: ReasonCodeCount[];
+  ready: boolean;
 }

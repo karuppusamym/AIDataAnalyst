@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useOrgId } from "../lib/org";
+import { useSession } from "../lib/session";
 import {
   ApiError,
   bulkReaffirmOwnershipAssignments,
@@ -21,10 +22,15 @@ import {
    a window (`WARN_DAYS`, default 14) matching the server's
    `settings.ownership_expiry_warn_days`.
 
-   The current principal id is read from `import.meta.env.VITE_DEV_PRINCIPAL_ID`
-   the same way `identityHeaders()` in `lib/api.ts` reads it -- keeping this
-   screen and every write it makes attributable to the same principal the
-   dev shell sends on `X-Principal-Id`.
+   "Mine" is decided by the *session* principal (`useSession().me`), which is
+   whoever the API says is calling: the OIDC subject when a bearer token is in
+   play, the `X-Principal-Id` development identity otherwise. It used to read
+   `import.meta.env.VITE_DEV_PRINCIPAL_ID` directly, which is a build-time
+   constant -- so under a real sign-in every signed-in user was shown the
+   development principal's expiring ownerships instead of their own.
+
+   `DEV_PRINCIPAL_FALLBACK` still covers the one case with no session at all:
+   a bare unit render outside `SessionProvider`, where `me` is null.
 --------------------------------------------------------------------------- */
 
 // Server default is 14 (`AIDA_OWNERSHIP_EXPIRY_WARN_DAYS`). Kept in sync
@@ -32,7 +38,7 @@ import {
 // would flow through a future settings endpoint.
 const WARN_DAYS = 14;
 
-const CURRENT_PRINCIPAL_ID: string =
+const DEV_PRINCIPAL_FALLBACK: string =
   (import.meta.env.VITE_DEV_PRINCIPAL_ID as string | undefined) || "local-ui-admin";
 
 interface OwnershipExpiryBannerScreenProps {
@@ -43,6 +49,8 @@ interface OwnershipExpiryBannerScreenProps {
 export function OwnershipExpiryBannerScreen(props: OwnershipExpiryBannerScreenProps = {}) {
   const orgFromContext = useOrgId();
   const organizationId = props.organizationId ?? orgFromContext;
+  const { me } = useSession();
+  const currentPrincipalId = me?.principal_id ?? DEV_PRINCIPAL_FALLBACK;
   const [rows, setRows] = useState<OwnershipAssignmentRead[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -59,7 +67,7 @@ export function OwnershipExpiryBannerScreen(props: OwnershipExpiryBannerScreenPr
         const windowMs = WARN_DAYS * 86_400_000;
         const expiring = page.items.filter(
           (row) =>
-            row.owner_principal === CURRENT_PRINCIPAL_ID &&
+            row.owner_principal === currentPrincipalId &&
             row.status === "ACTIVE" &&
             row.expires_at !== null &&
             Date.parse(row.expires_at) > nowMs &&
@@ -76,7 +84,7 @@ export function OwnershipExpiryBannerScreen(props: OwnershipExpiryBannerScreenPr
         setLoading(false);
       }
     },
-    [organizationId],
+    [organizationId, currentPrincipalId],
   );
 
   useEffect(() => {

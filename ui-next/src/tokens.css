@@ -25,7 +25,11 @@
 
   --ink: #0f1420;
   --ink-2: #3d465c;
-  --ink-3: #6b7590;
+  /* Tertiary text. #6b7590 measured 4.59 on white but 4.29 on --paper, 4.14 on --sunk and
+     3.89 on --line-soft, all under the 4.5 AA floor for text this size; axe-core in a real
+     browser found it on 36 of 37 screens. #5c6780 is 4.8 or better on every light surface
+     and tint (`Docs/60-delivery/03-tracker.md`, R11-C2). */
+  --ink-3: #5c6780;
 
   --accent: #5b50d6;
   --accent-hover: #493fbd;
@@ -36,6 +40,8 @@
   --ok: #1e7a4c;
   --ok-soft: #e4f2ea;
   --warn: #a8741c;
+  /* --warn is a fill and an icon colour: as text it is 4.05 on white. Text uses this. */
+  --warn-ink: #855a0b;
   --warn-soft: #f8efde;
   --bad: #a8402f;
   --bad-soft: #f8e9e6;
@@ -74,6 +80,7 @@
     --ok: #4fbe86;
     --ok-soft: #102c1f;
     --warn: #d9a44b;
+    --warn-ink: #d9a44b;
     --warn-soft: #2d2312;
     --bad: #e0786a;
     --bad-soft: #2e1815;
@@ -103,6 +110,7 @@
   --ok: #4fbe86;
   --ok-soft: #102c1f;
   --warn: #d9a44b;
+  --warn-ink: #d9a44b;
   --warn-soft: #2d2312;
   --bad: #e0786a;
   --bad-soft: #2e1815;

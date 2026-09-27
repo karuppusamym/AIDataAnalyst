@@ -30,7 +30,14 @@
    The cache below returns the *same* object until the URL actually changes.
 --------------------------------------------------------------------------- */
 
-import { buildRelativeLink, screenFromHash, type LinkTarget, type ScreenId } from "./routes";
+import {
+  allowedFieldsFor,
+  buildRelativeLink,
+  canonicalPath,
+  resolveHash,
+  type LinkTarget,
+  type ScreenId,
+} from "./routes";
 
 export interface AppLocation {
   /** The screen named by the hash, already validated against the route table. */
@@ -39,6 +46,17 @@ export interface AppLocation {
   readonly search: string;
   /** Parsed query params. Treat as read-only. */
   readonly params: URLSearchParams;
+  /**
+   * True when the URL is already the canonical `#/journey/screen` spelling.
+   *
+   * R11-S10: false for a flat `#/catalog`, a stale journey segment, or a route
+   * that was merged away. All three still resolve; `normalizeLocation` is what
+   * rewrites them, so the app does not keep two spellings of one screen in
+   * circulation.
+   */
+  readonly canonical: boolean;
+  /** Filters implied by a retired route, to be folded in when normalizing. */
+  readonly aliasParams?: Readonly<Record<string, string>>;
 }
 
 /** Fired when we change the URL ourselves; `popstate` does not cover that. */
@@ -51,10 +69,13 @@ let cachedSnapshot: AppLocation = readLocation();
 
 function readLocation(): AppLocation {
   const search = window.location.search.replace(/^\?/, "");
+  const resolved = resolveHash(window.location.hash);
   return {
-    screen: screenFromHash(window.location.hash),
+    screen: resolved.screen,
     search,
     params: new URLSearchParams(search),
+    canonical: resolved.canonical,
+    aliasParams: resolved.params,
   };
 }
 
@@ -102,9 +123,33 @@ export function getLocationSnapshot(): AppLocation {
   return cachedSnapshot;
 }
 
+/**
+ * The comparable identity of a URL: its screen, plus its query in a stable
+ * order.
+ *
+ * R11-S10: the duplicate-push guard below used to compare the raw
+ * `search + hash` string. With two spellings of every location -- the flat
+ * `#/catalog` and the grouped `#/analyst/catalog` -- raw strings stopped being
+ * a reliable answer to "am I already here": a user sitting on a saved flat URL
+ * who clicked the nav item for the screen they were already on got a history
+ * entry for a move that did not happen. Comparing what the URL RESOLVES to is
+ * the question the guard was always asking.
+ */
+function locationIdentity(search: string, hash: string): string {
+  const params = new URLSearchParams(search.replace(/^\?/, ""));
+  const sorted = [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const query = new URLSearchParams(sorted).toString();
+  return `${query}#${resolveHash(hash).screen}`;
+}
+
 function commit(url: string, mode: "push" | "replace"): void {
   const absolute = `${window.location.pathname}${url}`;
-  if (`${window.location.search}${window.location.hash}` === url && mode === "push") {
+  const [targetSearch = "", targetHash = ""] = url.split("#");
+  if (
+    mode === "push" &&
+    locationIdentity(window.location.search, window.location.hash) ===
+      locationIdentity(targetSearch, `#${targetHash}`)
+  ) {
     // Navigating to where you already are must not add a history entry the
     // Back button then has to eat.
     return;
@@ -138,6 +183,48 @@ export function replaceLocation(target: LinkTarget): void {
 }
 
 /**
+ * Rewrite a URL that resolved through an alias into its canonical spelling.
+ *
+ * R11-S10. A saved `#/catalog`, a stale `#/steward/catalog`, or a bookmark to
+ * a route that was merged away all still open the right screen; this puts the
+ * address bar in agreement with them afterwards, so the next copy-link the
+ * user makes is the current spelling rather than propagating the old one.
+ *
+ * `replaceState`, never `pushState`: arriving at the page you asked for must
+ * not cost a Back press, and it must not leave a history entry that bounces
+ * the user straight back out of the app.
+ *
+ * Returns true when it rewrote something, so a caller can tell "already
+ * canonical" from "just normalized".
+ */
+export function normalizeLocation(): boolean {
+  const snapshot = getLocationSnapshot();
+  if (snapshot.canonical) return false;
+
+  /* A URL naming NO screen is not a stale spelling -- it is a fresh session,
+   * and the shell lands it in the persona's own work area. Writing `#/inbox/home`
+   * over it here would make that landing unreachable, because the landing
+   * effect's own test is "the hash names no screen". Leave it alone. */
+  if (window.location.hash.replace(/^#\/?/, "").replace(/\/+$/, "") === "") return false;
+
+  /* Carry what the old URL already said, then overlay what the retired route
+   * implies. Only fields the TARGET declares survive -- the same allow-list a
+   * screen change uses, for the same reason: a filter the destination cannot
+   * act on is a field in a shareable URL that nobody reads. */
+  const allowed = allowedFieldsFor(snapshot.screen);
+  const params: Record<string, string> = {};
+  for (const [key, value] of snapshot.params.entries()) {
+    if (!allowed || allowed.includes(key)) params[key] = value;
+  }
+  for (const [key, value] of Object.entries(snapshot.aliasParams ?? {})) {
+    params[key] = value;
+  }
+
+  commit(buildRelativeLink({ screen: snapshot.screen, params }, window.location.search), "replace");
+  return true;
+}
+
+/**
  * Merge a patch into the current screen's query without adding a history
  * entry. `null` and `""` remove a field.
  *
@@ -158,7 +245,9 @@ export function patchQuery(patch: Record<string, string | number | null | undefi
     else merged.set(key, String(value));
   }
   const query = merged.toString();
-  commit(`${query ? `?${query}` : ""}#/${snapshot.screen}`, "replace");
+  // The canonical path, not the bare screen id: a filter edit must not quietly
+  // rewrite a grouped URL back into the flat form (R11-S10).
+  commit(`${query ? `?${query}` : ""}#/${canonicalPath(snapshot.screen)}`, "replace");
 }
 
 /**

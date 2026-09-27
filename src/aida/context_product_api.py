@@ -1,32 +1,51 @@
 import hashlib
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
-from aida.context_product_policy import (
-    can_serve_pinned_version,
-    current_published_version_number,
-    evaluate_context_product_purpose,
-    evaluate_context_product_quality_from_db,
-    is_version_retired,
-    was_previously_authorized_consumer,
+
+# The read decisions REST shares with GraphQL (R11-GQL01); re-imported so every existing
+# caller of these names is unchanged.
+from aida.context_product_coverage import (
+    PinnedScope,
+    PublishedScope,
+    load_changes_since_published_counts,
+    load_pinned_meaning_moved_counts,
+    publication_time,
+)
+from aida.context_product_read_service import COMPILER_ROLES
+from aida.context_product_reads import (
+    CONTEXT_PRODUCT_AUTHORS,
+    CONTEXT_PRODUCT_LIFECYCLE_READERS,
+    CONTEXT_PRODUCT_READERS,
+    _can_read_context_product_version,
+    _can_read_lifecycle,
+    _definition_from_version,
+    _enforce_capability_envelope,
+    _envelope_listing_clause,
+    _product_read,
+    _product_scope,
+    _version_read,
+    _version_scope,
+    context_product_listing,
+    read_context_product_version,
 )
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
 from aida.models import (
     BusinessDomain,
     ContextProduct,
     ContextProductConsumerBinding,
-    ContextProductConsumptionEdge,
     ContextProductRoleBinding,
     ContextProductVersion,
     DataSource,
@@ -35,17 +54,22 @@ from aida.models import (
     GovernedTool,
     GovernedToolVersion,
     MetadataBusinessAnnotation,
+    MetadataSchema,
     MetadataTable,
     Project,
     SemanticModelVersion,
 )
+from aida.ontology_models import OntologyVersion
 from aida.resource_scope import load_project_in_scope
 from aida.schemas import (
+    ContextProductChangesSummaryListRead,
+    ContextProductChangesSummaryRead,
     ContextProductConsumerBindingCreate,
     ContextProductConsumerBindingRead,
     ContextProductCreate,
     ContextProductDefinition,
     ContextProductRead,
+    ContextProductRoutineOptionRead,
     ContextProductScopeRead,
     ContextProductVersionCreate,
     ContextProductVersionRead,
@@ -53,45 +77,40 @@ from aida.schemas import (
     GovernanceReviewRead,
     Page,
 )
-from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.security import SecurityContext, require_roles
+
+# The names this module re-exports, listed so a type checker treats them as exported
+# (implicit re-export is off); what the module defines itself is public as before.
+__all__ = [
+    "CONTEXT_PRODUCT_AUTHORS",
+    "CONTEXT_PRODUCT_LIFECYCLE_READERS",
+    "CONTEXT_PRODUCT_READERS",
+    "_can_read_context_product_version",
+    "_can_read_lifecycle",
+    "_definition_from_version",
+    "_enforce_capability_envelope",
+    "_envelope_listing_clause",
+    "_product_read",
+    "_product_scope",
+    "_version_read",
+    "_version_scope",
+    "context_product_listing",
+    "read_context_product_version",
+]
 
 router = APIRouter(prefix="/v1", tags=["context-products"])
 
-CONTEXT_PRODUCT_AUTHORS = ("PlatformAdmin", "SemanticAdmin", "DataSteward")
-CONTEXT_PRODUCT_READERS = (
-    "PlatformAdmin",
-    "SemanticAdmin",
-    "DataSteward",
-    "Reviewer",
-    "Analyst",
-    "Auditor",
-    "Viewer",
-)
-CONTEXT_PRODUCT_LIFECYCLE_READERS = frozenset(
-    {*CONTEXT_PRODUCT_AUTHORS, "Reviewer", "Auditor"}
-)
-
 
 def context_product_fingerprint(body: ContextProductDefinition) -> str:
-    payload = json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    definition = body.model_dump(mode="json")
+    # R11-FP12/FP09: a reference group added after products existed is left out while empty,
+    # so a definition naming none fingerprints exactly as it did before the group existed and
+    # no stored fingerprint -- or etag built on one -- goes stale.
+    for late_group in ("routine_ids", "ontology_version_ids"):
+        if not definition.get(late_group):
+            definition.pop(late_group, None)
+    payload = json.dumps(definition, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _can_read_context_product_version(
-    context: SecurityContext, version: ContextProductVersion
-) -> bool:
-    """AT-7(a): a version-pinned read is not gated to PUBLISHED alone any
-    more -- a SUPPORTED version still within its support window reads
-    exactly like PUBLISHED for an otherwise-eligible consumer."""
-    if not context.roles.isdisjoint(CONTEXT_PRODUCT_LIFECYCLE_READERS):
-        return True
-    return can_serve_pinned_version(version) and not context.roles.isdisjoint(
-        version.allowed_consumer_roles
-    )
-
-
-def _can_read_lifecycle(context: SecurityContext) -> bool:
-    return not context.roles.isdisjoint(CONTEXT_PRODUCT_LIFECYCLE_READERS)
 
 
 async def replace_context_product_role_bindings(
@@ -115,27 +134,6 @@ async def replace_context_product_role_bindings(
         )
 
 
-def _definition_from_version(version: ContextProductVersion) -> ContextProductDefinition:
-    return ContextProductDefinition.model_validate(
-        {
-            "name": version.name,
-            "description": version.description,
-            "purpose": version.purpose,
-            "owner_type": version.owner_type,
-            "owner_principal": version.owner_principal,
-            "table_ids": version.table_ids,
-            "semantic_model_version_ids": version.semantic_model_version_ids,
-            "glossary_term_version_ids": version.glossary_term_version_ids,
-            "eligible_tool_version_ids": version.eligible_tool_version_ids,
-            "allowed_consumer_roles": version.allowed_consumer_roles,
-            "lineage_depth": version.lineage_depth,
-            "quality_requirements": version.quality_requirements,
-            "policy_summary": version.policy_summary,
-            "support_window_days": version.support_window_days,
-        }
-    )
-
-
 def apply_context_product_definition(
     version: ContextProductVersion, body: ContextProductDefinition
 ) -> ContextProductVersion:
@@ -151,6 +149,8 @@ def apply_context_product_definition(
     version.semantic_model_version_ids = payload["semantic_model_version_ids"]
     version.glossary_term_version_ids = payload["glossary_term_version_ids"]
     version.eligible_tool_version_ids = payload["eligible_tool_version_ids"]
+    version.routine_ids = payload["routine_ids"]
+    version.ontology_version_ids = payload["ontology_version_ids"]
     version.allowed_consumer_roles = list(body.allowed_consumer_roles)
     version.lineage_depth = body.lineage_depth
     version.quality_requirements = payload["quality_requirements"]
@@ -158,70 +158,6 @@ def apply_context_product_definition(
     version.support_window_days = body.support_window_days
     version.fingerprint = context_product_fingerprint(body)
     return version
-
-
-def _version_read(
-    product: ContextProduct, version: ContextProductVersion
-) -> ContextProductVersionRead:
-    return ContextProductVersionRead(
-        **_definition_from_version(version).model_dump(),
-        id=version.id,
-        organization_id=version.organization_id,
-        product_id=version.product_id,
-        product_key=product.product_key,
-        version=version.version,
-        status=version.status,
-        fingerprint=version.fingerprint,
-        created_by=version.created_by,
-        approved_by=version.approved_by,
-        approved_at=version.approved_at,
-        published_at=version.published_at,
-        based_on_version_id=version.based_on_version_id,
-        created_at=version.created_at,
-        updated_at=version.updated_at,
-        superseded_at=version.superseded_at,
-        support_window_ends_at=version.support_window_ends_at,
-        superseded_by_version_id=version.superseded_by_version_id,
-    )
-
-
-def _product_read(
-    product: ContextProduct, latest_version: ContextProductVersion
-) -> ContextProductRead:
-    return ContextProductRead(
-        id=product.id,
-        organization_id=product.organization_id,
-        project_id=product.project_id,
-        product_key=product.product_key,
-        lifecycle_status=product.lifecycle_status,
-        created_by=product.created_by,
-        latest_version=_version_read(product, latest_version),
-        created_at=product.created_at,
-        updated_at=product.updated_at,
-    )
-
-
-async def _product_scope(
-    session: AsyncSession, product_id: UUID, context: SecurityContext
-) -> ContextProduct:
-    product = await session.get(ContextProduct, product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="context product not found")
-    enforce_organization(context, product.organization_id)
-    return product
-
-
-async def _version_scope(
-    session: AsyncSession, version_id: UUID, context: SecurityContext
-) -> tuple[ContextProduct, ContextProductVersion]:
-    version = await session.get(ContextProductVersion, version_id)
-    if version is None:
-        raise HTTPException(status_code=404, detail="context product version not found")
-    enforce_organization(context, version.organization_id)
-    product = await session.get(ContextProduct, version.product_id)
-    if product is None or product.organization_id != version.organization_id:
-        raise HTTPException(status_code=409, detail="context product identity is unavailable")
-    return product, version
 
 
 async def _require_exact_ids(
@@ -293,6 +229,29 @@ async def validate_context_product_references(
         ),
         body.eligible_tool_version_ids,
         "governed tool versions",
+    )
+    await _require_exact_ids(
+        session,
+        select(MetadataRoutine.id)
+        .join(DataSource, DataSource.id == MetadataRoutine.datasource_id)
+        .where(
+            MetadataRoutine.id.in_(body.routine_ids),
+            MetadataRoutine.organization_id == project.organization_id,
+            MetadataRoutine.status == "ACTIVE",
+            DataSource.project_id == project.id,
+        ),
+        body.routine_ids,
+        "routines",
+    )
+    await _require_exact_ids(
+        session,
+        select(OntologyVersion.id).where(
+            OntologyVersion.id.in_(body.ontology_version_ids),
+            OntologyVersion.organization_id == project.organization_id,
+            OntologyVersion.status == "APPROVED",
+        ),
+        body.ontology_version_ids,
+        "ontology versions",
     )
 
 
@@ -369,67 +328,198 @@ async def create_context_product(
     return _product_read(product, version)
 
 
+@router.get(
+    "/projects/{project_id}/context-product-routine-options",
+    response_model=list[ContextProductRoutineOptionRead],
+)
+async def list_context_product_routine_options(
+    project_id: UUID,
+    limit: int = Query(default=200, ge=1, le=500),
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> list[ContextProductRoutineOptionRead]:
+    """R11-FP12: the routines a draft in this project may name. The filter is the one
+    `validate_context_product_references` applies -- ACTIVE, on this project's own datasources
+    -- so the picker never offers a routine the create call would refuse."""
+    project = await load_project_in_scope(session, project_id, context)
+    rows = (
+        await session.execute(
+            select(MetadataRoutine, MetadataSchema.name, DataSource.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+            .join(DataSource, DataSource.id == MetadataRoutine.datasource_id)
+            .where(
+                MetadataRoutine.organization_id == project.organization_id,
+                MetadataRoutine.status == "ACTIVE",
+                DataSource.project_id == project.id,
+            )
+            .order_by(MetadataSchema.name, MetadataRoutine.name, MetadataRoutine.signature)
+            .limit(limit)
+        )
+    ).all()
+    return [
+        ContextProductRoutineOptionRead(
+            id=routine.id,
+            datasource_id=routine.datasource_id,
+            datasource_name=datasource_name,
+            schema_name=schema_name,
+            name=routine.name,
+            routine_type=routine.routine_type,
+            signature=routine.signature,
+        )
+        for routine, schema_name, datasource_name in rows
+    ]
+
+
 @router.get("/projects/{project_id}/context-products", response_model=Page)
 async def list_context_products(
     project_id: UUID,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    # Only the products this caller could ask a question through: PUBLISHED, and naming a
+    # consumer role the caller holds. False -- the lifecycle view -- is what every existing
+    # caller gets. A plain literal default rather than `Query(default=False)` (the style the
+    # paging parameters above use for their bounds) because this handler is also called
+    # directly by tests: a `Query` object as the default would arrive as a truthy value on
+    # every such call, silently switching them to the askable view.
+    askable: bool = False,
     context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    project = await load_project_in_scope(session, project_id, context)
-    filters = (
-        ContextProduct.organization_id == project.organization_id,
-        ContextProduct.project_id == project.id,
+    listing = await context_product_listing(
+        session, context, project_id=project_id, askable=askable
     )
-    statement = select(ContextProduct, ContextProductVersion).join(
-        ContextProductVersion,
-        ContextProductVersion.product_id == ContextProduct.id,
-    )
-    count_statement = select(func.count(func.distinct(ContextProduct.id))).select_from(
-        ContextProduct
-    ).join(ContextProductVersion, ContextProductVersion.product_id == ContextProduct.id)
-    if _can_read_lifecycle(context):
-        latest_version = (
-            select(func.max(ContextProductVersion.version))
-            .where(ContextProductVersion.product_id == ContextProduct.id)
-            .correlate(ContextProduct)
-            .scalar_subquery()
-        )
-        visibility: tuple[ColumnElement[bool], ...] = (
-            ContextProductVersion.version == latest_version,
-        )
-    else:
-        statement = statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        ).distinct()
-        count_statement = count_statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        )
-        visibility = (
-            ContextProductVersion.status == "PUBLISHED",
-            ContextProductRoleBinding.organization_id == project.organization_id,
-            ContextProductRoleBinding.role_name.in_(context.roles),
-        )
     rows = (
         await session.execute(
-            statement
-            .where(*filters, *visibility)
-            .order_by(ContextProduct.product_key)
-            .limit(limit)
-            .offset(offset)
+            listing.statement.order_by(ContextProduct.product_key).limit(limit).offset(offset)
         )
     ).all()
-    total = await session.scalar(count_statement.where(*filters, *visibility))
+    total = await session.scalar(listing.count_statement)
     return Page(
         items=[_product_read(product, version) for product, version in rows],
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/context-products/changes-since-published",
+    response_model=ContextProductChangesSummaryListRead,
+)
+async def list_context_product_changes_since_published(
+    project_id: UUID,
+    product_id: UUID | None = None,
+    limit: int = Query(default=200, ge=1, le=500),
+    context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ContextProductChangesSummaryListRead:
+    """R11-FP12: what has moved under each product's latest version, for a whole project.
+
+    The same reading `Query.contextProductCoverage` gives for one version, counted for every
+    product a caller can see, in a fixed number of queries
+    (`load_changes_since_published_counts`). It exists so a list can show a product as stale
+    without a person pressing a button per row, and so the screens that only ever list products
+    -- the agent gateway's exposure list, Ask's picker, the rollout version list -- can show the
+    same thing.
+
+    **Why its own route, and not a field on the product list.** The product list admits
+    `CONTEXT_PRODUCT_READERS` (Viewer and Auditor among them); a coverage reading admits
+    `COMPILER_ROLES`, and the compile route and the GraphQL coverage field both refuse the
+    others. Carrying the reading on the list row would hand it to roles those doors refuse, so
+    it is a separate read with the coverage roles, and a screen asks for it only when the
+    session holds them.
+
+    `product_id` narrows it to one product and answers for EVERY version of it, newest first,
+    rather than one row per product: what the rollout screen needs, where the choice is between a
+    product's versions and an older one can have drifted further than the latest. The product is
+    read through the same listing, so a product the caller may not list is not answered for.
+
+    Visibility is the product list's own (`context_product_listing`), so a caller is told about
+    exactly the products it may already list, in the same order, and a project in another
+    organization is refused there, before any coverage is read.
+    """
+    listing = await context_product_listing(
+        session, context, project_id=project_id, askable=False
+    )
+    if product_id is not None:
+        product = await session.scalar(
+            listing.statement.with_only_columns(ContextProduct).where(
+                ContextProduct.id == product_id
+            )
+        )
+        if product is None:
+            raise HTTPException(status_code=404, detail="context product not found")
+        versions = (
+            await session.scalars(
+                select(ContextProductVersion)
+                .where(ContextProductVersion.product_id == product.id)
+                .order_by(ContextProductVersion.version.desc())
+                .limit(limit + 1)
+            )
+        ).all()
+        rows: list[tuple[ContextProduct, ContextProductVersion]] = [
+            (product, version) for version in versions
+        ]
+    else:
+        rows = [
+            (listed, version)
+            for listed, version in (
+                await session.execute(
+                    listing.statement.order_by(ContextProduct.product_key).limit(limit + 1)
+                )
+            ).all()
+        ]
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    scopes = [
+        PublishedScope(
+            version_id=version.id,
+            table_ids=version.table_ids or [],
+            routine_ids=version.routine_ids or [],
+            since=publication_time(version),
+        )
+        for _product, version in rows
+        if version is not None
+    ]
+    pins = [
+        PinnedScope(
+            version_id=version.id,
+            ontology_version_ids=version.ontology_version_ids or [],
+            semantic_model_version_ids=version.semantic_model_version_ids or [],
+            glossary_term_version_ids=version.glossary_term_version_ids or [],
+        )
+        for _product, version in rows
+        if version is not None
+    ]
+    # The products' own organization: every row is from the one project the listing admitted,
+    # and a platform-level caller's context need not name an organization at all.
+    organization_id = rows[0][0].organization_id if rows else None
+    counts = (
+        await load_changes_since_published_counts(session, organization_id, scopes)
+        if organization_id is not None
+        else {}
+    )
+    meaning = (
+        await load_pinned_meaning_moved_counts(session, organization_id, pins)
+        if organization_id is not None
+        else {}
+    )
+    return ContextProductChangesSummaryListRead(
+        project_id=project_id,
+        generated_at=datetime.now(UTC),
+        truncated=truncated,
+        items=[
+            ContextProductChangesSummaryRead(
+                product_id=product.id,
+                version_id=version.id,
+                version=version.version,
+                status=version.status,
+                changed_subjects=counts.get(version.id),
+                meaning_moved=meaning.get(version.id, 0),
+            )
+            for product, version in rows
+            if version is not None
+        ],
     )
 
 
@@ -442,24 +532,27 @@ async def list_context_product_versions(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     product = await _product_scope(session, product_id, context)
+    # AR-06 (R11-C6): this listing is one product's versions, so it is the
+    # same envelope decision as reading one of them -- and the cheapest
+    # remaining door to "does product B exist and what versions does it have"
+    # for an agent whose envelope names only product A.
+    await _enforce_capability_envelope(session, context, product)
     statement = select(ContextProductVersion)
     count_statement = select(func.count()).select_from(ContextProductVersion)
     visibility: tuple[ColumnElement[bool], ...] = ()
     if not _can_read_lifecycle(context):
-        statement = statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        ).distinct()
-        count_statement = count_statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        )
+        # EXISTS rather than a join plus `.distinct()`: DISTINCT over the whole version row
+        # includes its `JSON` id lists, which PostgreSQL cannot compare (a 500 for every
+        # non-lifecycle reader), and the count joined without DISTINCT, so a version bound to
+        # two roles the caller holds was counted twice. One row per version needs neither.
         visibility = (
             ContextProductVersion.status == "PUBLISHED",
-            ContextProductRoleBinding.organization_id == product.organization_id,
-            ContextProductRoleBinding.role_name.in_(context.roles),
+            exists().where(
+                ContextProductRoleBinding.context_product_version_id
+                == ContextProductVersion.id,
+                ContextProductRoleBinding.organization_id == product.organization_id,
+                ContextProductRoleBinding.role_name.in_(context.roles),
+            ),
         )
     versions = (
         await session.scalars(
@@ -489,151 +582,9 @@ async def get_context_product_version(
     context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextProductVersionRead:
-    product, version = await _version_scope(session, version_id, context)
-    if not _can_read_context_product_version(context, version):
-        # AT-7(a)/AT-D1: a retired version (SUPERSEDED/DEPRECATED, or a
-        # SUPPORTED version past its window) is not always the same "not
-        # found" as a role denial or a version that never published. Only a
-        # caller whose role would be eligible for this version AND who was
-        # actually, provably authorized for *this exact version* at some
-        # point (a real prior consumption edge, not merely a role match --
-        # see `was_previously_authorized_consumer`) gets the distinguishable
-        # retirement signal. Everyone else -- wrong role, or never actually
-        # read it before, or the version simply never published -- gets the
-        # identical anti-enumeration 404 as always.
-        if context.roles.isdisjoint(version.allowed_consumer_roles) or not is_version_retired(
-            version
-        ):
-            raise HTTPException(status_code=404, detail="context product version not found")
-        authorized_before = await was_previously_authorized_consumer(
-            session, version_id=version.id, principal_id=context.principal_id
-        )
-        if not authorized_before:
-            raise HTTPException(status_code=404, detail="context product version not found")
-        current_version = await current_published_version_number(session, product.id)
-        record_audit(
-            session,
-            context,
-            action="context_product.read.retired",
-            resource_type="context_product_version",
-            resource_id=str(version.id),
-            outcome="DENIED",
-            correlation_id=get_correlation_id(),
-            details={
-                "product_key": product.product_key,
-                "version": version.version,
-                "current_version": current_version,
-            },
-        )
-        await session.commit()
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail={
-                "error": "context_product_version_retired",
-                "message": (
-                    "This context product version has been retired. "
-                    "Re-pin to the current published version."
-                ),
-                "product_key": product.product_key,
-                "version": version.version,
-                "current_version": current_version,
-            },
-        )
-    if not _can_read_lifecycle(context):
-        purpose_decision = evaluate_context_product_purpose(
-            context.business_purpose, version.policy_summary
-        )
-        if not purpose_decision.allowed:
-            record_audit(
-                session,
-                context,
-                action="context_product.read.purpose_denied",
-                resource_type="context_product_version",
-                resource_id=str(version.id),
-                outcome="DENIED",
-                correlation_id=get_correlation_id(),
-                details={"purpose": purpose_decision.snapshot()},
-            )
-            await session.commit()
-            raise HTTPException(status_code=404, detail="context product version not found")
-        quality_decision = await evaluate_context_product_quality_from_db(
-            session,
-            organization_id=version.organization_id,
-            table_id_values=version.table_ids,
-            requirements=version.quality_requirements,
-        )
-        if not quality_decision.allowed:
-            record_audit(
-                session,
-                context,
-                action="context_product.read.quality_denied",
-                resource_type="context_product_version",
-                resource_id=str(version.id),
-                outcome="DENIED",
-                correlation_id=get_correlation_id(),
-                details={"quality": quality_decision.snapshot()},
-            )
-            await session.commit()
-            raise HTTPException(status_code=404, detail="context product version not found")
-        correlation_id = get_correlation_id()
-        session.add(
-            ContextProductConsumptionEdge(
-                organization_id=version.organization_id,
-                context_product_version_id=version.id,
-                principal_id=context.principal_id,
-                principal_type=context.principal_type,
-                channel="REST",
-                correlation_id=correlation_id,
-                product_fingerprint=version.fingerprint,
-                policy_decision="ALLOW",
-                quality_snapshot=quality_decision.snapshot(),
-            )
-        )
-        record_audit(
-            session,
-            context,
-            action="context_product.read",
-            resource_type="context_product_version",
-            resource_id=str(version.id),
-            outcome="SUCCESS",
-            correlation_id=correlation_id,
-            details={"fingerprint": version.fingerprint},
-        )
-        record_outbox(
-            session,
-            organization_id=version.organization_id,
-            aggregate_type="context_product_version",
-            aggregate_id=str(version.id),
-            event_type="context.product_consumed.v1",
-            payload={
-                "product_key": product.product_key,
-                "version": version.version,
-                "fingerprint": version.fingerprint,
-                "principal_id": context.principal_id,
-                "channel": "REST",
-            },
-        )
-        # CX-4: Record consumption lineage
-        await record_consumption(
-            session,
-            organization_id=version.organization_id,
-            edge=ConsumptionEdge(
-                consumer_id=context.principal_id,
-                consumer_type=context.principal_type,
-                resource_type="context_product_version",
-                resource_id=str(version.id),
-                channel="REST",
-                correlation_id=correlation_id,
-                policy_decision="ALLOW",
-                business_purpose=context.business_purpose,
-                details={
-                    "product_key": product.product_key,
-                    "version": version.version,
-                    "fingerprint": version.fingerprint,
-                },
-            ),
-        )
-        await session.commit()
+    product, version = await read_context_product_version(
+        session, context, version_id, channel="REST"
+    )
     return _version_read(product, version)
 
 
@@ -654,6 +605,9 @@ async def get_context_product_version_scope(
     quality gate) -- it describes scope, it is not itself a retrieval.
     """
     product, version = await _version_scope(session, version_id, context)
+    # AR-06 (R11-C6): the scope composition is still this product, so the
+    # envelope still bounds who may see how far it reaches.
+    await _enforce_capability_envelope(session, context, product, version)
     if not _can_read_context_product_version(context, version):
         raise HTTPException(status_code=404, detail="context product version not found")
     project = await session.get(Project, product.project_id)
@@ -1039,6 +993,12 @@ async def list_context_product_consumer_bindings(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     product = await _product_scope(session, product_id, context)
+    # AR-06 (R11-C6): the fourth door to one named product, and the same
+    # per-product decision as the three above. The governance roles this
+    # listing is restricted to make it a *narrower* door, not an exempt one:
+    # a contracted agent holding `DataSteward` has no more business
+    # administering a product outside its envelope than consuming one.
+    await _enforce_capability_envelope(session, context, product)
     statement = (
         select(ContextProductConsumerBinding, ContextProductVersion)
         .join(

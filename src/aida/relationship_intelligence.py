@@ -42,15 +42,6 @@ def _has_token(normalized: str, pattern: str) -> bool:
     return f"_{pattern}_" in f"_{normalized}_"
 
 
-def _find_matches(names: dict[str, str], patterns: frozenset[str]) -> list[str]:
-    """Return original column names whose normalized form matches any pattern."""
-    return [
-        original
-        for original, normalized in names.items()
-        if any(_has_token(normalized, pattern) for pattern in patterns)
-    ]
-
-
 @dataclass(frozen=True, slots=True)
 class ColumnMeta:
     """Metadata-only view of one column: names, types, and (optional) profile stats."""
@@ -87,9 +78,6 @@ class ColumnMeta:
 # override at all upstream. ``resolve_canonical_table_id`` below is that
 # resolution, as a pure function; ``aida.intelligence_api`` does the fetching
 # (the family lookup and any ``CanonicalTableMapping`` row) and calls it.
-
-CANONICAL_RESOLUTION_ALGORITHM_VERSION = "canonical-resolution-v1"
-
 
 def resolve_canonical_table_id(
     *, base_table_id: UUID | None, steward_override_table_id: UUID | None

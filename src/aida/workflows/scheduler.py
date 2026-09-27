@@ -1,27 +1,43 @@
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Coroutine, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
+from prometheus_client import Counter
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aida.business_graph import run_rollup_rebuild_pass
 from aida.certification_expiry_warning import run_certification_expiry_warning_pass
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signal_processing import process_change_signals
+from aida.classification_propagation import propagate_for_datasource
 from aida.config import Settings, get_settings
+from aida.context_rebuild import organizations_needing_rebuild, run_context_rebuild
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
 from aida.delivery_intents import run_delivery_worker_pass
+from aida.entitlements import run_entitlement_fulfilment_pass
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
+from aida.footprint_metrics import run_footprint_metrics_pass
+from aida.freshness import (
+    FRESHNESS_SCHEDULER_PRINCIPAL,
+    evaluate_freshness_for_datasource,
+)
+from aida.freshness_observation import observe_freshness_for_datasource
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
 from aida.governance_review_relay import run_review_notification_pass
 from aida.graph_reconciliation import run_graph_reconciliation_pass
 from aida.logging import configure_logging
+from aida.model_route_health import run_model_route_reachability_pass
 from aida.models import (
     AnalysisRun,
+    DataSource,
     MetadataTable,
     NotificationRuleRecord,
     OwnershipRule,
@@ -33,7 +49,16 @@ from aida.ownership_expiry_warning import run_ownership_expiry_pass
 from aida.playbooks import run_due_playbooks_pass
 from aida.principal_reconciliation import run_principal_reconciliation_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
+from aida.query_gateway import QueryExecutionGateway
 from aida.reaper_service import run_reaper_scheduler_pass
+from aida.scheduler_leadership import (
+    STANDBY_RETRY_SECONDS,
+    LeaderLockProvider,
+    SchedulerLeadership,
+    default_lock_provider,
+)
+from aida.scheduler_pass_status import SCHEDULER_PASS_NAMES as PERSISTED_PASS_NAMES
+from aida.scheduler_pass_status import save_pass_outcomes
 from aida.security import SecurityContext
 from aida.stewardship_api import (
     UNOWNED_BACKLOG_ROUTE_LIMIT,
@@ -41,9 +66,16 @@ from aida.stewardship_api import (
     _scope_table_ids,
     _unowned_asset_table_facts,
 )
+from aida.task_agent_schedule import run_task_agent_schedule_pass
+from aida.vector_index_service import run_vector_index_rebuild_pass
+from aida.worker_metrics import serve_worker_metrics
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
 logger = structlog.get_logger(__name__)
+
+#: Written into every derived classification the propagation pass stores, so
+#: the evidence says a scheduled sweep produced it and not a person.
+CLASSIFICATION_PROPAGATION_PRINCIPAL = "scheduler:classification-propagation"
 
 
 def maintenance_window_allows(policy: ScanPolicy, now: datetime) -> bool:
@@ -496,6 +528,194 @@ async def run_graph_reconciliation_scheduler_pass(
     )
 
 
+#: R11-B17: last propagation sweep per datasource, in process memory -- the
+#: same tradeoff every pass above accepts (a restart costs one redundant
+#: sweep; propagation is idempotent, since a re-derived value supersedes its
+#: own previous row rather than accumulating).
+_classification_propagation_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_classification_propagation_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Propagate classifications along reviewed column lineage, per datasource.
+
+    AT-11 could review and apply a derived classification but nothing produced
+    one, so an estate never had any. This is the producer.
+
+    Off unless an operator sets an interval, like the task agents: the pass
+    writes derived rows a person may later be asked to promote, so it is opted
+    into rather than discovered. Nothing it writes is enforced -- a derived
+    classification only becomes the asserted, policy-enforced value through the
+    review queue (`apply_classification_promotion`).
+
+    Returns how many datasources were swept. One datasource's failure is logged
+    and skipped, never aborting the rest, matching every pass above.
+    """
+    interval = settings.classification_propagation_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(select(DataSource.id, DataSource.organization_id))
+        ).all()
+    swept = 0
+    for datasource_id, organization_id in rows:
+        previous = _classification_propagation_last_run_at.get(datasource_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await propagate_for_datasource(
+                    session,
+                    organization_id=organization_id,
+                    datasource_id=datasource_id,
+                    created_by=CLASSIFICATION_PROPAGATION_PRINCIPAL,
+                    max_edges=settings.classification_propagation_max_edges,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one datasource must not stop the sweep
+            logger.exception(
+                "classification_propagation_failed", datasource_id=str(datasource_id)
+            )
+            continue
+        _classification_propagation_last_run_at[datasource_id] = effective_now
+        swept += 1
+    return swept
+
+
+#: R11-B8: last freshness sweep per datasource, in process memory -- the same
+#: tradeoff every pass above accepts. A restart costs at most one redundant
+#: sweep, and a redundant sweep is a no-op: re-evaluating an unchanged
+#: watermark against an already-open incident only moves `last_observed_at`.
+_freshness_evaluation_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_freshness_evaluation_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Evaluate approved watermark contracts into the quality incident sink.
+
+    DQ-2 could evaluate freshness on request and nothing ever asked, so a
+    violation was something a person had to go and look for. This is the
+    schedule. `evaluate_freshness_for_datasource` owns the lifecycle --
+    STALE opens or updates one incident per table, recovery RESOLVES it --
+    and files into the same `DataQualityIncident` rows the built-in controls
+    and the custom rule packs use, so DQ-3's runtime coupling picks a
+    freshness incident up with no changes on its side.
+
+    Off unless an operator sets an interval, like the task agents and the
+    propagation pass above, and more pointedly than either: an open CRITICAL
+    incident fails governed tools closed, so an estate opts into that after
+    its contracts are approved rather than discovering it.
+
+    Returns how many datasources were swept. One datasource's failure is
+    logged and skipped, never aborting the rest, matching every pass above.
+    """
+    interval = settings.freshness_evaluation_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(select(DataSource.id, DataSource.organization_id))
+        ).all()
+    swept = 0
+    gateway = QueryExecutionGateway(settings)
+    for datasource_id, organization_id in rows:
+        previous = _freshness_evaluation_last_run_at.get(datasource_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                context = SecurityContext(
+                    principal_id=FRESHNESS_SCHEDULER_PRINCIPAL,
+                    principal_type="WORKER",
+                    organization_id=organization_id,
+                    roles=frozenset({"SchedulerWorker"}),
+                )
+                # R11-B8: observe first, so each contract is judged on a
+                # watermark read in this pass. Before this nothing ever wrote
+                # an observation, and every approved contract read STALE.
+                await observe_freshness_for_datasource(
+                    session,
+                    organization_id=organization_id,
+                    datasource_id=datasource_id,
+                    context=context,
+                    gateway=gateway,
+                    max_tables=settings.freshness_evaluation_max_tables,
+                    now=effective_now,
+                )
+                await evaluate_freshness_for_datasource(
+                    session,
+                    organization_id=organization_id,
+                    datasource_id=datasource_id,
+                    context=context,
+                    now=effective_now,
+                    max_tables=settings.freshness_evaluation_max_tables,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one datasource must not stop the sweep
+            logger.exception("freshness_evaluation_failed", datasource_id=str(datasource_id))
+            continue
+        _freshness_evaluation_last_run_at[datasource_id] = effective_now
+        swept += 1
+    return swept
+
+
+#: R11-FP16: last change-signal sweep per organization, in process memory -- the
+#: same tradeoff as the passes above. A restart costs at most one early sweep,
+#: and a sweep is idempotent: a PROCESSED signal is never read again.
+_change_signal_processing_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_change_signal_processing_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Process PENDING change signals into holds and re-examination, per organization.
+
+    Off unless an operator sets an interval: like the freshness pass above, this
+    opens incidents, and an open CRITICAL incident fails governed tools closed.
+    `process_change_signals` owns what each signal does. Returns how many
+    organizations were swept; one organization's failure is logged and skipped.
+    """
+    interval = settings.change_signal_processing_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        organization_ids = (
+            await session.scalars(
+                select(MetadataChangeSignal.organization_id)
+                .where(MetadataChangeSignal.status == "PENDING")
+                .distinct()
+            )
+        ).all()
+    swept = 0
+    for organization_id in organization_ids:
+        previous = _change_signal_processing_last_run_at.get(organization_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await process_change_signals(
+                    session,
+                    organization_id=organization_id,
+                    limit=settings.change_signal_processing_batch_size,
+                    now=effective_now,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one organization must not stop the sweep
+            logger.exception(
+                "change_signal_processing_failed", organization_id=str(organization_id)
+            )
+            continue
+        _change_signal_processing_last_run_at[organization_id] = effective_now
+        swept += 1
+    return swept
+
+
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
     try:
         await client.start_workflow(
@@ -609,36 +829,239 @@ def due_scan_policies_statement(settings: Settings, now: datetime) -> Select[tup
     )
 
 
+_context_rebuild_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_context_rebuild_pass(settings: Settings, *, now: datetime | None = None) -> int:
+    """R11-FP16: rebuild what source changes made stale, per organization, into review queues.
+
+    Off by default (`context_rebuild_interval_minutes` is 0): it drafts regenerated tools,
+    descriptions and context product versions for review and resolves source-change holds, so an
+    estate opts in once change-signal processing runs. Opens no session while off.
+    """
+    interval = settings.context_rebuild_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        organization_ids = await organizations_needing_rebuild(session)
+    swept = 0
+    for organization_id in organization_ids:
+        previous = _context_rebuild_last_run_at.get(organization_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await run_context_rebuild(
+                    session, organization_id, settings=settings, now=effective_now
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one organization must not stop the pass
+            logger.exception("context_rebuild_failed", organization_id=str(organization_id))
+            continue
+        _context_rebuild_last_run_at[organization_id] = effective_now
+        swept += 1
+    return swept
+
+
+#: Every step `_isolated` guards, by the label its failures carry. Defined in
+#: `aida.scheduler_pass_status` so the API can read it without importing this module;
+#: `tests/test_scheduler_pass_isolation.py` holds it to the calls the iteration makes.
+SCHEDULER_PASS_NAMES = PERSISTED_PASS_NAMES
+#: The label of the one step the iteration guards per item rather than with `_isolated`.
+_SCAN_POLICY_PROCESSING = "scan_policy_processing"
+
+#: The outcome of each pass of the iteration now running: `None` when it returned, else the
+#: class name of what it raised. Set by `run_scheduler_iteration`, filled by `_isolated`, and
+#: saved at the end of the iteration for the Operations screen (R11-VAL04).
+_PASS_OUTCOMES: ContextVar[dict[str, str | None] | None] = ContextVar(
+    "scheduler_pass_outcomes", default=None
+)
+
+SCHEDULER_PASS_FAILURES = Counter(
+    "aida_scheduler_pass_failures_total",
+    (
+        "Maintenance passes of the scheduler iteration that raised, by pass. The loop carries on "
+        "with the next pass and the next iteration, so a pass that fails every time shows here "
+        "and in the `scheduler_pass_failed` log line, and nowhere else."
+    ),
+    labelnames=("scheduler_pass",),
+)
+# Created at import, not on the first failure: a series that appears with its first event makes
+# `increase()` skip that event.
+for _pass_name in SCHEDULER_PASS_NAMES:
+    SCHEDULER_PASS_FAILURES.labels(scheduler_pass=_pass_name)
+
+
+def _record_pass_failure(name: str, error: BaseException | None = None) -> None:
+    """Log the exception being handled and count it. Call from inside an `except` block.
+
+    `error_type` is the one piece of the cause that survives the platform's log redaction, which
+    blanks the formatted traceback: without it the line named the pass and not what went wrong.
+    """
+    error_type = type(error).__name__ if error is not None else "Exception"
+    logger.exception("scheduler_pass_failed", scheduler_pass=name, error_type=error_type)
+    SCHEDULER_PASS_FAILURES.labels(scheduler_pass=name).inc()
+    _note_outcome(name, error_type)
+
+
+def _note_outcome(name: str, error_class: str | None) -> None:
+    """Remember one pass's outcome for this iteration's `save_pass_outcomes`, if one is running."""
+    outcomes = _PASS_OUTCOMES.get()
+    if outcomes is not None:
+        outcomes[name] = error_class
+
+
+#: After a pass fails it is skipped for this long, doubling per consecutive failure up to the cap,
+#: and attempted again on the first iteration after. Most passes record their "last run" only when
+#: they succeed, so one that fails every time used to be retried on every poll (every 10 s by
+#: default: about 8,640 failures and log lines a day for a daily pass). The cap stays under the
+#: five-minute STALE bound of `aida.scheduler_pass_status`, so a pass in backoff reads FAILING on
+#: the Operations screen, never STALE, and `AtlasSchedulerPassFailing` still sees it fail.
+PASS_FAILURE_BACKOFF_BASE_SECONDS = 30
+PASS_FAILURE_BACKOFF_MAX_SECONDS = 240
+
+#: Per pass: consecutive failures, and when it may run again. In process memory, like every cadence
+#: tracker here: a new leader starts with none, which costs at most one early retry.
+_pass_backoff: dict[str, tuple[int, datetime]] = {}
+
+
+def _now() -> datetime:
+    """The clock `_isolated` reads; a test replaces it."""
+    return datetime.now(UTC)
+
+
+async def _isolated(name: str, step: Awaitable[object]) -> None:
+    """Run one pass and contain its failure (R11-VAL04).
+
+    An exception out of any one pass used to leave `run_scheduler_iteration`, and `run_scheduler`
+    with it: the loop ended, leadership was released, and every other pass stopped for a fault
+    in one. Now the failing pass is logged and counted and the rest of the iteration runs, and it
+    is not attempted again until its backoff (`PASS_FAILURE_BACKOFF_*`) has passed. Cancellation
+    is not an `Exception` and still propagates, so shutdown is unaffected.
+    """
+    now = _now()
+    held = _pass_backoff.get(name)
+    if held is not None and now < held[1]:
+        # Not attempted this iteration, so there is no outcome to note; the coroutine the caller
+        # built is closed rather than left un-awaited.
+        if isinstance(step, Coroutine):
+            step.close()
+        return
+    try:
+        await step
+    except Exception as error:
+        _record_pass_failure(name, error)
+        failures = (held[0] if held is not None else 0) + 1
+        delay = min(
+            PASS_FAILURE_BACKOFF_BASE_SECONDS * 2 ** (failures - 1),
+            PASS_FAILURE_BACKOFF_MAX_SECONDS,
+        )
+        _pass_backoff[name] = (failures, now + timedelta(seconds=delay))
+    else:
+        _pass_backoff.pop(name, None)
+        _note_outcome(name, None)
+
+
+async def _save_pass_outcomes(outcomes: dict[str, str | None]) -> None:
+    """Persist this iteration's outcomes (R11-VAL04). Never raises: the loop must outlive it.
+
+    A database that cannot take the write is already failing the passes themselves, and each of
+    those is logged and counted; this adds one log line of its own and nothing else.
+    """
+    if not outcomes:
+        return
+    try:
+        async with session_factory() as session:
+            await save_pass_outcomes(session, outcomes, datetime.now(UTC))
+    except Exception:
+        logger.exception("scheduler_pass_status_write_failed", passes=len(outcomes))
+
+
 async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
-    await reconcile_cancellation_requests(client, settings)
+    outcomes: dict[str, str | None] = {}
+    _PASS_OUTCOMES.set(outcomes)
+    await _isolated("cancellation_reconcile", reconcile_cancellation_requests(client, settings))
     now = datetime.now(UTC)
-    await rebalance_usage_weighted_priorities(settings, now=now)
-    await run_owner_routing_pass(settings, now=now)
-    await run_custom_rule_pack_pass(now=now)
-    await run_graph_reconciliation_scheduler_pass(settings, now=now)
-    await run_due_playbooks_pass(now=now)
+    await _isolated("priority_rebalance", rebalance_usage_weighted_priorities(settings, now=now))
+    await _isolated("owner_routing", run_owner_routing_pass(settings, now=now))
+    await _isolated("custom_rule_packs", run_custom_rule_pack_pass(now=now))
+    await _isolated(
+        "graph_reconciliation", run_graph_reconciliation_scheduler_pass(settings, now=now)
+    )
+    # R11-D11: the writer for the ADR-0018 classification projections. Both
+    # `business_node_closure` and `business_node_rollup` were built and measured
+    # (ADR-0020: 3,147 ms to compute a subtree roll-up on read, 0.4 ms to read the
+    # materialisation) and then never rebuilt by anything, so the roll-up endpoint
+    # took its slow authoritative fallback on every call. Daily by default and
+    # rate-limited inside the pass by `business_rollup_rebuild_interval_seconds`,
+    # so calling it every iteration is a no-op between windows -- the same shape as
+    # the reaper and the two expiry sweeps below.
+    await _isolated("rollup_rebuild", run_rollup_rebuild_pass(settings, now=now))
+    # Same cadence shape, and here for the same reason: RT-1's persisted
+    # vector index had no scheduled writer, so it went stale and retrieval
+    # paid a provider call per candidate per query instead. A no-op when no
+    # embedding provider is configured, which is the default.
+    await _isolated("vector_index_rebuild", run_vector_index_rebuild_pass(settings, now=now))
+    # R11-B18: an approved model route whose model the provider has retired
+    # looks entirely healthy and fails every generated answer. Listing models
+    # is free; this never generates.
+    await _isolated(
+        "model_route_reachability", run_model_route_reachability_pass(settings, now=now)
+    )
+    await _isolated(
+        "classification_propagation", run_classification_propagation_pass(settings, now=now)
+    )
+    # R11-B8: DQ-2's watermark contracts, observed and evaluated on a cadence instead of
+    # only when a screen asks. Off by default
+    # (`freshness_evaluation_interval_minutes`), and the pass returns before
+    # opening a session when off -- the same shape as the propagation pass
+    # above. Violations and recoveries both land in the shared quality
+    # incident sink, so nothing downstream of DQ-3 needed a second consumer.
+    await _isolated("freshness_evaluation", run_freshness_evaluation_pass(settings, now=now))
+    # R11-FP16: change signals into holds in the same incident sink. Off by default
+    # (`change_signal_processing_interval_minutes`), and no session is opened when off.
+    await _isolated(
+        "change_signal_processing", run_change_signal_processing_pass(settings, now=now)
+    )
+    # R11-FP16: carry those changes down the dependency chain into review queues, and release
+    # a hold once nothing standing on the view is stale. Off by default, like the pass above.
+    await _isolated("context_rebuild", run_context_rebuild_pass(settings, now=now))
+    # R11-FP17: publish what those passes have left outstanding as gauges. On by default and
+    # five-minutely: it reads the same register the Operations screen reads, exports totals by
+    # gap kind with no tenant in a label, and is the only thing that notices a backlog growing
+    # while every request still succeeds.
+    await _isolated("footprint_metrics", run_footprint_metrics_pass(settings, now=now))
+    await _isolated("due_playbooks", run_due_playbooks_pass(now=now))
+    # ADR-0029: scheduled task-agent runs. Off by default -- every
+    # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening
+    # a session when nothing is scheduled. Each run is the governed run a person
+    # would start: contract, kill switch, tier, bounds and ledger unchanged.
+    await _isolated("task_agent_schedule", run_task_agent_schedule_pass(settings, now=now))
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.
-    await purge_expired_value_profile_artifacts(settings, now=now)
+    await _isolated("value_profile_purge", purge_expired_value_profile_artifacts(settings, now=now))
     # P2-06: generic reaper. Sweeps stale rows across artifact types (rejected
     # enrichment proposals past retention, orphan asset-term links whose glossary
     # term was deprecated, stale pending drafts, ...). Guarded by
     # `settings.reaper_enabled` and rate-limited to
     # `settings.reaper_sweep_interval_seconds` inside `run_reaper_scheduler_pass`,
     # so calling it every iteration here is cheap (a no-op between windows).
-    await run_reaper_scheduler_pass(settings, now=now)
+    await _isolated("reaper", run_reaper_scheduler_pass(settings, now=now))
     # P2-08: daily "your certification expires in N days" sweep, rate-limited
     # inside `run_certification_expiry_warning_pass` by
     # `settings.certification_expiry_warn_interval_seconds` (default 86_400),
     # so calling it every iteration is cheap (a no-op between windows -- the
     # exact same shape the reaper above uses).
-    await run_certification_expiry_warning_pass(settings, now=now)
+    await _isolated(
+        "certification_expiry_warning", run_certification_expiry_warning_pass(settings, now=now)
+    )
     # P2-07: daily "your ownership expires in N days" sweep + expire-lapsed
     # sweep. Rate-limited inside `run_ownership_expiry_pass` by
     # `settings.ownership_expiry_warn_interval_seconds` (default 86_400) with
     # the same in-process cadence tracker the cert pass above uses.
-    await run_ownership_expiry_pass(settings, now=now)
+    await _isolated("ownership_expiry", run_ownership_expiry_pass(settings, now=now))
     # F19: replay recent `identity.principal.deleted/merged.v1` outbox rows
     # through the ownership-lifecycle handlers, so a leaver's ownership is
     # reconciled by a process that actually runs rather than by a caller that
@@ -647,13 +1070,15 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # for every deployment that has not opted in -- the same shape as the
     # reaper and certification passes above. Replaying an already-reconciled
     # event changes nothing (see `aida.principal_reconciliation`).
-    await run_principal_reconciliation_pass(settings, now=now)
+    await _isolated(
+        "principal_reconciliation", run_principal_reconciliation_pass(settings, now=now)
+    )
     # NT-1: relay REVIEW_REQUESTED. Review creation has 27 call sites and no
     # shared funnel, so this is a sweep over a watermark column rather than a
     # hook -- see `governance_review_relay`'s module docstring for why that is
     # the better shape here and not just the cheaper one. Returns immediately
     # when governance notifications are off, which is the default.
-    await run_review_notification_pass(settings, now=now)
+    await _isolated("review_notification", run_review_notification_pass(settings, now=now))
     # F04/F12: drain durable delivery intents -- SIEM security events and
     # governance notifications share one ledger and one worker
     # (`aida.delivery_intents`). This is the *only* place in the platform that
@@ -662,15 +1087,43 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # (`delivery_worker_enabled`); when off the pass returns before touching
     # the database, and everything queued stays queued for whenever it is
     # turned on -- the same shape as the reaper and certification passes above.
-    await run_delivery_worker_pass(settings, now=now)
-    async with session_factory() as session:
-        policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
+    await _isolated("delivery_worker", run_delivery_worker_pass(settings, now=now))
+    # Entitlement deliveries drain on the same tick and then settle: a
+    # `webhook`-provider grant stays PENDING -- and therefore still denies
+    # queries -- until its destination acknowledges. A no-op under the default
+    # `outbox` provider, which has nothing to deliver because this platform is
+    # itself the entitlement authority.
+    await _isolated("entitlement_fulfilment", run_entitlement_fulfilment_pass(settings, now=now))
+    # The one step that is not a pass: choosing the scan policies that are due. Its failure is
+    # contained and counted like a pass's, and the iteration admits nothing this time round.
+    try:
+        async with session_factory() as session:
+            policy_ids = (
+                await session.scalars(due_scan_policies_statement(settings, now))
+            ).all()
+    except Exception as error:
+        _record_pass_failure("scan_policy_selection", error)
+        policy_ids = []
+    else:
+        _note_outcome("scan_policy_selection", None)
     admitted = 0
+    # Admitting each due policy is its own step for the counter and the Operations screen
+    # (`scan_policy_processing`): a policy that fails is logged with its id and the next one runs,
+    # and the iteration reports the step as failing if any policy failed.
+    processing_error: str | None = None
     for policy_id in policy_ids:
         try:
             admitted += int(await process_scan_policy(policy_id, client, settings, now=now))
-        except Exception:
-            logger.exception("scan_policy_processing_failed", policy_id=str(policy_id))
+        except Exception as error:
+            processing_error = type(error).__name__
+            logger.exception(
+                "scan_policy_processing_failed",
+                policy_id=str(policy_id),
+                error_type=processing_error,
+            )
+            SCHEDULER_PASS_FAILURES.labels(scheduler_pass=_SCAN_POLICY_PROCESSING).inc()
+    _note_outcome(_SCAN_POLICY_PROCESSING, processing_error)
+    await _save_pass_outcomes(outcomes)
     return admitted
 
 
@@ -750,22 +1203,53 @@ async def reconcile_cancellation_requests(client: Client, settings: Settings) ->
     return reconciled
 
 
-async def run_scheduler() -> None:
+async def run_scheduler(lock_provider: LeaderLockProvider | None = None) -> None:
+    """Run the maintenance loop -- but only while this replica holds the leadership lock.
+
+    R11-AUD04: most of the periodic passes in `run_scheduler_iteration` rate-limit themselves
+    with in-process trackers, so two replicas would each run every one of them. Every replica
+    now runs this loop, but `SchedulerLeadership.confirm` gates each iteration on a live
+    PostgreSQL advisory lock (`aida.scheduler_leadership`); a replica that does not hold it
+    only retries the lock. `lock_provider` defaults to the real one for the configured
+    database -- the parameter exists so a test can put two replicas on one fake lock.
+    """
     settings = get_settings()
     configure_logging(settings.log_level)
+    # R11-FP17: before anything else that can block. `run_footprint_metrics_pass`
+    # below publishes the footprint gauges into *this* process's registry, and
+    # `aida.main`'s `/metrics` cannot see them; without this listener they are set
+    # where no scrape can reach. A no-op unless `worker_metrics_port` is set, and
+    # never fatal -- see `aida.worker_metrics`.
+    serve_worker_metrics(settings, process="fleet-scheduler")
     client = await Client.connect(
         settings.temporal_address,
         namespace=settings.temporal_namespace,
+    )
+    leadership = SchedulerLeadership(
+        lock_provider if lock_provider is not None else default_lock_provider(settings.database_url)
     )
     logger.info(
         "fleet_scheduler_started",
         poll_seconds=settings.scheduler_poll_seconds,
         batch_size=settings.scheduler_batch_size,
     )
-    while True:
-        admitted = await run_scheduler_iteration(client, settings)
-        logger.info("fleet_scheduler_iteration", admitted_runs=admitted)
-        await asyncio.sleep(settings.scheduler_poll_seconds)
+    try:
+        while True:
+            # Checked before *every* iteration, not once at start: a leader whose lock
+            # connection has died must not start another pass. An iteration already under
+            # way is not interrupted -- it finishes, and this check then stops the next one.
+            if await leadership.confirm():
+                admitted = await run_scheduler_iteration(client, settings)
+                logger.info("fleet_scheduler_iteration", admitted_runs=admitted)
+                await asyncio.sleep(settings.scheduler_poll_seconds)
+            else:
+                await asyncio.sleep(STANDBY_RETRY_SECONDS)
+    finally:
+        # Cancellation (asyncio.run on Ctrl-C), or an exception out of a pass, ends the
+        # loop; releasing here hands the lock to a standby now instead of when PostgreSQL
+        # notices the process has gone. A SIGTERM/SIGKILL never reaches this line, and does
+        # not need to: the kernel closes the socket and the server drops the session.
+        await leadership.release()
 
 
 if __name__ == "__main__":

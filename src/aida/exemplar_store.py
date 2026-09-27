@@ -18,8 +18,9 @@ turned up a real signal already wired end to end:
 
 * `QueryFeedback` (`intelligence_api.py::upsert_query_feedback`) is a human
   rating a specific `AgentRun` "HELPFUL"/otherwise. `QueryMemoryEvidence.status`
-  reaches `"ELIGIBLE"` only once positive feedback exists and no negative
-  feedback is outstanding (`query_memory.py`'s own docstring: "Negative
+  reaches `"ELIGIBLE"` only once positive feedback exists -- since R11-MP17,
+  from someone other than the run's owner -- and no negative feedback is
+  outstanding (`query_memory.py`'s own docstring: "Negative
   feedback already suppresses reuse before this module ever runs"). That is
   the codebase's one existing, human-confirmed "this run was correct"
   signal -- `promote_confirmed_agent_run` below uses it directly, not a new

@@ -44,6 +44,7 @@ from aida.db import Base
 from aida.models import (
     AnalysisRun,
     AuditEvent,
+    ColumnProfile,
     ColumnValueProfileArtifact,
     DataDomain,
     DataSource,
@@ -726,3 +727,204 @@ async def test_revoke_endpoint_only_accepts_an_approved_policy(session) -> None:
     )
     assert revoked.status == "REVOKED"
     assert revoked.revoked_by == "carol"
+
+
+# --- R11-FP04: an exception grants values, and nothing else -----------------
+#
+# `Docs/10-architecture/20-database-footprint-and-agent-context.md:1013-1015`:
+# the profiling-exception capability "is distinct from arbitrary sample-row
+# access; sample access must not be inferred from a profiling exception."
+#
+# Nothing enforced that. Everything above proves an approved policy *unlocks*
+# range/top-value capture; nothing proved it unlocks nothing else -- and "an
+# exception is already approved for this classification, so surely the
+# aggregate read can be more generous" is exactly the reasoning that would
+# widen it. Review 2026-09-16 F06.2 keeps the row half unbuilt, so the tests
+# below are the fence around the half that is.
+
+
+async def _profile_with_policy(session, monkeypatch, *, approve: bool):
+    """Run one profiling pass, with or without an APPROVED policy for PII."""
+    datasource, run, table, _schema, column = await _seed_table_with_column(
+        session, classification="PII"
+    )
+    if approve:
+        session.add(
+            ProfilingExceptionPolicy(
+                id=uuid4(),
+                organization_id=datasource.organization_id,
+                datasource_id=datasource.id,
+                classification="PII",
+                status="APPROVED",
+                retention_days=14,
+                requested_by="steward-a",
+                request_reason="fraud investigation",
+                decided_by="steward-b",
+                decided_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(activities, "session_factory", lambda: session)
+    monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+    monkeypatch.setattr(activities, "get_settings", lambda: Settings(_env_file=None))
+    monkeypatch.setenv("TEST_DSN", "postgresql://test")
+    fake = _FakeConnector(
+        capabilities=ConnectorCapabilities(value_range_profiling=True),
+        value_snapshots=(
+            ColumnValueProfileSnapshot(
+                name="email",
+                min_value="aaron@example.test",
+                max_value="zoe@example.test",
+                top_values=(("aaron@example.test", 4),),
+            ),
+        ),
+    )
+    monkeypatch.setattr(activities.connector_registry, "create", lambda *a, **k: fake)
+    await activities.profile_table_task({"run_id": str(run.id), "table_id": str(table.id)})
+    return table, column
+
+
+_VALUE_FREE_FACETS = (
+    "distinct_ratio",
+    "effectively_unique",
+    "cardinality_class",
+    "blank_count",
+    "whitespace_only_count",
+    "length_bucket_scheme",
+    "length_bucket_counts",
+    "frequency_entropy_bits",
+    "unavailable_facets",
+    "min_length",
+    "max_length",
+    "null_count",
+    "non_null_count",
+    "approximate_distinct_count",
+)
+
+
+async def test_an_approved_exception_adds_no_aggregate_facet_to_the_value_free_profile(
+    session, monkeypatch
+) -> None:
+    """R11-FP04 / module 05 section 8: the exception widens one table, not the profile.
+
+    Runs the same profiling pass twice -- once with an APPROVED PII policy and
+    once without -- and requires the value-free `ColumnProfile` row to come out
+    identical across every facet. The policy may show up in exactly one place:
+    whether a `ColumnValueProfileArtifact` exists.
+
+    This is the test that fails if someone "helpfully" copies the captured
+    minimum into `ColumnProfile.min_length`, tightens the length buckets using
+    the known range, or derives a cardinality class from the top-value counts.
+    Each of those is a plausible next commit, and each would move real values
+    into the table every downstream consumer reads without a policy check.
+    """
+    _table, column = await _profile_with_policy(session, monkeypatch, approve=False)
+    without = await session.scalar(
+        select(ColumnProfile).where(ColumnProfile.column_id == column.id)
+    )
+    assert without is not None
+    baseline = {name: getattr(without, name) for name in _VALUE_FREE_FACETS}
+    assert (await session.scalars(select(ColumnValueProfileArtifact))).all() == []
+
+    _table, column = await _profile_with_policy(session, monkeypatch, approve=True)
+    with_policy = await session.scalar(
+        select(ColumnProfile).where(ColumnProfile.column_id == column.id)
+    )
+    assert with_policy is not None
+    widened = {name: getattr(with_policy, name) for name in _VALUE_FREE_FACETS}
+
+    assert widened == baseline, (
+        "an APPROVED profiling exception changed the value-free profile; it may "
+        "only unlock ColumnValueProfileArtifact"
+    )
+    # The control: without this, the comparison above would pass for a policy
+    # that did nothing at all.
+    artifacts = (await session.scalars(select(ColumnValueProfileArtifact))).all()
+    assert len(artifacts) == 1, "the approved policy did not actually capture anything"
+    assert artifacts[0].min_value is not None
+
+
+async def test_an_approved_exception_grants_no_row_access_and_no_row_handle(
+    session, monkeypatch
+) -> None:
+    """The other half of the rule: no rows, and nothing that could become rows.
+
+    A "sample id", a "preview token" or a row handle is the shape row access
+    arrives in before it is called row access, so the assertion is over the
+    whole mapped surface the exception unlocks rather than over a list of field
+    names somebody remembered.
+    """
+    await _profile_with_policy(session, monkeypatch, approve=True)
+    artifact = (await session.scalars(select(ColumnValueProfileArtifact))).all()[0]
+
+    columns = {column.name for column in artifact.__table__.columns}
+    assert columns == {
+        "id",
+        "organization_id",
+        "datasource_id",
+        "table_id",
+        "column_id",
+        "column_profile_id",
+        "policy_id",
+        "classification",
+        "min_value",
+        "max_value",
+        "top_values",
+        "captured_at",
+        "expires_at",
+    }, (
+        "the value-bearing artifact grew a column; anything resembling a row, a "
+        "row handle, a sample id or a preview token needs an ADR-0014 addendum, "
+        "not a migration"
+    )
+
+
+async def test_nothing_reads_the_value_bearing_artifact() -> None:
+    """R11-FP04: the artifact still has no reader, and adding one is a decision.
+
+    `ColumnValueProfileArtifact` is written by profiling and hard-deleted by the
+    retention sweep. There is no query path that returns it -- which is what let
+    the aggregate half of FP-04 ship without a sample-access policy at all. A
+    reader is a new egress of value-bearing data and belongs to the governed
+    half, so it must not appear as a side effect of extending the value-free
+    one.
+
+    Enumerated by module rather than by grepping for "select", because the
+    honest way to add a reader is a new module and a pattern-based check would
+    not see it.
+
+     only because this module carries a module-level asyncio marker; the
+    body is a pure static scan.
+    """
+    import pathlib
+
+    import aida
+
+    #: Each allowed reference, with what it is for. An entry here is a claim
+    #: that the module does not hand the artifact to a caller.
+    allowed = {
+        "aida.models": "re-export of the mapped class",
+        "aida.workflows.activities": "the write path (PR-2 capture)",
+        "aida.profiling_exceptions": "the retention purge, which deletes rather than returns",
+        "aida.api": "a comment about the purge, in the revoke endpoint's docstring",
+        "aida.connectors.base": "a docstring cross-reference from ColumnValueProfileSnapshot",
+    }
+
+    root = pathlib.Path(aida.__file__).parent
+    referencing: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        module = "aida." + ".".join(path.relative_to(root).with_suffix("").parts)
+        module = module.removesuffix(".__init__")
+        if "ColumnValueProfileArtifact" in path.read_text(encoding="utf-8"):
+            referencing.add(module)
+
+    unexpected = sorted(referencing - set(allowed))
+    assert unexpected == [], (
+        "these modules reference the value-bearing profiling artifact; a reader is "
+        "a new egress of source values and needs an ADR-0014 addendum rather than "
+        f"an entry in this list: {unexpected}"
+    )
+    # The list is itself asserted: a stale entry is a hole nobody can see.
+    stale = sorted(set(allowed) - referencing)
+    assert stale == [], f"these allowances name modules that no longer reference it: {stale}"

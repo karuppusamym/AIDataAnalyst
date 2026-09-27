@@ -1,15 +1,18 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
-import { PlaybooksScreen } from "./PlaybooksScreen";
+import { PlaybooksScreen, PLAYBOOK_UNSAVED_MESSAGE } from "./PlaybooksScreen";
+import { pendingUnsavedWarning, resetUnsavedRegistryForTests } from "../lib/unsavedChanges";
 
 const fetchPlaybooks = vi.fn();
 const createPlaybook = vi.fn();
 const updatePlaybook = vi.fn();
 const deletePlaybook = vi.fn();
 const runPlaybookNow = vi.fn();
-const fetchOrgDatasources = vi.fn();
+const listOrgDatasources = vi.fn();
+const storePlaybookDryRun = vi.fn();
+const runPlaybookAsPreviewed = vi.fn();
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -20,7 +23,18 @@ vi.mock("../lib/api", async () => {
     updatePlaybook: (...args: unknown[]) => updatePlaybook(...args),
     deletePlaybook: (...args: unknown[]) => deletePlaybook(...args),
     runPlaybookNow: (...args: unknown[]) => runPlaybookNow(...args),
-    fetchOrgDatasources: (...args: unknown[]) => fetchOrgDatasources(...args),
+    listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
+  };
+});
+
+vi.mock("../lib/api/playbookDryRuns", async () => {
+  const actual = await vi.importActual<typeof import("../lib/api/playbookDryRuns")>(
+    "../lib/api/playbookDryRuns",
+  );
+  return {
+    ...actual,
+    storePlaybookDryRun: (...args: unknown[]) => storePlaybookDryRun(...args),
+    runPlaybookAsPreviewed: (...args: unknown[]) => runPlaybookAsPreviewed(...args),
   };
 });
 
@@ -85,7 +99,12 @@ describe("PlaybooksScreen (AT-1)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fetchPlaybooks.mockResolvedValue({ items: [PLAYBOOK_TAG, PLAYBOOK_OWN_DISABLED], limit: 100, offset: 0, total: 2 });
-    fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+    listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+    resetUnsavedRegistryForTests();
+  });
+
+  afterEach(() => {
+    resetUnsavedRegistryForTests();
   });
 
   it("lists existing playbooks with action, schedule and enabled state", async () => {
@@ -123,7 +142,7 @@ describe("PlaybooksScreen (AT-1)", () => {
     await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Create playbook", { selector: "summary" }));
-    await waitFor(() => expect(fetchOrgDatasources).toHaveBeenCalled());
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New rule" } });
     fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: DATASOURCE.id } });
@@ -149,6 +168,55 @@ describe("PlaybooksScreen (AT-1)", () => {
       ),
     );
     await waitFor(() => expect(screen.getByText("New rule")).toBeInTheDocument());
+  });
+
+  /* ---------------------------------------------------------------------
+     R11-S13: the create form's unsaved-work reporting.
+
+     Automation (this screen) is a view of the Stewardship workspace now, so
+     an in-progress draft has to survive the same tab switch the bulk form's
+     `edited` flag already guards (`StewardshipScreen.test.tsx`'s "the bulk
+     form reports unsaved work"). These cases pin the reporting into the
+     same registry; the tab bar's side of the guard is
+     `StewardshipWorkspace.test.tsx`'s.
+  --------------------------------------------------------------------- */
+  it("reports an edited, unsubmitted draft, and stops once it is created", async () => {
+    createPlaybook.mockResolvedValue({ ...PLAYBOOK_TAG, id: "new-1", name: "New rule" });
+    render(<PlaybooksScreen />);
+    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+    expect(pendingUnsavedWarning()).toBeNull();
+
+    fireEvent.click(screen.getByText("Create playbook", { selector: "summary" }));
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New rule" } });
+    expect(pendingUnsavedWarning()).toBe(PLAYBOOK_UNSAVED_MESSAGE);
+
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: DATASOURCE.id } });
+    fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "stg_%" } });
+    fireEvent.change(screen.getByLabelText("Tag key"), { target: { value: "needs-review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create playbook" }));
+
+    await waitFor(() => expect(createPlaybook).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(pendingUnsavedWarning()).toBeNull());
+  });
+
+  it("keeps reporting when the create call fails, because the draft is still unfinished work", async () => {
+    createPlaybook.mockRejectedValue(new Error("422: match_pattern is required"));
+    render(<PlaybooksScreen />);
+    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Create playbook", { selector: "summary" }));
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New rule" } });
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: DATASOURCE.id } });
+    fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "stg_%" } });
+    fireEvent.change(screen.getByLabelText("Tag key"), { target: { value: "needs-review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create playbook" }));
+
+    await waitFor(() => expect(screen.getByText(/match_pattern is required/)).toBeInTheDocument());
+    expect(pendingUnsavedWarning()).toBe(PLAYBOOK_UNSAVED_MESSAGE);
   });
 
   it("runs a playbook now and reports the outcome", async () => {
@@ -221,6 +289,82 @@ describe("PlaybooksScreen (AT-1)", () => {
     await waitFor(() => expect(deletePlaybook).toHaveBeenCalledWith(PLAYBOOK_TAG.id));
     await waitFor(() => expect(screen.queryByText("Tag staging tables")).not.toBeInTheDocument());
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("opens a row's dry run, and a run bound to it updates the row like Run now", async () => {
+    storePlaybookDryRun.mockResolvedValue({
+      playbook_id: PLAYBOOK_TAG.id,
+      action: "TAG",
+      enabled: true,
+      rule_version: "1".repeat(64),
+      evaluated_at: "2026-09-19T00:00:00Z",
+      matched_count: 0,
+      tables_truncated: false,
+      columns_truncated: false,
+      auto_apply_max_items: 50,
+      predicted_disposition: "NO_MATCHES",
+      automation: {
+        action: "TAG",
+        subject_type: "TABLE",
+        has_automatic_branch: true,
+        automatic_branch_enabled: true,
+        automatic_when: "0 < matched_count <= auto_apply_max_items",
+        automatic_path: "aida.playbooks._auto_apply",
+        automatic_principal: "fleet-scheduler",
+        involves_model: false,
+        reviewed_operation_type: "TAG",
+        compensating_operation_when_reviewed: "RESTORE_TAG",
+        compensating_operation_when_automatic: null,
+        automatic_correction_reason: "NO_BEFORE_IMAGE_RECORDED",
+      },
+      items: [],
+      dry_run_id: "dry-1",
+      match_digest: "c".repeat(64),
+      evidence_digest: "d".repeat(64),
+      change_counts: {},
+    });
+    runPlaybookAsPreviewed.mockResolvedValue({
+      dry_run_id: "dry-1",
+      ran: true,
+      refusal_code: null,
+      binding: {
+        status: "MATCHES",
+        rule_version_matches: true,
+        match_set_matches: true,
+        evidence_matches: true,
+        added_count: 0,
+        removed_count: 0,
+        changed_count: 0,
+        moved_subject_ids: [],
+        reasons: [],
+      },
+      run: {
+        playbook_id: PLAYBOOK_TAG.id,
+        matched_count: 0,
+        outcome: "NO_MATCHES",
+        bulk_action_run_id: null,
+        bulk_stewardship_operation_id: null,
+        governance_review_id: null,
+      },
+    });
+    render(<PlaybooksScreen />);
+    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+    const tagRow = screen.getByText("Tag staging tables").closest("li")!;
+    // Nothing is fetched until a steward opens a row's dry run.
+    expect(storePlaybookDryRun).not.toHaveBeenCalled();
+    fireEvent.click(within(tagRow).getByRole("button", { name: "Dry run…" }));
+    const panel = within(tagRow).getByRole("region", { name: "Dry run of Tag staging tables" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Preview (dry run)" }));
+    await within(panel).findByText(/Would do nothing: no object matches the rule/);
+    expect(storePlaybookDryRun).toHaveBeenCalledWith(PLAYBOOK_TAG.id);
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Run as previewed" }));
+    await waitFor(() =>
+      expect(screen.getByText(/"Tag staging tables" matched 0 object\(s\) — no matches/)).toBeInTheDocument(),
+    );
+    expect(runPlaybookNow).not.toHaveBeenCalled();
+    // The row's last run moves, exactly as it does after Run now.
+    expect(within(tagRow).getByText("just now")).toBeInTheDocument();
   });
 
   it("does not dismiss on a backdrop click, because the action is destructive", async () => {

@@ -20,7 +20,7 @@ import { ApiError } from "../lib/api";
 --------------------------------------------------------------------------- */
 
 const fetchOrgProjects = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<ProjectRead>>>();
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchTools =
   vi.fn<(projectId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<GovernedToolVersionRead>>>();
 const createToolVersion =
@@ -35,7 +35,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchTools: (projectId: string, query: unknown, signal?: AbortSignal) => fetchTools(projectId, query, signal),
     createToolVersion: (projectId: string, body: GovernedToolVersionCreate, signal?: AbortSignal) =>
       createToolVersion(projectId, body, signal),
@@ -85,14 +85,14 @@ async function loadScreen() {
 
 beforeEach(() => {
   fetchOrgProjects.mockReset();
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchTools.mockReset();
   createToolVersion.mockReset();
   submitToolForReview.mockReset();
   requestToolDeprecation.mockReset();
   executeToolVersion.mockReset();
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   vi.resetModules();
   history.replaceState(null, "", "/");
 });

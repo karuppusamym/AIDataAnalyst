@@ -3,7 +3,7 @@ import type { DataSourceRead, GovernedToolVersionRead, ProjectRead } from "../li
 import type { PageOf } from "../lib/ui-types";
 import {
   createToolVersion,
-  fetchOrgDatasources,
+  listOrgDatasources,
   fetchOrgProjects,
   fetchTools,
   requestToolDeprecation,
@@ -219,7 +219,7 @@ export function ToolRegistryScreen() {
   const datasources = useAsyncResource<DataSourceRead[]>(
     async (signal) => {
       try {
-        return (await fetchOrgDatasources(ORG, signal)).items;
+        return (await listOrgDatasources(ORG, signal)).items;
       } catch (reason) {
         // An abort still has to propagate, or a superseded request would be
         // written to state as "this org has no sources".

@@ -12,7 +12,7 @@ Three groups, mirroring `tests/test_view_tool_blueprint.py`'s split:
 * One real (in-memory SQLite) database integration test against the actual
   draft-creation endpoint (`aida.procedure_tool_api.create_procedure_tool_blueprint`),
   proving a genuinely read-only procedure produces a DRAFT `GovernedToolVersion`
-  plus its `ProcedureToolGenerationRecord` provenance row, and that a
+  plus its provenance audit record, and that a
   procedure with a real write is refused (422) before ever reaching it.
 """
 
@@ -32,6 +32,7 @@ from aida.config import Settings
 from aida.db import Base
 from aida.envelope_models import MetadataRoutine
 from aida.models import (
+    AuditEvent,
     DataDomain,
     DataSource,
     GovernedTool,
@@ -43,7 +44,6 @@ from aida.models import (
     Organization,
     Project,
 )
-from aida.procedure_lineage_models import ProcedureToolGenerationRecord
 from aida.procedure_tool_api import ProcedureToolBlueprintRequest, create_procedure_tool_blueprint
 from aida.procedure_tool_blueprint import (
     ProcedureNotEligibleError,
@@ -277,14 +277,15 @@ async def test_endpoint_creates_a_draft_from_a_proven_read_only_procedure(
 
     provenance = (
         await scenario.db.scalars(
-            select(ProcedureToolGenerationRecord).where(
-                ProcedureToolGenerationRecord.routine_id == routine.id
+            select(AuditEvent).where(
+                AuditEvent.action == "governed_tool.version.generated_from_procedure"
             )
         )
     ).all()
     assert len(provenance) == 1
-    assert provenance[0].tool_version_id == created.id
-    assert provenance[0].statement_count >= 1
+    assert provenance[0].resource_id == str(created.id)
+    assert provenance[0].details["routine_id"] == str(routine.id)
+    assert provenance[0].details["statement_count"] >= 1
 
     # And the draft is a real GovernedToolVersion row, reachable the same
     # way every other tool-generator's draft is -- proving this path funnels

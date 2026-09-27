@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   AgentAnalysisResponse,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
+  ContextProductRead,
   DataSourceRead,
+  QueryLineageRead,
 } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 
@@ -17,7 +19,7 @@ import type { PageOf } from "../lib/ui-types";
    exact endpoint/args called, not a superficial snapshot.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources =
+const listOrgDatasources =
   vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const runAgentAnalysis =
   vi.fn<(datasourceId: string, body: unknown, signal?: AbortSignal) => Promise<AgentAnalysisResponse>>();
@@ -26,13 +28,21 @@ const fetchAgentRuns =
 const fetchAgentRun = vi.fn<(agentRunId: string, signal?: AbortSignal) => Promise<AgentRunRead>>();
 const fetchAgentRunGroundingReceipts =
   vi.fn<(agentRunId: string, signal?: AbortSignal) => Promise<AgentRunGroundingReceiptsRead>>();
+const fetchQueryExecutionLineage =
+  vi.fn<(executionId: string, signal?: AbortSignal) => Promise<QueryLineageRead>>();
+const fetchContextProducts =
+  vi.fn<(projectId: string, query?: unknown, signal?: AbortSignal) => Promise<PageOf<ContextProductRead>>>();
+
+/* R11-FP12: the project's count of what moved under each product since publication. */
+const fetchContextProductChangesSummary = vi.fn();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    fetchContextProductChangesSummary: (...args: unknown[]) => fetchContextProductChangesSummary(...args),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     runAgentAnalysis: (datasourceId: string, body: unknown, signal?: AbortSignal) =>
       runAgentAnalysis(datasourceId, body, signal),
     fetchAgentRuns: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
@@ -40,8 +50,42 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchAgentRun: (agentRunId: string, signal?: AbortSignal) => fetchAgentRun(agentRunId, signal),
     fetchAgentRunGroundingReceipts: (agentRunId: string, signal?: AbortSignal) =>
       fetchAgentRunGroundingReceipts(agentRunId, signal),
+    fetchContextProducts: (projectId: string, query?: unknown, signal?: AbortSignal) =>
+      fetchContextProducts(projectId, query, signal),
+    fetchQueryExecutionLineage: (executionId: string, signal?: AbortSignal) =>
+      fetchQueryExecutionLineage(executionId, signal),
   };
 });
+
+/* R11-MP26: the caller's own conversations. */
+const fetchConversations = vi.fn();
+const fetchConversation = vi.fn();
+const deleteConversation = vi.fn();
+vi.mock("../lib/api/conversations", () => ({
+  fetchConversations: (...args: unknown[]) => fetchConversations(...args),
+  fetchConversation: (...args: unknown[]) => fetchConversation(...args),
+  deleteConversation: (...args: unknown[]) => deleteConversation(...args),
+}));
+
+/** R11-FP12: one published product this project offers, as the list route returns it. */
+const PUBLISHED_PRODUCT = {
+  id: "cp_1",
+  organization_id: "org1",
+  project_id: "proj1",
+  product_key: "customer-revenue",
+  lifecycle_status: "ACTIVE",
+  created_by: "steward-1",
+  latest_version: { id: "cpv_1", status: "PUBLISHED", version: 2, name: "Customer revenue" },
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+} as unknown as ContextProductRead;
+
+const DRAFT_ONLY_PRODUCT = {
+  ...PUBLISHED_PRODUCT,
+  id: "cp_2",
+  product_key: "draft-only",
+  latest_version: { id: "cpv_2", status: "DRAFT", version: 1, name: "Draft only" },
+} as unknown as ContextProductRead;
 
 const DATASOURCE: DataSourceRead = {
   id: "ds_1", organization_id: "org1", line_of_business_id: "lob1", data_domain_id: "dom1",
@@ -49,6 +93,22 @@ const DATASOURCE: DataSourceRead = {
   environment: "PRODUCTION", credential_reference: "vault://x", status: "ACTIVE", capabilities: {},
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
 };
+
+/** A second source in ANOTHER project, which is what makes a selected product
+ *  unhonourable rather than merely unselected (F08). */
+const DATASOURCE_OTHER_PROJECT: DataSourceRead = {
+  ...DATASOURCE,
+  id: "ds_2",
+  project_id: "proj2",
+  name: "bigquery_eu",
+};
+
+/** The list route's answer, per project: `proj1` offers the published product,
+ *  `proj2` offers nothing. */
+function productsByProject(projectId: string): PageOf<ContextProductRead> {
+  const items = projectId === "proj1" ? [PUBLISHED_PRODUCT] : [];
+  return { items, limit: 200, offset: 0, total: items.length };
+}
 
 const ANALYSIS_RESPONSE: AgentAnalysisResponse = {
   agent_run_id: "run_fresh_1",
@@ -134,13 +194,24 @@ async function pickDatasource() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   runAgentAnalysis.mockReset();
   fetchAgentRuns.mockReset();
   fetchAgentRun.mockReset();
   fetchAgentRunGroundingReceipts.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  fetchContextProducts.mockReset();
+  fetchQueryExecutionLineage.mockReset();
+  fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+  fetchContextProductChangesSummary.mockReset();
+  fetchContextProductChangesSummary.mockResolvedValue({
+    project_id: "proj1", generated_at: "2026-09-22T00:00:00Z", truncated: false, items: [],
+  });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
+  fetchConversations.mockReset();
+  fetchConversations.mockResolvedValue([]);
+  fetchConversation.mockReset();
+  deleteConversation.mockReset();
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -150,6 +221,54 @@ afterEach(() => {
 });
 
 describe("AskScreen against the real agent-analyses endpoint", () => {
+  it("does not paginate history while it is hidden", async () => {
+    let complete!: (page: PageOf<AgentRunRead>) => void;
+    const pending = new Promise<PageOf<AgentRunRead>>((resolve) => { complete = resolve; });
+    fetchAgentRuns.mockImplementationOnce(() => pending);
+    // A stale server count must not cause an endless empty-page fetch loop.
+    fetchAgentRuns.mockResolvedValue({ items: [], limit: 50, offset: 1, total: 2 });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    await waitFor(() => expect(fetchAgentRuns).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Hide history" }));
+    await act(async () => {
+      complete({ items: [PAST_RUN], limit: 50, offset: 0, total: 2 });
+      await pending;
+    });
+    expect(fetchAgentRuns).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Show history" }));
+    await waitFor(() => expect(fetchAgentRuns).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(fetchAgentRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])("discards a late history page after switching source (pagination=%s)", async (pagination) => {
+    const secondSource = { ...DATASOURCE, id: "ds_2", name: "Second source" };
+    listOrgDatasources.mockResolvedValue({ items: [DATASOURCE, secondSource], limit: 500, offset: 0, total: 2 });
+    let complete!: (page: PageOf<AgentRunRead>) => void;
+    const pending = new Promise<PageOf<AgentRunRead>>((resolve) => { complete = resolve; });
+    if (pagination) {
+      fetchAgentRuns.mockResolvedValueOnce({ items: [PAST_RUN], limit: 50, offset: 0, total: 2 });
+    }
+    fetchAgentRuns.mockImplementationOnce(() => pending);
+    fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    await waitFor(() => expect(fetchAgentRuns).toHaveBeenCalledTimes(pagination ? 2 : 1));
+    const pendingCall = fetchAgentRuns.mock.calls[pagination ? 1 : 0]!;
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_2" } });
+    await screen.findByText("No questions asked yet");
+    expect(pendingCall[2]?.aborted).toBe(true);
+    await act(async () => {
+      complete({ items: [{ ...PAST_RUN, id: "late-old-source-run" }], limit: 50, offset: 0, total: 2 });
+      await pending;
+    });
+    expect(screen.queryByRole("article", { name: "Run late-old-source-run" })).not.toBeInTheDocument();
+    expect(screen.getByText("No questions asked yet")).toBeInTheDocument();
+  });
+
   it("picking a datasource then asking a question calls POST .../agent-analyses with the right body and renders the real explanation", async () => {
     runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
     fetchAgentRunGroundingReceipts.mockResolvedValue({
@@ -258,6 +377,178 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.getByText(/demoted in ranking — open quality incident \(factor 0\.30\)/)).toBeInTheDocument();
   });
 
+  it("lists the product knowledge the SQL was generated with, as the run recorded it (R11-OKF02)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_okf_1",
+      plan_evidence: {
+        strategy: "FREEFORM_SQL",
+        okf_context: {
+          used: true,
+          status: "MATCHED",
+          documents: [
+            {
+              citation: "K1",
+              path: "concepts/concept-517dc9fa59f0c2ca8ab62fa03360fcbb.md",
+              title: "End of day position",
+              sha256: "10e702b6a2fe49eaa2156571dc3dc3a7aec234cf5b79631304e3a49417244ed5",
+              hop: 0,
+              sections: ["definition", "also-called", "mapped-objects"],
+            },
+            {
+              citation: "K2",
+              path: "sources/source-a/schemas/schema-b/tables/table-c.md",
+              title: "bank_demo.warehouse.fact_account_balances",
+              sha256: "dbbd07fec9570000000000000000000000000000000000000000000000000000",
+              hop: 1,
+              sections: ["purpose", "schema"],
+            },
+          ],
+        },
+      },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_okf_1", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "closing position yesterday" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    expect(await screen.findByText("Product knowledge (OKF)")).toBeInTheDocument();
+    expect(screen.getByText("[K1] matched the question")).toBeInTheDocument();
+    expect(screen.getByText("[K2] linked from a match")).toBeInTheDocument();
+    expect(screen.getByText("bank_demo.warehouse.fact_account_balances")).toBeInTheDocument();
+    expect(screen.getByText(/definition · also-called · mapped-objects · sha256 10e702b6a2fe/)).toBeInTheDocument();
+  });
+
+  it("says why no product knowledge was used when the bundle held nothing on the question (R11-OKF02)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_okf_2",
+      plan_evidence: { strategy: "FREEFORM_SQL", okf_context: { used: false, status: "NO_MATCH", documents: [] } },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_okf_2", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "weather in Paris" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("The product's knowledge holds nothing on this question.")).toBeInTheDocument();
+  });
+
+  it("shows the decision model's advisory notes: an ambiguous question and a disputed answer (R11-MP27)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_mp27_1",
+      plan_evidence: {
+        strategy: "FREEFORM_SQL",
+        clarification: { suggested: true, ambiguity_probability: 0.86, route: "jev-decisions" },
+        answer_review: { verdict: "CHECK", disputed: true, answers_question_probability: 0.93 },
+      },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_mp27_1", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "show me the numbers" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const notes = await screen.findByRole("list", { name: "Model review" });
+    expect(within(notes).getByText("may be ambiguous")).toBeInTheDocument();
+    expect(within(notes).getByText("review: check")).toBeInTheDocument();
+    expect(within(notes).getByText(/A second model wrote a different query/)).toBeInTheDocument();
+    // Advisory: the answer itself is still shown.
+    expect(screen.getByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+  });
+
+  it("shows no model review when the run recorded none", async () => {
+    runAgentAnalysis.mockResolvedValue({ ...ANALYSIS_RESPONSE, agent_run_id: "run_mp27_2" });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_mp27_2", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "total deposits" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Model review" })).not.toBeInTheDocument();
+  });
+
+  it("carries a follow-up in the same conversation, and a new conversation drops it (R11-MP26)", async () => {
+    runAgentAnalysis
+      .mockResolvedValueOnce({ ...ANALYSIS_RESPONSE, agent_run_id: "run_c1", conversation_id: "conv_1", conversation_turn: 1 })
+      .mockResolvedValueOnce({ ...ANALYSIS_RESPONSE, agent_run_id: "run_c2", conversation_id: "conv_1", conversation_turn: 2 })
+      .mockResolvedValueOnce({ ...ANALYSIS_RESPONSE, agent_run_id: "run_c3", conversation_id: "conv_2", conversation_turn: 1 });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_c1", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue last quarter" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    const thread = await screen.findByRole("region", { name: "Conversation" });
+    expect(within(thread).getByText("net revenue last quarter")).toBeInTheDocument();
+    expect(runAgentAnalysis.mock.calls[0]![1]).not.toHaveProperty("conversation_id");
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "now by region" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toMatchObject({ question: "now by region", conversation_id: "conv_1" });
+    expect(await within(thread).findByText("now by region")).toBeInTheDocument();
+    expect(within(thread).getByText(/the 2 earlier ones/)).toBeInTheDocument();
+
+    fireEvent.click(within(thread).getByRole("button", { name: "New conversation" }));
+    expect(screen.queryByRole("region", { name: "Conversation" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "loans by branch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(3));
+    expect(runAgentAnalysis.mock.calls[2]![1]).not.toHaveProperty("conversation_id");
+  });
+
+  it("lists your conversations, continues one and deletes one (R11-MP26)", async () => {
+    const summary = {
+      id: "conv_9",
+      datasource_id: "ds_1",
+      title: "deposits for account ATLAS_VALUE_1",
+      turn_count: 2,
+      created_at: "2026-09-25T08:00:00Z",
+      last_turn_at: "2026-09-25T08:05:00Z",
+    };
+    fetchConversations.mockResolvedValue([summary]);
+    fetchConversation.mockResolvedValue({
+      ...summary,
+      turns: [
+        { turn: 1, agent_run_id: "r1", question: "deposits for account ATLAS_VALUE_1", asked_at: summary.created_at },
+        { turn: 2, agent_run_id: "r2", question: "and last month", asked_at: summary.last_turn_at },
+      ],
+    });
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE, agent_run_id: "run_c9", conversation_id: "conv_9", conversation_turn: 3,
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_c9", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    const panel = await screen.findByRole("region", { name: "Your conversations" });
+    expect(await within(panel).findByText("deposits for account ATLAS_VALUE_1")).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: /Continue conversation/ }));
+    const thread = await screen.findByRole("region", { name: "Conversation" });
+    expect(within(thread).getByText("and last month")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "now by branch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(1));
+    expect(runAgentAnalysis.mock.calls[0]![1]).toMatchObject({ conversation_id: "conv_9" });
+
+    deleteConversation.mockResolvedValue(undefined);
+    fetchConversations.mockResolvedValue([]);
+    fireEvent.click(within(panel).getByRole("button", { name: /Delete conversation/ }));
+    await waitFor(() => expect(deleteConversation).toHaveBeenCalledWith("conv_9"));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Conversation" })).not.toBeInTheDocument(),
+    );
+  });
+
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {
     runAgentAnalysis.mockRejectedValue(
       new (await import("../lib/api")).ApiError(409, AMBIGUITY_DETAIL),
@@ -283,6 +574,388 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.queryByText(ANALYSIS_RESPONSE.explanation)).not.toBeInTheDocument();
     expect(new URLSearchParams(location.search).get("run")).toBeNull();
     expect(screen.queryByText("The question could not be answered")).not.toBeInTheDocument();
+  });
+
+  it("offers the tables an ambiguous question matched and asks again naming the chosen one (R11-OKF02)", async () => {
+    const { ApiError } = await import("../lib/api");
+    runAgentAnalysis.mockRejectedValueOnce(
+      new ApiError(409, "the question matches 'warehouse.retail.orders' and 'warehouse.staging.orders' equally", {
+        details: {
+          code: "AMBIGUOUS_KNOWLEDGE",
+          message: "the question matches two tables equally",
+          required_parameters: [],
+          tool_version_id: null,
+          candidates: ["warehouse.retail.orders", "warehouse.staging.orders"],
+        },
+      }),
+    );
+    runAgentAnalysis.mockResolvedValueOnce(ANALYSIS_RESPONSE);
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "how many orders" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const refusal = await screen.findByRole("alert", { name: "Ambiguous knowledge refusal" });
+    expect(within(refusal).getByText("Which one do you mean?")).toBeInTheDocument();
+    // Not the tool-parameter form, and not a generic failure.
+    expect(within(refusal).queryByRole("button", { name: "Ask with these values" })).toBeNull();
+    fireEvent.click(within(refusal).getByRole("button", { name: "warehouse.staging.orders" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toEqual({
+      question: "how many orders (warehouse.staging.orders)",
+    });
+    expect((screen.getByLabelText("Question") as HTMLTextAreaElement).value).toBe(
+      "how many orders (warehouse.staging.orders)",
+    );
+    expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+  });
+
+  it("collects the inputs a governed tool asked for and asks again, pinning that tool (R11-B1)", async () => {
+    // With model generation off, an approved tool is the only path to an
+    // answer and it refuses until its inputs arrive. Before this, Ask showed
+    // the refusal and stopped there, so a fresh install could not answer a
+    // parameterised question at all.
+    const { ApiError } = await import("../lib/api");
+    runAgentAnalysis.mockRejectedValueOnce(
+      new ApiError(409, "approved tool requires parameters: customer_id", {
+        details: {
+          code: "MISSING_TOOL_PARAMETERS",
+          message: "approved tool requires parameters: customer_id",
+          required_parameters: ["customer_id"],
+          tool_version_id: "tv_orders_lookup_1",
+        },
+      }),
+    );
+    runAgentAnalysis.mockResolvedValueOnce(ANALYSIS_RESPONSE);
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "orders for a customer" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const refusal = await screen.findByRole("alert", { name: "Tool needs more input" });
+    const input = within(refusal).getByLabelText("customer_id");
+    fireEvent.change(input, { target: { value: "C-42" } });
+    fireEvent.click(within(refusal).getByRole("button", { name: "Ask with these values" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toEqual({
+      question: "orders for a customer",
+      tool_parameters: { customer_id: "C-42" },
+      preferred_tool_version_id: "tv_orders_lookup_1",
+    });
+    // The retry's answer replaces the refusal rather than sitting beside it.
+    expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+    const answer = screen.getByText(ANALYSIS_RESPONSE.explanation).closest("aside")!;
+    const history = screen.getByRole("heading", { name: "History" }).parentElement!.parentElement!;
+    expect(answer.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Focusing on the answer must not discard it or execute the question again.
+    fireEvent.click(screen.getByRole("button", { name: "Hide history" }));
+    expect(screen.getByRole("button", { name: "Show history" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(ANALYSIS_RESPONSE.explanation)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Show history" }));
+    expect(screen.getByRole("button", { name: "Hide history" })).toHaveAttribute("aria-expanded", "true");
+    expect(runAgentAnalysis).toHaveBeenCalledTimes(2);
+  });
+
+  it("says in the picker, and again once chosen, that a product's coverage moved since it was published (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1 });
+    fetchContextProductChangesSummary.mockResolvedValue({
+      project_id: "proj1", generated_at: "2026-09-22T00:00:00Z", truncated: false,
+      items: [
+        { product_id: "cp_1", version_id: "cpv_1", version: 2, status: "PUBLISHED", changed_subjects: 1 },
+      ],
+    });
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    const picker = await screen.findByLabelText("Context product");
+    await waitFor(() =>
+      expect(
+        within(picker).getByRole("option", { name: "Customer revenue (1 change since published)" }),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.change(picker, { target: { value: "customer-revenue" } });
+
+    expect(
+      await screen.findByText(/Some of what this product stands on has changed since it was published/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Answers still use the published version/)).toBeInTheDocument();
+    expect(fetchContextProductChangesSummary).toHaveBeenCalledWith(
+      "proj1",
+      { productId: undefined },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("asks through the selected published context product, and keeps asking through it when a clarification is answered (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT, DRAFT_ONLY_PRODUCT],
+      limit: 200,
+      offset: 0,
+      total: 2,
+    });
+    const { ApiError } = await import("../lib/api");
+    runAgentAnalysis.mockRejectedValueOnce(
+      new ApiError(409, "approved tool requires parameters: customer_id", {
+        details: {
+          code: "MISSING_TOOL_PARAMETERS",
+          message: "approved tool requires parameters: customer_id",
+          required_parameters: ["customer_id"],
+          tool_version_id: "tv_orders_lookup_1",
+        },
+      }),
+    );
+    runAgentAnalysis.mockResolvedValueOnce({
+      ...ANALYSIS_RESPONSE,
+      step_trace: [
+        { stage: "RESOLVED", details: { context_product_version_id: "cpv_1", context_product_version: 2 } },
+        { stage: "EXECUTED" },
+      ],
+    });
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    // Only the published product is offered: the server refuses the rest, so offering a draft
+    // would be offering a refusal.
+    const picker = await screen.findByLabelText("Context product");
+    await waitFor(() =>
+      expect(within(picker).getByRole("option", { name: "Customer revenue" })).toBeInTheDocument(),
+    );
+    expect(within(picker).queryByRole("option", { name: "Draft only" })).not.toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: "customer-revenue" } });
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "revenue for a customer" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalled());
+    expect(runAgentAnalysis.mock.calls[0]![1]).toEqual({
+      question: "revenue for a customer",
+      context_product_key: "customer-revenue",
+    });
+
+    const refusal = await screen.findByRole("alert", { name: "Tool needs more input" });
+    fireEvent.change(within(refusal).getByLabelText("customer_id"), { target: { value: "C-42" } });
+    fireEvent.click(within(refusal).getByRole("button", { name: "Ask with these values" }));
+
+    // The retry still asks through the product: dropping it here would widen the answer back to
+    // the whole datasource precisely when the person supplied the inputs.
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toEqual({
+      question: "revenue for a customer",
+      tool_parameters: { customer_id: "C-42" },
+      context_product_key: "customer-revenue",
+      preferred_tool_version_id: "tv_orders_lookup_1",
+    });
+
+    // The answer says which product answered and which published version of it
+    // stood behind the answer (F08: `version 2` alone named neither).
+    expect(await screen.findByText("Customer revenue · version 2")).toBeInTheDocument();
+    // …and the choice survives a reload or a shared link.
+    expect(new URLSearchParams(location.search).get("product")).toBe("customer-revenue");
+  });
+
+  /* -------------------------------------------------------------------------
+     F08 — the seven gaps around asking through a product.
+  ------------------------------------------------------------------------- */
+
+  it("asks the list route for only the products this caller could ask through (F08)", async () => {
+    // Filtering by status client-side offered a lifecycle reader every published
+    // product in the project, including the ones whose consumer roles exclude
+    // them -- and the ask then refused with CONSUMER_ROLE_REQUIRED. "Which roles
+    // do I hold" is not in the listing, so only the server can answer this.
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    await waitFor(() =>
+      expect(fetchContextProducts).toHaveBeenCalledWith(
+        "proj1",
+        { limit: 200, askable: true },
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("puts the product in the answer's own permalink (F08)", async () => {
+    // Without it a shared link reopened the run beside a picker set to the whole
+    // datasource, so the next question asked from that link was wider than the
+    // one being shared.
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: ANALYSIS_RESPONSE.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
+    });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(await screen.findByLabelText("Context product"), {
+      target: { value: "customer-revenue" },
+    });
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    // `CopyLinkButton` titles itself with the URL it would copy.
+    const permalink = await screen.findByRole("button", { name: "Copy permalink" });
+    expect(permalink.getAttribute("title")).toContain("product=customer-revenue");
+    expect(permalink.getAttribute("title")).toContain("run=run_fresh_1");
+    expect(permalink.getAttribute("title")).toContain("#/analyst/analyst");
+  });
+
+  it("drops a product the new datasource's project does not offer, and stops sending it (F08)", async () => {
+    // The picker rendered blank (no matching option) while the request still
+    // carried the key: the screen said "no product" and the ask said otherwise.
+    listOrgDatasources.mockResolvedValue({
+      items: [DATASOURCE, DATASOURCE_OTHER_PROJECT],
+      limit: 500,
+      offset: 0,
+      total: 2,
+    });
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: ANALYSIS_RESPONSE.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
+    });
+    history.replaceState(null, "", "/?ds=ds_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const picker = await screen.findByLabelText("Context product");
+    await waitFor(() => expect(picker).toHaveValue("customer-revenue"));
+
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_2" } });
+
+    await waitFor(() => expect(new URLSearchParams(location.search).get("product")).toBeNull());
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalled());
+    expect(runAgentAnalysis.mock.calls[0]![1]).toEqual({ question: "net revenue please" });
+  });
+
+  it("says the product list could not be read rather than that there are none (F08)", async () => {
+    // Both used to render as "No published product on this project", so a 403 or
+    // a dropped connection read as a settled fact about the estate.
+    const { ApiError } = await import("../lib/api");
+    fetchContextProducts.mockRejectedValue(new ApiError(403, "one of these roles is required: Analyst"));
+    runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: ANALYSIS_RESPONSE.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
+    });
+    history.replaceState(null, "", "/?ds=ds_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent(/could not be listed/);
+    expect(failure).toHaveTextContent(/one of these roles is required: Analyst/);
+    expect(failure).toHaveTextContent(/not the same as there being none/);
+    expect(screen.queryByText("No published product you can ask through")).not.toBeInTheDocument();
+
+    // The key stays in the URL -- the next load may honour it -- but a key the
+    // picker cannot show as selected is not sent.
+    expect(new URLSearchParams(location.search).get("product")).toBe("customer-revenue");
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalled());
+    expect(runAgentAnalysis.mock.calls[0]![1]).toEqual({ question: "net revenue please" });
+  });
+
+  /* Three refusals, three remedies (F08). Collapsed into one kind they shared
+     one title and showed the server's raw token as the message. */
+  const REFUSALS: ReadonlyArray<readonly [string, string, RegExp]> = [
+    [
+      "CONTEXT_PRODUCT_NOT_AVAILABLE",
+      "That context product cannot be asked through",
+      /no published version/,
+    ],
+    [
+      "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED",
+      "You are not one of this product's consumers",
+      /no self-service access request/,
+    ],
+    [
+      "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE",
+      "This product's tables cannot answer that question",
+      /a table the product does not name/,
+    ],
+  ];
+
+  for (const [token, title, remedy] of REFUSALS) {
+    it(`renders ${token} as its own refusal with its own remedy (F08)`, async () => {
+      fetchContextProducts.mockImplementation(async (projectId: string) =>
+        productsByProject(projectId),
+      );
+      runAgentAnalysis.mockRejectedValue(new (await import("../lib/api")).ApiError(422, token));
+
+      const AskScreen = await loadScreen();
+      render(<AskScreen />);
+      await pickDatasource();
+      fireEvent.change(await screen.findByLabelText("Context product"), {
+        target: { value: "customer-revenue" },
+      });
+      fireEvent.change(screen.getByLabelText("Question"), { target: { value: "something else" } });
+      fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+      const refusal = await screen.findByRole("alert", { name: "Context product refusal" });
+      expect(within(refusal).getByText(title)).toBeInTheDocument();
+      expect(refusal).toHaveTextContent(remedy);
+      // Not a policy rejection, and never the server's own token as the message.
+      expect(screen.queryByText("The generated query was rejected by policy")).not.toBeInTheDocument();
+      expect(refusal).not.toHaveTextContent(token);
+    });
+  }
+
+  it("offers clearing the product as the one action a refusal actually has (F08)", async () => {
+    // Deliberately not a "request access" button: there is no request-access
+    // route for a context product, and a button that went nowhere would be worse
+    // than the sentence that says where a consumer role comes from.
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    runAgentAnalysis.mockRejectedValue(
+      new (await import("../lib/api")).ApiError(422, "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"),
+    );
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(await screen.findByLabelText("Context product"), {
+      target: { value: "customer-revenue" },
+    });
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "something else" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const refusal = await screen.findByRole("alert", { name: "Context product refusal" });
+    expect(within(refusal).queryByRole("button", { name: /request access/i })).not.toBeInTheDocument();
+    fireEvent.click(within(refusal).getByRole("button", { name: "Choose another product" }));
+
+    await waitFor(() => expect(new URLSearchParams(location.search).get("product")).toBeNull());
+    expect(screen.queryByRole("alert", { name: "Context product refusal" })).not.toBeInTheDocument();
   });
 
   it("distinguishes a disabled-datasource 409 from the AT-9 ambiguity 409", async () => {
@@ -478,5 +1151,189 @@ describe("AskScreen's result panel", () => {
       expect(within(panel).getByText(/result values are not retained/)).toBeInTheDocument(),
     );
     expect(within(panel).queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-FP12 remainder -- a reopened answer names its product.
+
+     The RESOLVED stage now records `context_product_key` beside the version
+     (`agent_orchestrator.py`), which is the only thing that can name the
+     product on a run nobody is currently asking through: "version 2" alone
+     identifies nothing, because two products' v2 are unrelated.
+  ------------------------------------------------------------------------- */
+
+  it("names the context product a reopened run recorded, not only its version", async () => {
+    const RUN_THROUGH_PRODUCT: AgentRunRead = {
+      ...PAST_RUN,
+      step_trace: [
+        {
+          stage: "RESOLVED",
+          details: {
+            context_product_version_id: "cpv_9",
+            context_product_version: 3,
+            context_product_key: "quarterly-orders",
+          },
+        },
+        { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+      ],
+    };
+    fetchAgentRuns.mockResolvedValue({ items: [RUN_THROUGH_PRODUCT], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(RUN_THROUGH_PRODUCT);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    // The picker is set to a DIFFERENT product, which is exactly the state the
+    // answer must not be attributed from.
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1,
+    });
+    history.replaceState(null, "", "/?ds=ds_1&run=run_past_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const panel = await screen.findByLabelText("Answer for run run_past_1");
+    expect(await within(panel).findByText("quarterly-orders · version 3")).toBeInTheDocument();
+    // Neither the picker's product nor a bare version number stands in for it.
+    expect(within(panel).queryByText(/Customer revenue · version 3/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/product not recorded on the run/)).not.toBeInTheDocument();
+  });
+
+  it("still says the product is unrecorded for a run from before the key was written", async () => {
+    const OLD_RUN: AgentRunRead = {
+      ...PAST_RUN,
+      step_trace: [
+        { stage: "RESOLVED", details: { context_product_version_id: "cpv_9", context_product_version: 3 } },
+        { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+      ],
+    };
+    fetchAgentRuns.mockResolvedValue({ items: [OLD_RUN], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(OLD_RUN);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1,
+    });
+    history.replaceState(null, "", "/?ds=ds_1&run=run_past_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const panel = await screen.findByLabelText("Answer for run run_past_1");
+    // An absent key is its own fact, and the answer is still not attributed to
+    // the product the picker happens to be showing.
+    expect(
+      await within(panel).findByText("version 3 · product not recorded on the run"),
+    ).toBeInTheDocument();
+  });
+});
+
+
+/* ---------------------------------------------------------------------------
+   R11-UX16: an answer is three things -- its results, the query that produced
+   them, and the evidence behind it -- each in its own view, and each says what
+   a reopened run still has rather than implying it kept everything.
+--------------------------------------------------------------------------- */
+
+describe("AskScreen's answer views (R11-UX16)", () => {
+  async function openPastRun(run: AgentRunRead) {
+    fetchAgentRuns.mockResolvedValue({ items: [run], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(run);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    history.replaceState(null, "", `/?ds=ds_1&run=${run.id}`);
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    const panel = await screen.findByLabelText(`Answer for run ${run.id}`);
+    await waitFor(() => expect(within(panel).getByRole("tablist")).toBeInTheDocument());
+    return panel;
+  }
+
+  it("opens on Results and moves between views with the arrow keys", async () => {
+    const panel = await openPastRun(PAST_RUN);
+    const results = within(panel).getByRole("tab", { name: "Results" });
+    expect(results).toHaveAttribute("aria-selected", "true");
+    expect(within(panel).getByRole("tabpanel", { name: "Results" })).toBeVisible();
+
+    fetchQueryExecutionLineage.mockResolvedValue({
+      execution_id: "qe_past_1",
+      datasource_id: "ds_1",
+      status: "SUCCEEDED",
+      referenced_tables: ["orders_raw"],
+      referenced_columns: ["orders_raw.net_amount"],
+      column_lineage: [],
+      semantic_version: "sm_1",
+      policy_version: "pol_1",
+      normalized_sql: "SELECT SUM(net_amount) FROM orders_raw WHERE region = :redacted",
+      row_count: 3,
+      elapsed_ms: 12,
+    });
+    results.focus();
+    fireEvent.keyDown(results, { key: "ArrowRight" });
+
+    const query = within(panel).getByRole("tab", { name: "Query" });
+    expect(query).toHaveAttribute("aria-selected", "true");
+    expect(query).toHaveFocus();
+    fireEvent.keyDown(query, { key: "End" });
+    expect(within(panel).getByRole("tab", { name: "Evidence" })).toHaveFocus();
+    fireEvent.keyDown(within(panel).getByRole("tab", { name: "Evidence" }), { key: "ArrowRight" });
+    expect(results).toHaveFocus();
+  });
+
+  it("shows a reopened run the shape of the query it executed, and says the values are gone", async () => {
+    fetchQueryExecutionLineage.mockResolvedValue({
+      execution_id: "qe_past_1",
+      datasource_id: "ds_1",
+      status: "SUCCEEDED",
+      referenced_tables: ["orders_raw"],
+      referenced_columns: ["orders_raw.net_amount"],
+      column_lineage: [],
+      semantic_version: "sm_1",
+      policy_version: "pol_1",
+      normalized_sql: "SELECT SUM(net_amount) FROM orders_raw WHERE region = :redacted",
+      row_count: 3,
+      elapsed_ms: 12,
+    });
+    const panel = await openPastRun(PAST_RUN);
+    expect(fetchQueryExecutionLineage).not.toHaveBeenCalled();
+
+    fireEvent.click(within(panel).getByRole("tab", { name: "Query" }));
+
+    const view = within(panel).getByRole("tabpanel", { name: "Query" });
+    await waitFor(() =>
+      expect(within(view).getByLabelText("Executed query")).toHaveTextContent(":redacted"),
+    );
+    expect(fetchQueryExecutionLineage).toHaveBeenCalledWith("qe_past_1", expect.any(AbortSignal));
+    expect(within(view).getByText(/literals replaced/)).toBeInTheDocument();
+    expect(within(view).getByText(/values it returned are not retained/)).toBeInTheDocument();
+    expect(within(view).getByText("orders_raw")).toBeInTheDocument();
+
+    // Read once: leaving the view and coming back does not read it again.
+    fireEvent.click(within(panel).getByRole("tab", { name: "Evidence" }));
+    fireEvent.click(within(panel).getByRole("tab", { name: "Query" }));
+    expect(within(view).getByLabelText("Executed query")).toHaveTextContent(":redacted");
+    expect(fetchQueryExecutionLineage).toHaveBeenCalledTimes(1);
+  });
+
+  it("says plainly when no query ran for a run", async () => {
+    const panel = await openPastRun({
+      ...PAST_RUN,
+      id: "run_refused_1",
+      status: "REJECTED",
+      query_execution_id: null,
+      failure_reason: "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE",
+    });
+
+    fireEvent.click(within(panel).getByRole("tab", { name: "Query" }));
+
+    expect(
+      within(within(panel).getByRole("tabpanel", { name: "Query" })).getByText(/No query ran/),
+    ).toBeInTheDocument();
+    expect(fetchQueryExecutionLineage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the evidence in its own view", async () => {
+    const panel = await openPastRun(PAST_RUN);
+
+    fireEvent.click(within(panel).getByRole("tab", { name: "Evidence" }));
+
+    const view = within(panel).getByRole("tabpanel", { name: "Evidence" });
+    expect(view).toBeVisible();
+    expect(within(view).getByText("Provenance")).toBeInTheDocument();
+    expect(document.getElementById("answer-run_past_1-results")).toHaveAttribute("hidden");
   });
 });

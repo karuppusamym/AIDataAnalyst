@@ -15,10 +15,19 @@ Scope — what this checks (mechanically resolvable, named-artefact citations on
    The path must exist; a qualified or bare function name must exist as a
    `def`/`async def` somewhere in the file (or anywhere under `tests/` for a bare
    mention), verified with `ast` — no pytest collection needed.
-2. Module/path citations: a backtick-quoted `` `src/aida/...` `` path (file or
-   directory), or a bare `` `module.py` `` filename, or a dotted `` `aida.x.y` ``
-   module path. A bare filename resolves against `src/aida/<name>` directly if that
-   exists, else against exactly one recursive match under `src/aida/`.
+2. Module/path citations, for **both** shipped packages — `src/aida/` (the flat
+   package) and `src/atlas/` (the bounded-context packages):
+   - a backtick-quoted `` `src/aida/...` `` / `` `src/atlas/...` `` path (file or
+     directory);
+   - the src-relative spelling the delivery docs also use, `` `aida/...` `` /
+     `` `atlas/...` `` without the `src/` prefix, resolved under `src/`;
+   - a bare `` `module.py` `` filename, resolved against `src/aida/<name>` directly
+     if that exists, else against exactly one recursive match under `src/aida/`,
+     else exactly one under `tests/`, `migrations/versions/`, `scripts/`, `sdk/`
+     or `src/atlas/`;
+   - a dotted `` `aida.x.y` `` or `` `atlas.x.y` `` module path (e.g.
+     `atlas.platform.config`), which may also name a class or function inside a
+     real module.
 3. Import-linter contract names: a backtick-quoted, hyphenated lowercase slug
    (`` `module-privacy` ``, `` `gateway-exclusivity` `` ...) mentioned on a line that
    also says "contract" or "import-linter", checked against the `name = "..."`
@@ -39,14 +48,14 @@ present-tense claim:
 - A citation immediately preceded by an imperative build verb ("Add `x`", "Create
   `x`") is a backlog/blueprint action item, not a claim that `x` exists now.
 - Import-linter contract names are checked against pyproject.toml only once
-  pyproject.toml defines at least one contract. Today it defines zero — the whole
-  import-linter mechanism is tracker item ST-02/ST-09, still TODO, and every doc that
-  mentions a contract name says so explicitly (each opens by describing the *current*
-  code as a flat, undivided package). Flagging every one of those forward-looking
-  mentions as "broken" would not be a regression (nothing that used to work stopped
-  working) and would fight the structural-foundation work already tracked elsewhere.
-  The moment a real contract is added, this gate starts checking citations against it
-  for real, and a rename or removal of a real contract is caught from then on.
+  pyproject.toml defines at least one contract. It defines twelve as of 2026-09-12, so
+  per-citation checking is live: a citation naming no real contract fails unless it is
+  listed in KNOWN_UNRESOLVED_CONTRACT_CITATIONS below, and a rename or removal of a real
+  contract is caught from then on. (When this gate was written pyproject.toml defined
+  none, and the checks turned themselves off rather than flagging every forward-looking
+  mention of the then-unbuilt ST-02/ST-09 mechanism. That fallback is still wired — see
+  `test_import_linter_contract_check_status` — so a revert to zero contracts disables the
+  per-citation checks instead of failing all of them.)
 - A citation on a line that itself says the artefact is planned / not (yet) written
   (the "Implementation status" callout convention already used across Docs/, e.g.
   `10-architecture/01-principles-and-invariants.md`'s
@@ -68,20 +77,33 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_ROOT = REPO_ROOT / "Docs"
 SRC_ROOT = REPO_ROOT / "src" / "aida"
+# The second shipped package. `src/atlas/` holds the bounded-context packages
+# (`platform/` plus six `modules/<name>/` trees) that the module-decomposition work
+# extracted out of the flat `src/aida/` package; Docs/ cites it by path and by dotted
+# module name exactly as it cites `aida`, so it is checked exactly the same way.
+ATLAS_SRC_ROOT = REPO_ROOT / "src" / "atlas"
+# Root the src-relative `aida/...` / `atlas/...` spelling resolves against.
+SRC_PARENT = REPO_ROOT / "src"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 # Directories under Docs/ that are deliberately retired/archival and are not held to
 # a "still true today" standard.
 EXCLUDED_DOC_DIR_NAMES = {"_superseded"}
 
-# Bare filenames that name a *pattern* in the target modular-monolith layout
-# (every future module gets its own `service.py`/`repository.py`/... — see
+# Bare filenames that name a *pattern* in the modular-monolith layout (every module
+# gets its own `service.py`/`repository.py`/... — see
 # `10-architecture/04-module-decomposition.md` #2 and `30-contracts/03-internal-module-contracts.md`
-# #2) rather than one file that exists once today. `src/` is still a flat package
-# (tracker ST-01..ST-10, TODO), so these have no current single resolution by design,
-# and never will have a *unique* one even once built. `snowflake.py` is a documented
-# future connector (tracker CN-2, TODO; `Docs/competitors/06-codebase-architecture-reference.md`
-# #5 lists it under "Files to Create / Modify").
+# #2) rather than one file that exists once. These are a *per-name* exemption, not a
+# per-package one: each of `service.py`, `repository.py`, `router.py` and `contracts.py`
+# now exists six times over, once per bounded context under `src/atlas/modules/`, so a
+# bare citation of one still has no unique resolution — and will have a less unique one,
+# not a more unique one, as the remaining modules land. The full paths
+# (`src/atlas/modules/catalog/service.py`, `atlas.modules.catalog.service`, ...) are
+# checked for real; only the unqualified basename is exempt.
+# `projector.py` is the same shape for the `workers/`/projector slot (no module defines
+# one yet). `snowflake.py` is a documented future connector (tracker CN-2, TODO;
+# `Docs/competitors/06-codebase-architecture-reference.md` #5 lists it under "Files to
+# Create / Modify").
 EXEMPT_BARE_FILENAMES = {
     "service.py",
     "repository.py",
@@ -98,21 +120,16 @@ EXEMPT_BARE_FILENAMES = {
 # Extra roots a bare `*.py` filename citation may legitimately live under besides
 # `src/aida/` — this repo also cites test files, test support fixtures, Alembic
 # migration files, standalone operational/CI scripts (`openapi_diff.py`,
-# `perf_baseline.py`, `generate_ui_types.py`), and the public tool SDK package
-# (TL-5, `sdk/aida_tool_sdk/`) by bare filename.
+# `perf_baseline.py`, `generate_ui_types.py`), the public tool SDK package
+# (TL-5, `sdk/aida_tool_sdk/`) and the `src/atlas/` bounded-context packages by bare
+# filename.
 EXTRA_BARE_FILENAME_ROOTS = (
     REPO_ROOT / "tests",
     REPO_ROOT / "migrations" / "versions",
     REPO_ROOT / "scripts",
     REPO_ROOT / "sdk",
+    ATLAS_SRC_ROOT,
 )
-
-# `src/...` path prefixes that name the pre-rename target package (`atlas`) used in
-# illustrative target-architecture examples (e.g. `40-engineering/03-coding-standards.md`
-# #2's example `pyproject.toml` snippet, `40-engineering/06-refactor-plan.md`'s phase
-# table). The real package is `src/aida`; `src/atlas` is not, and is not meant to be,
-# resolvable today.
-EXEMPT_SRC_PATH_PREFIXES = ("src/atlas",)
 
 # Backtick-quoted hyphenated slugs that look like a contract-name citation (they sit on a
 # line mentioning "contract"/"import-linter") but are actually the tool's own name, never a
@@ -168,9 +185,79 @@ RETIRED_TEST_PATHS: dict[str, str] = {
     "tests/test_ui_lineage_graph_clustering.py": (
         "legacy `ui/` lineage graph; removed with that portal (D05)."
     ),
+    "tests/test_view_lineage_api.py": (
+        "covered `view_lineage_api.py`'s four routes, removed with that router by "
+        "R11-X5 (2026-09-11). The router had no caller outside this file; proposing "
+        "view lineage is the lineage agent's job (`aida.lineage_agent`) and the "
+        "review lifecycle it fed is covered by tests/test_parsed_lineage_review.py."
+    ),
 }
 
 RETIRED_TEST_BASENAMES = {path.rsplit("/", 1)[-1] for path in RETIRED_TEST_PATHS}
+
+# Source modules a *deliberate removal* deleted, still cited by the append-only
+# history documents (`60-delivery/06-accomplishment-log.md`, the dated reviews) that
+# recorded the work when it was done, and by the tracker rows that recorded shipping
+# them. Those citations are true as history and must not be rewritten; the modules are
+# gone and must not be resurrected. Same standing as `RETIRED_TEST_PATHS` above: an
+# investigated baseline, guarded by a staleness test that fires if the file comes back.
+RETIRED_SOURCE_PATHS: dict[str, str] = {
+    "src/aida/view_lineage_api.py": (
+        "four raw-SQL view/procedure lineage parse-and-list routes, removed by R11-X5 "
+        "(2026-09-11). Superseded by the lineage agent (`aida.lineage_agent`) and the "
+        "parsed-edges review queue, both UI-wired; `sql_lineage_parser.py` and the "
+        "`view_lineage_edge`/`procedure_lineage_edge` tables it wrote are kept."
+    ),
+    "src/aida/graph_perspectives_api.py": (
+        "five saved-Graph-Explorer-perspective routes (KG-5), removed by R11-X5 "
+        "(2026-09-11) together with the `graph_perspective` table (migration "
+        "`d41a7b8e6c02`). No screen was ever built against it and nothing outside its "
+        "own test module called it; KG-5 is open again, not delivered."
+    ),
+    "src/atlas/modules/identity_tenancy/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+    "src/atlas/modules/ingestion/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+    "src/atlas/modules/observability_audit/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+    "src/atlas/modules/profiling/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+}
+
+RETIRED_SOURCE_BASENAMES = {path.rsplit("/", 1)[-1] for path in RETIRED_SOURCE_PATHS}
+
+# Test *functions* a deliberate removal deleted or renamed, still cited by the
+# append-only history documents. Values say where the guarantee lives now, so a reader
+# of the old entry can still find it. Guarded by the same staleness test.
+RETIRED_TEST_FUNCTION_NAMES: dict[str, str] = {
+    "test_procedure_reparse_with_a_standalone_select_does_not_double": (
+        "lived in tests/test_view_lineage_api.py, deleted with that router by R11-X5. "
+        "It pinned `_persist_edges`' re-parse behaviour for the parser's shared "
+        "`PROCEDURE_RESULT_TARGET` bucket; `_persist_edges` went with the router."
+    ),
+    "test_view_and_procedure_parse_of_equally_certain_sql_agree": (
+        "renamed by R11-X5 to "
+        "`test_statements_of_equal_certainty_agree_on_confidence` in "
+        "tests/test_sql_lineage_parser.py. The assertion is unchanged; there is no "
+        "longer a separate procedure entry point for it to name."
+    ),
+}
 
 EXCLUDED_BARE_TEST_NAMES = {
     "test_connection",
@@ -296,9 +383,15 @@ class Citation:
 TEST_PATH_RE = re.compile(r"`(tests/[A-Za-z0-9_./-]+\.py)(?:::([A-Za-z0-9_]+))?`")
 BARE_TEST_NAME_RE = re.compile(r"`(test_[A-Za-z0-9_]+)`")
 SRC_PATH_RE = re.compile(r"`(src/[A-Za-z0-9_./-]+)`")
+# The src-relative spelling the delivery docs also use — `` `atlas/platform/config.py` ``,
+# `` `aida/vector_store.py` `` — naming the same artefact as the `src/`-prefixed form with
+# the prefix elided. Anchored to the two real package names so an arbitrary
+# `` `some/other/path` `` is not swept in.
+PKG_REL_PATH_RE = re.compile(r"`((?:aida|atlas)/[A-Za-z0-9_./-]+)`")
 BARE_PY_RE = re.compile(r"`([A-Za-z0-9_]+\.py)`")
 AIDA_DOTTED_RE = re.compile(r"`(aida(?:\.[A-Za-z0-9_]+)+)`")
-LINK_PATH_RE = re.compile(r"\(file:///[^)]*?(src/aida/[A-Za-z0-9_./-]+\.py)\)")
+ATLAS_DOTTED_RE = re.compile(r"`(atlas(?:\.[A-Za-z0-9_]+)+)`")
+LINK_PATH_RE = re.compile(r"\(file:///[^)]*?(src/(?:aida|atlas)/[A-Za-z0-9_./-]+\.py)\)")
 CONTRACT_SLUG_RE = re.compile(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`")
 FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
@@ -349,8 +442,6 @@ def collect_src_path_citations() -> list[Citation]:
         text = _strip_fences(doc.read_text(encoding="utf-8"))
         for m in SRC_PATH_RE.finditer(text):
             path_str = m.group(1)
-            if path_str.startswith(EXEMPT_SRC_PATH_PREFIXES):
-                continue
             if _preceded_by_imperative_verb(text, m.start()):
                 continue
             if _line_has_planned_marker(text, m.start()):
@@ -366,6 +457,21 @@ def collect_src_path_citations() -> list[Citation]:
                     extra="(markdown link)",
                 )
             )
+    return out
+
+
+def collect_pkg_rel_path_citations() -> list[Citation]:
+    """`` `atlas/platform/config.py` ``-style citations: the same artefact as the
+    `src/`-prefixed form, with the prefix elided. Resolved under `src/`."""
+    out = []
+    for doc in _iter_doc_files():
+        text = _strip_fences(doc.read_text(encoding="utf-8"))
+        for m in PKG_REL_PATH_RE.finditer(text):
+            if _preceded_by_imperative_verb(text, m.start()):
+                continue
+            if _line_has_planned_marker(text, m.start()):
+                continue
+            out.append(Citation(_doc_rel(doc), _line_number(text, m.start()), m.group(1)))
     return out
 
 
@@ -389,13 +495,21 @@ def collect_bare_py_citations() -> list[Citation]:
     return out
 
 
-def collect_aida_dotted_citations() -> list[Citation]:
+def _collect_dotted_citations(pattern: re.Pattern[str]) -> list[Citation]:
     out = []
     for doc in _iter_doc_files():
         text = _strip_fences(doc.read_text(encoding="utf-8"))
-        for m in AIDA_DOTTED_RE.finditer(text):
+        for m in pattern.finditer(text):
             out.append(Citation(_doc_rel(doc), _line_number(text, m.start()), m.group(1)))
     return out
+
+
+def collect_aida_dotted_citations() -> list[Citation]:
+    return _collect_dotted_citations(AIDA_DOTTED_RE)
+
+
+def collect_atlas_dotted_citations() -> list[Citation]:
+    return _collect_dotted_citations(ATLAS_DOTTED_RE)
 
 
 def collect_contract_name_citations() -> list[Citation]:
@@ -457,8 +571,10 @@ def _import_linter_contract_names() -> set[str]:
 TEST_PATH_CITATIONS = collect_test_path_citations()
 BARE_TEST_NAME_CITATIONS = collect_bare_test_name_citations()
 SRC_PATH_CITATIONS = collect_src_path_citations()
+PKG_REL_PATH_CITATIONS = collect_pkg_rel_path_citations()
 BARE_PY_CITATIONS = collect_bare_py_citations()
 AIDA_DOTTED_CITATIONS = collect_aida_dotted_citations()
+ATLAS_DOTTED_CITATIONS = collect_atlas_dotted_citations()
 CONTRACT_NAME_CITATIONS = collect_contract_name_citations()
 ALL_TEST_FUNCTION_NAMES = _all_test_functions()
 IMPORT_LINTER_CONTRACT_NAMES = _import_linter_contract_names()
@@ -496,6 +612,26 @@ def test_scanner_found_test_path_and_src_path_citations():
     assert SRC_PATH_CITATIONS, "expected at least one `src/aida/...` citation in Docs/"
 
 
+def test_scanner_checks_the_atlas_package_too():
+    """`src/atlas/` used to be exempt wholesale (`EXEMPT_SRC_PATH_PREFIXES`), so an
+    85-file package had no citation checking at all (tracker R11-P9). It is checked the
+    same way `src/aida/` is now; these floors make a silent return to that blind spot —
+    a regex anchored to `aida` only, or a reinstated prefix exemption — fail loudly
+    rather than pass by finding nothing.
+    """
+    assert ATLAS_SRC_ROOT.is_dir(), "src/atlas/ is gone — this gate's scope changed"
+    atlas_paths = [c for c in SRC_PATH_CITATIONS if c.text.startswith("src/atlas")]
+    assert len(atlas_paths) > 20, (
+        f"only {len(atlas_paths)} `src/atlas/...` path citations collected — the atlas "
+        "citation blind spot R11-P9 closed may have reopened."
+    )
+    assert len(ATLAS_DOTTED_CITATIONS) > 20, (
+        f"only {len(ATLAS_DOTTED_CITATIONS)} dotted `atlas.x.y` citations collected — "
+        "the atlas citation blind spot R11-P9 closed may have reopened."
+    )
+    assert PKG_REL_PATH_CITATIONS, "expected at least one `atlas/...` or `aida/...` citation"
+
+
 @pytest.mark.parametrize(
     "text,expected",
     [
@@ -519,16 +655,51 @@ def test_extraction_bare_py_regex():
     ]
 
 
-def test_extraction_src_path_regex():
-    assert [m.group(1) for m in SRC_PATH_RE.finditer("Lives in `src/aida/made_up/module.py`.")] == [
-        "src/aida/made_up/module.py"
-    ]
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Lives in `src/aida/made_up/module.py`.", ["src/aida/made_up/module.py"]),
+        # R11-P9: the same shape under the second package must be extracted, not skipped.
+        ("Lives in `src/atlas/made_up/module.py`.", ["src/atlas/made_up/module.py"]),
+    ],
+)
+def test_extraction_src_path_regex(text, expected):
+    assert [m.group(1) for m in SRC_PATH_RE.finditer(text)] == expected
 
 
-def test_extraction_aida_dotted_regex():
-    assert [m.group(1) for m in AIDA_DOTTED_RE.finditer("Import `aida.made_up.module` there.")] == [
-        "aida.made_up.module"
-    ]
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Import `aida.made_up.module` there.", ["aida.made_up.module"]),
+        ("Import `atlas.made_up.module` there.", []),
+    ],
+)
+def test_extraction_aida_dotted_regex(text, expected):
+    assert [m.group(1) for m in AIDA_DOTTED_RE.finditer(text)] == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Import `atlas.platform.made_up` there.", ["atlas.platform.made_up"]),
+        ("Import `aida.made_up.module` there.", []),
+    ],
+)
+def test_extraction_atlas_dotted_regex(text, expected):
+    assert [m.group(1) for m in ATLAS_DOTTED_RE.finditer(text)] == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Owned by `atlas/platform/made_up.py`.", ["atlas/platform/made_up.py"]),
+        ("Owned by `aida/made_up.py`.", ["aida/made_up.py"]),
+        # Anchored to the two real package names, so an unrelated path is not swept in.
+        ("Owned by `vendor/thing/made_up.py`.", []),
+    ],
+)
+def test_extraction_pkg_rel_path_regex(text, expected):
+    assert [m.group(1) for m in PKG_REL_PATH_RE.finditer(text)] == expected
 
 
 def test_extraction_contract_slug_requires_contract_keyword():
@@ -590,6 +761,8 @@ def test_cited_test_path_resolves(citation: Citation, path_str: str, func: str |
 
 @pytest.mark.parametrize("citation", BARE_TEST_NAME_CITATIONS, ids=_ids(BARE_TEST_NAME_CITATIONS))
 def test_cited_bare_test_name_resolves(citation: Citation):
+    if citation.text in RETIRED_TEST_FUNCTION_NAMES:
+        pytest.skip(f"{citation.text}: {RETIRED_TEST_FUNCTION_NAMES[citation.text]}")
     # A bare `test_xxx` citation with no `.py` is ambiguous between "a test function
     # named this" and "the test module named this" (e.g. `test_tier0_invariants`,
     # `test_inv1_single_authoritative_store` are module names, not functions) — accept
@@ -611,6 +784,8 @@ def test_cited_bare_test_name_resolves(citation: Citation):
 
 @pytest.mark.parametrize("citation", SRC_PATH_CITATIONS, ids=_ids(SRC_PATH_CITATIONS))
 def test_cited_src_path_resolves(citation: Citation):
+    if citation.text in RETIRED_SOURCE_PATHS:
+        pytest.skip(f"{citation.text}: {RETIRED_SOURCE_PATHS[citation.text]}")
     full_path = REPO_ROOT / citation.text
     suffix = f" {citation.extra}" if citation.extra else ""
     assert full_path.is_file() or full_path.is_dir(), (
@@ -619,10 +794,25 @@ def test_cited_src_path_resolves(citation: Citation):
     )
 
 
+@pytest.mark.parametrize("citation", PKG_REL_PATH_CITATIONS, ids=_ids(PKG_REL_PATH_CITATIONS))
+def test_cited_src_relative_package_path_resolves(citation: Citation):
+    """`` `atlas/platform/config.py` ``/`` `aida/vector_store.py` `` — the same claim as
+    the `src/`-prefixed form, spelled the way the delivery docs spell it."""
+    if f"src/{citation.text}" in RETIRED_SOURCE_PATHS:
+        pytest.skip(f"{citation.text}: {RETIRED_SOURCE_PATHS['src/' + citation.text]}")
+    full_path = SRC_PARENT / citation.text
+    assert full_path.is_file() or full_path.is_dir(), (
+        f"{citation.doc}:{citation.line} cites `{citation.text}`, but "
+        f"src/{citation.text} does not exist in the repository."
+    )
+
+
 @pytest.mark.parametrize("citation", BARE_PY_CITATIONS, ids=_ids(BARE_PY_CITATIONS))
 def test_cited_bare_filename_resolves(citation: Citation):
     if citation.text in RETIRED_TEST_BASENAMES:
         pytest.skip(f"{citation.text}: retired, see RETIRED_TEST_PATHS")
+    if citation.text in RETIRED_SOURCE_BASENAMES:
+        pytest.skip(f"{citation.text}: retired, see RETIRED_SOURCE_PATHS")
     name = citation.text
     direct = SRC_ROOT / name
     if direct.is_file():
@@ -648,25 +838,30 @@ def test_cited_bare_filename_resolves(citation: Citation):
     )
 
 
-# A dotted `aida.x.y.z` citation ending in a version-suffixed final segment (`.v1`, `.v2`,
-# ...) is a Kafka/event-topic or event-type identifier that merely looks like a Python
-# module path (e.g. `aida.platform.events.v1` in the event-and-messaging-model doc) — not
-# a citation this checker's module-resolution logic applies to.
+# A dotted `aida.x.y.z` / `atlas.x.y.z` citation ending in a version-suffixed final
+# segment (`.v1`, `.v2`, ...) is a Kafka/event-topic or event-type identifier that merely
+# looks like a Python module path (e.g. `aida.platform.events.v1` in the
+# event-and-messaging-model doc, and the eight target topics `atlas.catalog.v1` …
+# `atlas.audit.v1` in the same doc and in `30-contracts/04-event-catalog.md`) — not a
+# citation this checker's module-resolution logic applies to.
 _VERSION_SUFFIX_RE = re.compile(r"\.v\d+$")
 
 
-@pytest.mark.parametrize("citation", AIDA_DOTTED_CITATIONS, ids=_ids(AIDA_DOTTED_CITATIONS))
-def test_cited_aida_dotted_module_resolves(citation: Citation):
+def _assert_dotted_module_resolves(citation: Citation, root: Path) -> None:
+    """Shared resolution for a dotted `<package>.x.y` citation under `root`. Applied
+    identically to `aida` and `atlas` (R11-P9) so neither package can drift into being
+    checked more loosely than the other."""
     if _VERSION_SUFFIX_RE.search(citation.text):
         pytest.skip(f"{citation.text} is a topic/event-type identifier, not a module path")
-    parts = citation.text.split(".")[1:]  # drop leading "aida"
+    parts = citation.text.split(".")[1:]  # drop the leading package name
     candidate_part_lists = [parts]
     if len(parts) > 1:
         # The citation may name a class/function *within* a module (e.g.
-        # `aida.connectors.sql_execution.SqlExecutor`, `aida.db.Base`) rather than the
-        # module itself — accept it if the path with the last segment dropped resolves,
-        # without requiring the attribute itself to be re-verified by AST (the module
-        # existing is enough signal that this is a real, if slightly-loosely-cited, path).
+        # `aida.connectors.sql_execution.SqlExecutor`, `aida.db.Base`,
+        # `atlas.platform.config.Settings`) rather than the module itself — accept it if
+        # the path with the last segment dropped resolves, without requiring the attribute
+        # itself to be re-verified by AST (the module existing is enough signal that this
+        # is a real, if slightly-loosely-cited, path).
         candidate_part_lists.append(parts[:-1])
     if len(parts) > 2:
         # Or a *method on a class* within a module (e.g.
@@ -674,18 +869,28 @@ def test_cited_aida_dotted_module_resolves(citation: Citation):
         # the class segment and check the module itself, same reasoning as above.
         candidate_part_lists.append(parts[:-2])
     for candidate_parts in candidate_part_lists:
-        module_file = SRC_ROOT.joinpath(*candidate_parts).with_suffix(".py")
-        package_init = SRC_ROOT.joinpath(*candidate_parts, "__init__.py")
+        module_file = root.joinpath(*candidate_parts).with_suffix(".py")
+        package_init = root.joinpath(*candidate_parts, "__init__.py")
         if module_file.is_file() or package_init.is_file():
             return
-    module_file = SRC_ROOT.joinpath(*parts).with_suffix(".py")
-    package_init = SRC_ROOT.joinpath(*parts, "__init__.py")
+    module_file = root.joinpath(*parts).with_suffix(".py")
+    package_init = root.joinpath(*parts, "__init__.py")
     raise AssertionError(
         f"{citation.doc}:{citation.line} cites `{citation.text}`, but neither "
         f"{module_file.relative_to(REPO_ROOT)} nor {package_init.relative_to(REPO_ROOT)} "
         "exists (also tried treating the last segment as a class/function within the "
         "parent module)."
     )
+
+
+@pytest.mark.parametrize("citation", AIDA_DOTTED_CITATIONS, ids=_ids(AIDA_DOTTED_CITATIONS))
+def test_cited_aida_dotted_module_resolves(citation: Citation):
+    _assert_dotted_module_resolves(citation, SRC_ROOT)
+
+
+@pytest.mark.parametrize("citation", ATLAS_DOTTED_CITATIONS, ids=_ids(ATLAS_DOTTED_CITATIONS))
+def test_cited_atlas_dotted_module_resolves(citation: Citation):
+    _assert_dotted_module_resolves(citation, ATLAS_SRC_ROOT)
 
 
 # ---------------------------------------------------------------------------
@@ -812,4 +1017,27 @@ def test_retired_test_paths_are_still_actually_absent():
     assert not resurrected, (
         "These paths in RETIRED_TEST_PATHS exist again in the repository — remove them "
         f"from the baseline so their citations are checked: {sorted(resurrected)}"
+    )
+
+
+def test_retired_source_paths_are_still_actually_absent():
+    """Same guard as above, for source modules a deliberate removal deleted. If one of
+    these files exists again -- restored, or a new module written under the same name --
+    the entry is stale and must be deleted so its citations are checked for real again.
+    """
+    resurrected = [path for path in RETIRED_SOURCE_PATHS if (REPO_ROOT / path).is_file()]
+    assert not resurrected, (
+        "These paths in RETIRED_SOURCE_PATHS exist again in the repository — remove "
+        f"them from the baseline so their citations are checked: {sorted(resurrected)}"
+    )
+
+
+def test_retired_test_function_names_are_still_actually_absent():
+    """Same guard again, for test functions a deliberate removal deleted or renamed. A
+    name that exists once more is a real, citable artefact and must leave the baseline.
+    """
+    resurrected = sorted(RETIRED_TEST_FUNCTION_NAMES.keys() & ALL_TEST_FUNCTION_NAMES)
+    assert not resurrected, (
+        "These names in RETIRED_TEST_FUNCTION_NAMES exist again under tests/ — remove "
+        f"them from the baseline so their citations are checked: {resurrected}"
     )

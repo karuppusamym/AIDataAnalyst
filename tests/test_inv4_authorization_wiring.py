@@ -103,6 +103,14 @@ def test_the_validation_path_is_gated() -> None:
         # catalog router; the module is named per-handler so the next move
         # fails loudly here rather than silently asserting nothing.
         ("atlas.modules.catalog.router", "list_catalog_rows"),
+        # R11-FP03: a routine's captured definition history. Registered here
+        # rather than trusted to review because the subject is a routine, which
+        # has no parent table and so could not inherit the table gate every
+        # other catalog read above uses -- it is gated on the datasource
+        # instead (`ontology_api`'s ROUTINE branch, and
+        # `routine_description_api._gate_routine`), and a gate reached by a
+        # different route is exactly the case this scan exists to keep honest.
+        ("aida.definition_history_api", "get_routine_definition_history"),
     ],
 )
 def test_the_catalog_read_handlers_are_gated(module: str, handler: str) -> None:
@@ -113,6 +121,48 @@ def test_the_retrieval_preview_is_gated() -> None:
     """The assembled context an agent would be handed, so `CONSUME_CONTEXT` rather than
     `READ_METADATA`."""
     assert reaches_call("aida.api", "preview_agent_retrieval", _GATE_CALLS)
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        "inspect_okf_bundle",
+        "download_okf_bundle",
+        # R11-OKF02: the stored-bundle reads. Each reaches the gate through
+        # `okf_store.read_published_bundle` -> `okf_snapshot.admit_datasources`, which is the
+        # decision the stored bundle's lineage key is computed from.
+        "read_okf_document",
+        "list_okf_publications",
+        "read_object_okf_knowledge",
+    ],
+)
+def test_the_okf_bundle_reads_are_gated(handler: str) -> None:
+    """R11-OKF01: an OKF bundle is assembled context a reader takes away, so it is gated like
+    the retrieval preview above and not like a catalog row.
+
+    Registered here rather than trusted to review for the reason that applies to every entry in
+    this module, plus one specific to this surface: acceptance OKF-D requires an unauthorized
+    dependency to be absent from a bundle's *counts*, and the only thing standing between a
+    count and a leak is that `aida.okf_snapshot._admit_datasources` decided each datasource
+    before anything was assembled. Since R11-OKF02 the scan follows the handler through the
+    store's `read_published_bundle` and `admit_datasources` to that decision -- the same
+    decision the stored bundle's lineage key is computed from; if a refactor ever serves a
+    stored bundle without taking it, the gate stops being reachable and this fails.
+    """
+    assert reaches_call("aida.okf_export_api", handler, _GATE_CALLS)
+
+
+def test_the_mcp_okf_resource_read_is_gated() -> None:
+    """R11-OKF02: the MCP door onto the same stored bundle is gated by the same decision.
+
+    Registered because it is a second door onto knowledge the REST routes gate, and a second
+    door is where a missing check hides: it must reach the gate through the one store function
+    both doors share, not through a check of its own that could drift.
+    """
+    assert reaches_call("aida.mcp_server", "_read_okf_resource", _GATE_CALLS)
+    assert reaches_call(
+        "aida.mcp_server", "_read_okf_resource", frozenset({"read_published_bundle"})
+    )
 
 
 def test_the_scan_would_notice_if_a_gate_were_removed() -> None:
@@ -172,6 +222,52 @@ def test_no_surface_calls_authorize_directly() -> None:
         "these call `authorize` directly and so bypass shadow mode; call "
         f"`authorize_enforced` or `gate` instead: {offenders}"
     )
+
+
+# R11-GQL01: `POST /graphql` is a second door onto the catalog reads registered above. Its
+# resolvers are dispatched by the GraphQL executor rather than by FastAPI, so the route's own
+# handler cannot show the gate; each resolver that answers for a gated REST read is
+# registered here instead, and must reach the same decision its REST twin reaches.
+_GRAPHQL_GATED_RESOLVERS = [
+    "Query.table",
+    "Query.tables",
+    "DataSource.tables",
+    "Table.columns",
+    "Table.constraints",
+    "Table.description",
+    "Column.business_description",
+    "Constraint.referenced_table",
+    # R11-GQL01: the stored OKF bundle reads. Each reaches the gate through the store's read
+    # (`read_published_bundle` -> `admit_datasources`, `read_published_source_bundle` ->
+    # `admit_source`), the same decision the REST bundle routes above reach.
+    "Query.context_product_okf_bundle",
+    "Query.datasource_okf_bundle",
+    "OkfBundle.documents",
+    "OkfBundle.document",
+    "OkfBundle.publications",
+    "OkfBundle.findings",
+]
+
+
+@pytest.mark.parametrize("resolver", _GRAPHQL_GATED_RESOLVERS)
+def test_the_graphql_catalog_resolvers_are_gated(resolver: str) -> None:
+    assert reaches_call("aida.graphql_schema", resolver, _GATE_CALLS)
+
+
+def test_the_graphql_scan_tells_a_gated_resolver_from_an_ungated_one() -> None:
+    """The GraphQL half of `test_the_scan_would_notice_if_a_gate_were_removed`.
+
+    The datasource resolvers answer for `GET /v1/datasources/{id}` and the organization's
+    datasource listing, which check the tenant and no workspace gate -- and they mirror
+    that exactly. So the scan must report them ungated, alongside their REST twins; a scan
+    that called them gated could not be trusted about the eight above. If a REST datasource
+    read ever gains the gate, this fails, and the resolver moves to the list above in the
+    same commit.
+    """
+    for handler in ("get_datasource", "list_organization_datasources"):
+        assert not reaches_call("aida.operational_api", handler, _GATE_CALLS)
+    for resolver in ("Query.datasource", "Query.datasources", "Table.datasource"):
+        assert not reaches_call("aida.graphql_schema", resolver, _GATE_CALLS)
 
 
 # --- fixtures ---------------------------------------------------------------

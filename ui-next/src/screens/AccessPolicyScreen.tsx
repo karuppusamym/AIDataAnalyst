@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AccessPolicyCreate,
-  AccessPolicyRead,
   AuthorizationSimulationRequest,
   SimulatedDecision,
   SimulatedSubject,
   WorkspaceRead,
 } from "../lib/types";
+import type { AccessPolicyRead } from "../lib/ui-types";
 import { ApiError, createAccessPolicy, fetchAccessPolicies, fetchOrgWorkspaces, simulateAuthorization } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
@@ -32,10 +32,14 @@ import "./AccessPolicyScreen.css";
                      `condition` stay raw JSON textareas, same as legacy --
                      this is free-form policy data, not something worth a
                      structured builder for. Parsed client-side with a clear
-                     per-field error on invalid JSON. `status` defaults to
-                     `DRAFT` unless the operator explicitly checks "Activate
-                     immediately", so nobody activates a policy without
-                     meaning to.
+                     per-field error on invalid JSON. A create is a *proposal*
+                     (R11-AUD02): the policy is always saved `DRAFT`, which
+                     enforces nothing, and goes to the Review queue -- it
+                     becomes `ACTIVE` only when someone other than the
+                     proposer approves it there. The old "Activate
+                     immediately" toggle is gone because the server now
+                     refuses `status: "ACTIVE"` with a 422; offering it would
+                     have been a control that can only fail.
      3. simulation   "who could see this?" against a picked workspace +
                      hypothetical `subjects` (also raw JSON, same reasoning);
                      renders the returned `decisions` as a small table.
@@ -63,7 +67,8 @@ const ACTIONS: AuthorizationSimulationRequest["action"][] = [
 const effectTone = (effect: string): Tone =>
   effect === "ALLOW" ? "ok" : effect === "DENY" ? "bad" : effect === "MASK" ? "warn" : "info";
 
-const statusTone = (status: string): Tone => (status === "ACTIVE" ? "ok" : "mute");
+const statusTone = (status: string): Tone =>
+  status === "ACTIVE" ? "ok" : status === "REJECTED" ? "bad" : "mute";
 
 const splitList = (value: string): string[] =>
   value.split(",").map((v) => v.trim()).filter(Boolean);
@@ -120,7 +125,6 @@ interface PolicyFormState {
   resourceMatch: string;
   transform: string;
   condition: string;
-  activateNow: boolean;
 }
 
 const INITIAL_POLICY_FORM: PolicyFormState = {
@@ -134,7 +138,6 @@ const INITIAL_POLICY_FORM: PolicyFormState = {
   resourceMatch: "{}",
   transform: "{}",
   condition: "{}",
-  activateNow: false,
 };
 
 function CreatePolicyPanel({
@@ -160,7 +163,7 @@ function CreatePolicyPanel({
             <h2 className="apform__h2">New policy</h2>
             <p className="apform__lede">Free-form subject/resource matches and transforms -- raw JSON, parsed here.</p>
           </div>
-          <Pill tone={form.activateNow ? "ok" : "mute"}>{form.activateNow ? "ACTIVE" : "DRAFT"}</Pill>
+          <Pill tone="mute">DRAFT</Pill>
         </header>
 
         <div className="apform__grid">
@@ -210,10 +213,10 @@ function CreatePolicyPanel({
           </Field>
         </div>
 
-        <label className="apform__toggle">
-          <input type="checkbox" checked={form.activateNow} onChange={(e) => setField("activateNow", e.target.checked)} />
-          Activate immediately (otherwise saved as DRAFT and has no effect until activated)
-        </label>
+        <p className="apform__lede">
+          A new policy is saved as DRAFT and enforces nothing. It goes to the Review queue, and someone other than
+          you has to approve it before it takes effect.
+        </p>
 
         <Button type="submit" variant="primary" disabled={creating}>
           {creating ? "Creating…" : "Create policy"}
@@ -230,17 +233,25 @@ function PolicyList({ policies }: { policies: AccessPolicyRead[] }) {
     return <Empty title="No access policies" hint="Create one with the form to define who can see, mask, or export what." />;
   }
   return (
-    <div className="aptable" role="table" aria-label="Access policies">
-      <table>
+    /* R11-C2: the wrapper is a scroll container, not a table.
+       `role="table"` on it put a second, empty table in the accessibility
+       tree wrapping the real one -- axe `aria-required-children`, critical --
+       because the only child of that outer "table" was a `<table>`, and never
+       the `row`/`rowgroup` the role requires. The name belongs to the real
+       table, and the div gets the house idiom for a horizontally scrollable
+       region (`QueryResultTable`): focusable, so a keyboard user can actually
+       scroll it, and named so they know what they have landed in. */
+    <div className="aptable" tabIndex={0} role="group" aria-label="Access policies, scrollable">
+      <table aria-label="Access policies">
         <thead>
           <tr>
-            <th>Code</th>
-            <th>Ver.</th>
-            <th>Name</th>
-            <th>Effect</th>
-            <th>Priority</th>
-            <th>Actions</th>
-            <th>Status</th>
+            <th scope="col">Code</th>
+            <th scope="col">Ver.</th>
+            <th scope="col">Name</th>
+            <th scope="col">Effect</th>
+            <th scope="col">Priority</th>
+            <th scope="col">Actions</th>
+            <th scope="col">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -296,17 +307,18 @@ function DecisionTable({ decisions }: { decisions: SimulatedDecision[] }) {
     return <Empty title="No decisions returned" />;
   }
   return (
-    <div className="aptable" role="table" aria-label="Simulation decisions">
-      <table>
+    /* Same fix as `PolicyList` above, same reason. */
+    <div className="aptable" tabIndex={0} role="group" aria-label="Simulation decisions, scrollable">
+      <table aria-label="Simulation decisions">
         <thead>
           <tr>
-            <th>Principal kind</th>
-            <th>Roles</th>
-            <th>Allowed</th>
-            <th>Reason</th>
-            <th>Matched policy</th>
-            <th>Masked classifications</th>
-            <th>Row filters</th>
+            <th scope="col">Principal kind</th>
+            <th scope="col">Roles</th>
+            <th scope="col">Allowed</th>
+            <th scope="col">Reason</th>
+            <th scope="col">Matched policy</th>
+            <th scope="col">Masked classifications</th>
+            <th scope="col">Row filters</th>
           </tr>
         </thead>
         <tbody>
@@ -528,12 +540,17 @@ export function AccessPolicyScreen() {
         action_match: splitList(form.actionMatch),
         transform,
         condition,
-        status: form.activateNow ? "ACTIVE" : "DRAFT",
+        status: "DRAFT",
       };
       setCreating(true);
       try {
         await createAccessPolicy(ORG, body);
-        setStatusMsg({ text: `Policy "${form.code}" created.`, kind: "success" });
+        setStatusMsg({
+          text:
+            `Policy "${form.code}" saved as a draft. It is on the Review queue now -- someone other than you ` +
+            "has to approve it before it is enforced.",
+          kind: "success",
+        });
         setForm(INITIAL_POLICY_FORM);
         await load();
       } catch (err) {

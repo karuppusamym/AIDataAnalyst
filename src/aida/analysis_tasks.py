@@ -1,4 +1,3 @@
-from typing import Any
 
 TASK_TYPE_DISCOVER_DATASOURCE = "DISCOVER_DATASOURCE"
 TASK_TYPE_PLAN_PROFILE_TASKS = "PLAN_PROFILE_TASKS"
@@ -26,13 +25,3 @@ TASK_TYPE_MAX_ATTEMPTS = {
 }
 
 
-def task_display_name(task_type: str, details: dict[str, Any] | None = None) -> str:
-    details = details or {}
-    if task_type == TASK_TYPE_PROFILE_TABLE:
-        schema_name = str(details.get("schema_name") or "").strip()
-        table_name = str(details.get("table_name") or "").strip()
-        if schema_name and table_name:
-            return f"Profile {schema_name}.{table_name}"
-        if table_name:
-            return f"Profile {table_name}"
-    return TASK_TYPE_LABELS.get(task_type, task_type.replace("_", " ").title())

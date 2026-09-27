@@ -1,6 +1,8 @@
 # Refactor Plan — Flat Package to Modular Monolith
 
-> Status: Authoritative. Owner: Engineering.
+> **Scope reconciled 2026-09-11.** [Tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](../60-delivery/23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
+> Status: Historical strategy; execution scope superseded by the September 11 reconciliation. Owner: Engineering.
 > Converting `src/aida/` (~18,000 lines, flat) into the 21-module structure of `10-architecture/04-module-decomposition.md`, **without stopping feature delivery and without a big-bang rewrite.**
 
 ## 1. Why this is worth doing now

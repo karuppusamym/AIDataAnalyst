@@ -4,7 +4,9 @@
    TWO INDEPENDENT AXES, previously conflated into one boolean:
 
      DATA MODE  -- where the screens' data comes from: bundled `fixtures.ts`
-                   demo data, or a live backend.
+                   demo data, or a live backend. Settled while the bundle is
+                   built, not while it runs (R11-X1, `demoDataMode.ts`): a
+                   production build has no fixtures in it to fall back to.
      AUTH MODE  -- how a request proves who is making it: development identity
                    headers, an OIDC bearer token, or an authenticating reverse
                    proxy in front of the app.
@@ -31,6 +33,8 @@
    which is what `session.tsx` does with them.
 --------------------------------------------------------------------------- */
 
+import { asPersona, type Persona } from "./ui-types";
+
 export type DataMode = "fixtures" | "live";
 export type AuthMode = "development" | "oidc" | "proxy";
 
@@ -39,6 +43,8 @@ interface RawEnv {
   readonly VITE_AUTH_MODE?: string;
   readonly VITE_DEV_PRINCIPAL_ID?: string;
   readonly VITE_DEV_ROLES?: string;
+  readonly VITE_DEV_PERSONA?: string;
+  readonly VITE_DEV_ORG_ID?: string;
   readonly VITE_OIDC_ISSUER?: string;
   readonly VITE_OIDC_CLIENT_ID?: string;
   readonly VITE_OIDC_SCOPE?: string;
@@ -64,7 +70,7 @@ export interface OidcClientConfig {
 }
 
 const DEFAULT_DEV_ROLES =
-  "PlatformAdmin,OrganizationAdmin,ProjectAdmin,MetadataAdmin,MetadataIngestor,DataAdmin," +
+  "PlatformAdmin,OrganizationAdmin,MetadataAdmin,MetadataIngestor,DataAdmin," +
   "SemanticAdmin,DataSteward,ToolDeveloper,ToolConsumer,AgentDeveloper,Reviewer," +
   "MetadataReviewer,Auditor,Operations,Analyst,Viewer";
 
@@ -73,6 +79,19 @@ export interface AppConfig {
   readonly authMode: AuthMode;
   readonly devPrincipalId: string;
   readonly devRoles: string;
+  /**
+   * Development identity only: the persona the shell starts in, so that a UI run for one user
+   * (`scripts/demo-users.ps1`) opens as that user's persona rather than the shell's own default.
+   * `null` when unset or not one of the five personas. Under OIDC the persona is derived from the
+   * verified groups claim and this is ignored.
+   */
+  readonly devPersona?: Persona | null;
+  /**
+   * Development identity only: the organization a browser with nothing remembered starts in.
+   * A user who cannot list organizations has no picker to choose one with, so without this the
+   * shell opens on a placeholder id that exists nowhere. `null` when unset or not a UUID.
+   */
+  readonly devOrgId?: string | null;
   /** True when `VITE_AUTH_MODE` was not set and the default was inferred. */
   readonly authModeInferred: boolean;
   /**
@@ -100,6 +119,15 @@ function readAuthMode(raw: string | undefined): AuthMode | null {
   }
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** An organization id from the environment, or null. A malformed value is dropped rather than
+ *  passed on: a wrong id would send every request to a tenant that does not exist. */
+function readOrgId(raw: string | undefined): string | null {
+  const value = (raw ?? "").trim().toLowerCase();
+  return UUID.test(value) ? value : null;
+}
+
 function readOidcConfig(env: RawEnv): OidcClientConfig | null {
   // Issuer AND client id, or nothing. A half-configured flow would redirect
   // to an endpoint that rejects it, which reads to a user as "sign-in is
@@ -117,8 +145,18 @@ function readOidcConfig(env: RawEnv): OidcClientConfig | null {
   };
 }
 
-export function resolveAppConfig(env: RawEnv): AppConfig {
-  const dataMode: DataMode = env.VITE_USE_FIXTURES !== "0" ? "fixtures" : "live";
+/**
+ * @param demoData Whether this BUILD carries demo data at all. It defaults to
+ *   reading the flag out of `env`, which is what a caller passing a
+ *   hand-written environment wants; `APP_CONFIG` below instead passes the
+ *   build-time literal, because after R11-X1 the two are not the same fact --
+ *   see the note on `USE_FIXTURES`.
+ */
+export function resolveAppConfig(
+  env: RawEnv,
+  demoData: boolean = env.VITE_USE_FIXTURES !== "0",
+): AppConfig {
+  const dataMode: DataMode = demoData ? "fixtures" : "live";
   const declared = readAuthMode(env.VITE_AUTH_MODE);
   return {
     dataMode,
@@ -130,16 +168,33 @@ export function resolveAppConfig(env: RawEnv): AppConfig {
     authModeInferred: declared === null,
     devPrincipalId: env.VITE_DEV_PRINCIPAL_ID || "local-ui-admin",
     devRoles: env.VITE_DEV_ROLES || DEFAULT_DEV_ROLES,
+    devPersona: asPersona(env.VITE_DEV_PERSONA?.trim()),
+    devOrgId: readOrgId(env.VITE_DEV_ORG_ID),
     oidc: readOidcConfig(env),
   };
 }
 
+/**
+ * Demo data. Screens must label themselves when this is true.
+ *
+ * R11-X1: this is a BUILD-time constant, not a runtime lookup. `vite.config.ts`
+ * defines `import.meta.env.VITE_USE_FIXTURES` to a literal `"1"` or `"0"` for
+ * every build, so the comparison below folds to `true` or `false` while the
+ * bundle is being made -- which is what allows a production build to shed
+ * `lib/fixtures.ts` entirely instead of shipping the demo estate to users who
+ * can never reach it. Flipping the flag now means rebuilding, and that is the
+ * point: a bundler cannot drop what a browser might still ask for.
+ *
+ * `api/transport.ts` repeats this comparison rather than importing this name.
+ * That is not a duplicate of the decision -- both read the same one literal --
+ * but a chunking constraint, and it is explained where it is written.
+ */
+export const USE_FIXTURES: boolean = import.meta.env.VITE_USE_FIXTURES !== "0";
+
 export const APP_CONFIG: AppConfig = resolveAppConfig(
   (typeof import.meta !== "undefined" ? import.meta.env : {}) as RawEnv,
+  USE_FIXTURES,
 );
-
-/** Demo data. Screens must label themselves when this is true. */
-export const USE_FIXTURES = APP_CONFIG.dataMode === "fixtures";
 
 /**
  * Headers that identify the caller.

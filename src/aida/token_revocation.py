@@ -18,10 +18,9 @@ is added later, its issuance path should record a revocation-capable identifier
 through this same table rather than inventing a second mechanism.
 """
 
-from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
-from sqlalchemy import CursorResult, delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,19 +48,3 @@ async def enforce_not_revoked(session: AsyncSession, claims: dict[str, Any]) -> 
         raise TokenRevokedError("token revocation status could not be verified") from exc
     if row is not None:
         raise TokenRevokedError("token has been revoked")
-
-
-async def prune_expired_revocations(session: AsyncSession, *, now: datetime) -> int:
-    """Delete revocation records for tokens that can never be replayed again.
-
-    Bounded on the token's own `token_expires_at`, never on `revoked_at` -- a token
-    still inside its original expiry window stays revoked no matter how long ago it
-    was revoked. This only removes rows whose token has already failed, and will
-    always fail, the verifier's own expiry check, so pruning can never un-revoke a
-    token that is still live. Returns the number of rows removed.
-    """
-    result = cast(
-        CursorResult[Any],
-        await session.execute(delete(RevokedToken).where(RevokedToken.token_expires_at < now)),
-    )
-    return result.rowcount or 0

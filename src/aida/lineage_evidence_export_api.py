@@ -29,6 +29,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.authorization_gate import gate_read
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.lineage_evidence_export import compose_lineage_export_artifact
@@ -69,8 +70,19 @@ async def export_unified_lineage_impact(
     separate or weaker check), and `compose_lineage_export_artifact` reused
     for both, so the export can never disagree with what the live pane would
     show for the same asset/depth at the same instant.
+
+    R11-D28: including the datasource's workspace gate, which the live route now asks too.
     """
     datasource = await load_datasource_in_scope(session, context, datasource_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
     try:
         artifact = await compose_lineage_export_artifact(
             session,

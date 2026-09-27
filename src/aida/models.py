@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -32,14 +33,12 @@ from aida.db import Base
 from atlas.modules.identity_tenancy.models import (
     AuthorizationShadowRecord as AuthorizationShadowRecord,
     BusinessAssignment as BusinessAssignment,
-    BusinessAssignmentRule as BusinessAssignmentRule,
     BusinessNode as BusinessNode,
     BusinessNodeClosure as BusinessNodeClosure,
     BusinessNodeRollup as BusinessNodeRollup,
     CrossBoundaryGrant as CrossBoundaryGrant,
     DataDomain as DataDomain,
     Delegation as Delegation,
-    IsolationBoundary as IsolationBoundary,
     LineOfBusiness as LineOfBusiness,
     Organization as Organization,
     OrganizationIntegrationPolicy as OrganizationIntegrationPolicy,
@@ -101,8 +100,6 @@ from atlas.modules.observability_audit.models import (
     DeliveryAttempt as DeliveryAttempt,
     DeliveryIntent as DeliveryIntent,
     OutboxEvent as OutboxEvent,
-    SloDefinition as SloDefinition,
-    SloMeasurement as SloMeasurement,
 )
 # Re-exported for backward compatibility -- review-2026-09-05 point R04
 # ("relocate one bounded context at a time with compatibility exports") moved
@@ -217,70 +214,6 @@ class AccessPolicy(Base, TimestampMixin):
     origin: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class PolicyNativeSyncRequest(Base, TimestampMixin):
-    """QG-2: the maker-checker gate for applying source-native row/column policy DDL.
-
-    `aida.policy_native_sync.build_native_sync_plan` generates the DDL (dry-run,
-    no gate needed -- nothing changes on the source from generation alone); this
-    table is what a *governed apply* of that DDL against a live source looks like.
-    Mirrors `ProfilingExceptionPolicy`'s shape for the same reason its own
-    docstring gives: a different principal must decide than the one who requested
-    (maker != checker), but the object being decided -- a set of generated DDL
-    statements scoped to one table, gating a live write to an external source
-    rather than flipping one row's status -- does not fit the shared
-    `governance_review` queue's existing per-object-type dispatcher
-    (`semantic_api._apply_governance_review_decision`) without distorting it.
-
-    `statements` is the exact, already-generated DDL this decision is about --
-    frozen at request time, not regenerated at apply time, so a checker approves
-    precisely what they read and an apply can never drift from what was reviewed
-    even if the underlying policy set changes between request and decision.
-    """
-
-    __tablename__ = "policy_native_sync_request"
-    __table_args__ = (
-        Index(
-            "ix_policy_native_sync_request_org_status",
-            "organization_id",
-            "status",
-        ),
-        Index(
-            "ix_policy_native_sync_request_scope",
-            "organization_id",
-            "datasource_id",
-            "schema_name",
-            "table_name",
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    datasource_id: Mapped[UUID] = mapped_column(
-        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    connector_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    schema_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    table_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # The generated `NativeStatement.as_dict()` list -- frozen at request time.
-    statements: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    row_policy_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    column_policy_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    unsupported: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
-    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    request_reason: Mapped[str] = mapped_column(String(2000), nullable=False)
-    decided_by: Mapped[str | None] = mapped_column(String(255))
-    decision_reason: Mapped[str | None] = mapped_column(String(2000))
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Set only on an APPLY_FAILED transition -- the exception class, never the raw
-    # driver error text, which could carry source-side identifiers or values
-    # (INV-6). The statements themselves stay auditable via `statements` above.
-    apply_error: Mapped[str | None] = mapped_column(String(500))
 
 
 class DataQualityPolicy(Base, TimestampMixin):
@@ -571,6 +504,51 @@ class AgentRun(Base, TimestampMixin):
     estimated_output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
+class AskConversation(Base, TimestampMixin):
+    """R11-MP26: a thread of Ask turns one person owns, on one datasource.
+
+    `AgentRun` deliberately keeps no question text. A follow-up needs the earlier
+    questions, so a conversation keeps each one in its *redacted* form (R11-MP21:
+    identifying values already replaced by tokens) -- never the raw text, never a
+    value, never a row. The SQL an earlier turn ran is not copied here; it is read
+    from that turn's `QueryExecution` when a follow-up needs it. Only the owner can
+    read a conversation, and the reaper deletes one `conversation_retention_days`
+    after its last turn.
+
+    Turns are a bounded JSON list (`conversation_max_turns`) rather than a child
+    table: they are only ever read and written with their conversation.
+    """
+
+    __tablename__ = "ask_conversation"
+    __table_args__ = (
+        Index(
+            "ix_ask_conversation_owner",
+            "organization_id",
+            "principal_type",
+            "principal_id",
+            "last_turn_at",
+        ),
+        Index("ix_ask_conversation_last_turn", "last_turn_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    principal_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The first question, redacted and cut to 200 characters.
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    #: `[{turn, agent_run_id, question, asked_at}]`, oldest first; `question` redacted.
+    turns: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    last_turn_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class AgentEvaluationRun(Base, TimestampMixin):
     __tablename__ = "agent_evaluation_run"
     __table_args__ = (Index("ix_agent_evaluation_org_created", "organization_id", "created_at"),)
@@ -625,6 +603,15 @@ class ModelRouteConfiguration(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # R11-B18: whether the provider still serves `model_id`, recorded *beside*
+    # the approval and never in place of it -- a background sweep must not
+    # revoke what a human decided through maker-checker. NULL means never
+    # checked, which is distinct from UNKNOWN (checked, could not tell).
+    reachability_status: Mapped[str | None] = mapped_column(String(20))
+    reachability_detail: Mapped[str | None] = mapped_column(String(1000))
+    reachability_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 class KillSwitchState(Base, TimestampMixin):
@@ -660,6 +647,27 @@ class KillSwitchState(Base, TimestampMixin):
     engaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_by: Mapped[str | None] = mapped_column(String(255))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SchedulerPassStatus(Base):
+    """The last outcome of each of the fleet scheduler's maintenance passes (R11-VAL04).
+
+    One mutable row per pass, written by the leading scheduler replica at the end of every
+    iteration (`aida.scheduler_pass_status.save_pass_outcomes`) and read by the Operations
+    screen. A failing pass used to be visible only as a log line and a counter in the
+    scheduler's own metrics registry, which the API process cannot read. Platform-wide, not
+    per tenant: a pass runs over every organization, and the row holds a pass name, times, a
+    count and an exception *class* name -- never the exception's message, which can carry data.
+    """
+
+    __tablename__ = "scheduler_pass_status"
+
+    pass_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_class: Mapped[str | None] = mapped_column(String(200))
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class SemanticModelVersion(Base, TimestampMixin):
@@ -845,6 +853,17 @@ class GovernedToolVersion(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # R11-FP16: the routine a procedure tool's SQL was extracted from, so a change to that
+    # routine holds this version (`aida.tool_source_binding`). No foreign key: the routine table
+    # lives in `envelope_models`, and a retired routine is kept rather than deleted.
+    source_routine_id: Mapped[UUID | None] = mapped_column(index=True)
+    # The view (its `MetadataTable` id) a view tool's SQL was generated from. At most one of this
+    # and `source_routine_id` is set (`aida.tool_source_binding`).
+    source_view_table_id: Mapped[UUID | None] = mapped_column(index=True)
+    # The fingerprint of the source definition the SQL was generated from. Approval and execution
+    # compare it with the source as it is now; when a version was approved proves nothing about
+    # which definition it came from.
+    source_definition_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
 
 class ToolExecution(Base, TimestampMixin):
@@ -1316,68 +1335,6 @@ class RelationshipCandidateGroundTruthLabel(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
-# ---------------------------------------------------------------------------
-# KG-5: saved Knowledge Graph / Graph Explorer perspectives
-# ---------------------------------------------------------------------------
-
-
-class GraphPerspective(Base, TimestampMixin):
-    """A named, reusable snapshot of a caller's Graph Explorer view state.
-
-    This is a thin persistence layer, not a governed object: there is no
-    maker-checker review (unlike ``RelationshipCandidate``/
-    ``CompositeKeyCandidate`` above) and no domain event is emitted for it --
-    it is a personal/shared productivity artifact, the same tier as a saved
-    search or a dashboard layout, not a lineage/quality/policy fact.
-
-    ``view_state`` is an opaque, caller-defined JSON object: whatever shape
-    the frontend Graph Explorer (``ui/scripts/graph-engine.js``) needs to
-    reconstruct a view -- centered node, expansion depth, edge-kind filters,
-    layout name, pan/zoom -- e.g.::
-
-        {
-          "centerNodeId": "b3f1...",
-          "depth": 2,
-          "edgeKinds": ["DECLARED_FOREIGN_KEY", "SUGGESTED_RELATIONSHIP"],
-          "layout": "dagre",
-          "zoom": 1.35,
-          "pan": {"x": -120.0, "y": 40.0}
-        }
-
-    The server never parses or interprets it beyond "valid JSON object,
-    bounded in size" (``schemas.GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES``) --
-    it only stores/retrieves/authorizes it.
-
-    Sharing reuses this codebase's one established sharing mechanism --
-    role-based visibility via a JSON list of role names, the same shape as
-    e.g. ``GovernedToolVersion.allowed_roles`` -- rather than inventing a
-    user-to-user ACL system: an empty/absent ``allowed_viewer_roles`` means
-    private to ``owner_principal`` only; a non-empty list additionally
-    grants read access to any caller whose roles intersect it. Only the
-    owner may update or delete a perspective; shared viewers are read-only.
-    ``datasource_id`` is nullable because a perspective may describe a
-    single datasource's subgraph or an org-wide cross-source view.
-    """
-
-    __tablename__ = "graph_perspective"
-    __table_args__ = (
-        Index("ix_graph_perspective_org_owner", "organization_id", "owner_principal"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    datasource_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[str | None] = mapped_column(String(2000))
-    owner_principal: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    allowed_viewer_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    view_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-
-
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 
@@ -1837,8 +1794,19 @@ class DescriptionWithdrawal(Base, TimestampMixin):
     __tablename__ = "description_withdrawal"
     __table_args__ = (
         UniqueConstraint("governance_review_id"),
+        # R11-C8: ANNOTATION withdraws a business annotation version.
+        # R11-FP08: ROUTINE withdraws (or reinstates) a
+        # `RoutineDocumentationVersion` -- the routine-level description store,
+        # which until then did not exist. This table is one of exactly two that
+        # genuinely discriminate on a subject type across the description
+        # family (the other is `GovernanceReview.object_type`), which is why
+        # extending the family widens it rather than adding a parallel
+        # `routine_description_withdrawal`: the decision shape is identical --
+        # this subject, this exact version, this reason, decided by someone
+        # other than the requester -- and every column below already serves it.
         CheckConstraint(
-            "subject_type IN ('TABLE', 'COLUMN')", name="withdrawal_subject_type_is_supported"
+            "subject_type IN ('TABLE', 'COLUMN', 'ANNOTATION', 'ROUTINE')",
+            name="withdrawal_subject_type_is_supported",
         ),
         CheckConstraint(
             "request_type IN ('WITHDRAW', 'REINSTATE')",
@@ -1870,6 +1838,14 @@ class DescriptionWithdrawal(Base, TimestampMixin):
     #: version themselves.
     withdrawn_text: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    #: R11-C8: the sampled agent decision a DISAGREED verdict raised this from,
+    #: when it was -- the sample-to-correction edge
+    #: `BulkStewardshipOperation.review_audit_sample_id` carries for reversals.
+    #: A disputed sample counts as unresolved while the correction it names is
+    #: still pending, which needs the correction to say which sample it answers.
+    review_audit_sample_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("review_audit_sample.id", ondelete="SET NULL"), index=True
+    )
     status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)
     governance_review_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("governance_review.id", ondelete="SET NULL")
@@ -1931,6 +1907,21 @@ class ModelImportBatch(Base, TimestampMixin):
     uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: R11-C8: the applied batch this one undoes. A reversal is an ordinary
+    #: batch -- same review, same maker-checker guard, same stale check at
+    #: apply -- raised by `model_import.request_model_import_reversal` rather
+    #: than uploaded. The reviewer agent reads this to pin it at T2, as it reads
+    #: `BulkStewardshipOperation.reverses_operation_id`: no agent may decide a
+    #: correction, whatever its size.
+    reverses_batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("model_import_batch.id", ondelete="SET NULL"), index=True
+    )
+    #: R11-C8: the sampled agent decision a DISAGREED verdict raised this
+    #: reversal from -- the sample-to-correction edge the other correction
+    #: paths carry, and what keeps that sample unresolved while this waits.
+    review_audit_sample_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("review_audit_sample.id", ondelete="SET NULL"), index=True
+    )
 
 
 class ModelImportChange(Base, TimestampMixin):
@@ -1952,6 +1943,18 @@ class ModelImportChange(Base, TimestampMixin):
     __tablename__ = "model_import_change"
     __table_args__ = (
         Index("ix_model_import_change_batch_status", "batch_id", "status"),
+        # R11-FP08 deliberately left this narrow. Routine descriptions joined
+        # the description family, and the two shared tables that discriminate on
+        # a subject type were widened for them (`DescriptionWithdrawal` above,
+        # `GovernanceReview.object_type`) -- this one was not. The model
+        # workbook is a spreadsheet of the *data model*: one sheet of tables,
+        # one of columns, exported and re-imported by a steward editing
+        # business names, descriptions and owners. A procedure is not a row in
+        # that model, there is no routine sheet to export it into, and adding
+        # `ROUTINE` here would admit a subject the exporter never writes and the
+        # applier has no publish path for. Recorded as a decision rather than
+        # left as an omission: if routines ever belong in the workbook, that is
+        # a sheet and an exporter, not a widened check.
         CheckConstraint(
             "subject_type IN ('TABLE', 'COLUMN')", name="import_subject_type_is_supported"
         ),
@@ -1973,11 +1976,20 @@ class ModelImportChange(Base, TimestampMixin):
     subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
     field: Mapped[str] = mapped_column(String(50), nullable=False)
     old_value: Mapped[str | None] = mapped_column(Text)
-    new_value: Mapped[str] = mapped_column(Text, nullable=False)
+    #: `None` only on a reversal batch, where it means "put back no value": the
+    #: field had no version before the batch being undone published one, so
+    #: undoing it withdraws that version rather than inventing text. An upload
+    #: never produces `None` -- a blank cell means "no edit".
+    new_value: Mapped[str | None] = mapped_column(Text)
     expected_version: Mapped[int | None] = mapped_column(Integer)
     # PENDING -> APPLIED, or SKIPPED_STALE / SKIPPED_MISSING / REJECTED.
     status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
     skip_reason: Mapped[str | None] = mapped_column(String(500))
+    #: R11-C8: the version number this change published when it applied -- the
+    #: record a reversal needs to name exactly the version it undoes. Not
+    #: backfilled: on a change applied before it existed, `None` means "not
+    #: recorded", and that batch is refused a reversal rather than guessed at.
+    published_version: Mapped[int | None] = mapped_column(Integer)
 
 
 class AssetTermLink(Base, TimestampMixin):
@@ -2049,6 +2061,11 @@ class OwnershipAssignment(Base, TimestampMixin):
     #                    no successor was named in the merge event. Retained as
     #                    evidence; never the current owner. Written only by
     #                    `ownership_principal_lifecycle.handle_principal_deleted`.
+    #   WITHDRAWN     -- R11-C8: an assignment a reviewed bulk operation created (or
+    #                    a leaver reassignment's successor row), retracted by an
+    #                    approved reversal of that operation. Retained as evidence
+    #                    of who was named; never the current owner. Written only by
+    #                    `stewardship_service.apply_bulk_operation`.
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
     # P2-07: re-affirmation cadence. Nullable because every pre-P2-07 row was
@@ -2212,6 +2229,20 @@ class GlossaryConflict(Base, TimestampMixin):
 
 
 class BulkStewardshipOperation(Base, TimestampMixin):
+    """One reviewed bulk change, and -- since AR-11 -- what it actually did.
+
+    `subject_ids` is what was *asked for*; `applied_subject_ids` is what
+    changed. They differ on every run, because every branch of
+    `stewardship_service.apply_bulk_operation` skips a subject that is
+    already in the requested state or went stale between request and
+    decision. Until 2026-09-12 only `applied_count` survived, which made the
+    operation's effect unknowable after the fact: a LINK_TERM over forty
+    tables reporting 28 applied did not say *which* 28, so nothing could undo
+    it without also deleting the twelve links that already existed and were
+    never this operation's to remove. A compensating action needs the
+    identities, not the count.
+    """
+
     __tablename__ = "bulk_stewardship_operation"
     __table_args__ = (Index("ix_bulk_stewardship_org_status", "organization_id", "status"),)
 
@@ -2231,6 +2262,52 @@ class BulkStewardshipOperation(Base, TimestampMixin):
     applied_by: Mapped[str | None] = mapped_column(String(255))
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     applied_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: AR-11: exactly the subjects this operation changed, in the same id
+    #: vocabulary its own `subject_ids` uses (table ids for LINK_TERM,
+    #: `OwnershipAssignment` ids for REASSIGN_LEAVER, and so on). Always a
+    #: subset of `subject_ids`, and `len()` of it is `applied_count`. Empty on
+    #: rows written before this column existed -- which is why
+    #: `request_bulk_operation_reversal` refuses those explicitly rather than
+    #: reading the empty list as "nothing to undo".
+    applied_subject_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    #: R11-C8: what each applied subject held *before* this operation wrote to
+    #: it, keyed by the same subject id `applied_subject_ids` uses. Only the
+    #: five overwriting operation types fill it -- TAG (whether the tag existed,
+    #: its prior value and author), CLASSIFY (the prior classification),
+    #: ASSIGN_OWNERSHIP (that the assignment was created, or a reactivated one's
+    #: prior status, assigner and expiry), DEPRECATE_TERM (the prior lifecycle
+    #: and which versions were APPROVED) and REASSIGN_LEAVER (the successor
+    #: row's prior state) -- because the additive types undo from the ids
+    #: alone. The ownership and term images also name the reviewer who wrote
+    #: them, which is how a restore tells a row still as the operation left it
+    #: from one a person has changed since.
+    #: Empty on rows applied before this column existed, and a reversal refuses
+    #: those rather than guessing: an absent before-image means "not
+    #: recorded", and restoring a guess is a second wrong change.
+    applied_before_images: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    #: AR-11: set when this operation exists to undo `reverses_operation_id`.
+    #: A reversal is itself an ordinary bulk operation -- same table, same
+    #: review, same maker-checker -- because it is the same decision shape,
+    #: and a second vocabulary for "governed change to many assets" would be
+    #: a cost paid forever. What differs is the tier: `review_risk_tiers`
+    #: escalates any operation carrying this to T2, so no agent may decide
+    #: one whatever its size (see `risk_tier_for`).
+    reverses_operation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("bulk_stewardship_operation.id", ondelete="SET NULL"), index=True
+    )
+    #: AR-11's sample-to-correction link. Set when this operation was raised
+    #: from a human's DISAGREED verdict on a sampled agent decision, naming
+    #: the sample that prompted it. This is the edge that makes a correction
+    #: traceable in both directions: forward from the sample to every
+    #: correction raised against it, and back from the correction to the
+    #: sampled decision, its `GovernanceReview`, and the agent that made it.
+    #: Nullable because a steward may also reverse an operation nobody
+    #: sampled -- the link records provenance, it is not a precondition.
+    review_audit_sample_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("review_audit_sample.id", ondelete="SET NULL"), index=True
+    )
 
 
 class GlossaryLinkProposal(Base, TimestampMixin):
@@ -2303,6 +2380,70 @@ class AssetDescriptionDraft(Base, TimestampMixin):
     )
     published_version_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("asset_documentation_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ColumnDescriptionDraft(Base, TimestampMixin):
+    """Deterministically drafted column description; always routed through review.
+
+    The column-level sibling of `AssetDescriptionDraft` (GL-9), on the same
+    contract: composed from catalog evidence alone, evidence-scored, and
+    published only by an independent APPROVE on its `GovernanceReview`.
+    Rejected drafts are retained as negative knowledge, so identical text is
+    not proposed again for the same column.
+
+    `base_description_version` is the column's description version when the
+    draft was composed (None when it had none). Approval re-checks it, so a
+    draft written against v2 cannot silently replace a v3 published since --
+    the rule the workbook import's `*_version` columns enforce, applied to the
+    other path that writes column descriptions.
+
+    `uq_column_description_draft_open` allows one open draft per column. Two
+    would split one column's review into two decisions about the same text,
+    and whichever was approved second would be refused on the version check
+    anyway.
+    """
+
+    __tablename__ = "column_description_draft"
+    __table_args__ = (
+        Index("ix_column_description_draft_org_status", "organization_id", "status"),
+        Index(
+            "uq_column_description_draft_open",
+            "column_id",
+            unique=True,
+            postgresql_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+            sqlite_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    drafted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    base_description_version: Mapped[int | None] = mapped_column(Integer)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("column_documentation_version.id", ondelete="SET NULL"), index=True
     )
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
@@ -2821,6 +2962,10 @@ class ContextProductVersion(Base, TimestampMixin):
     )
     glossary_term_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     eligible_tool_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # R11-FP12: routines named directly; see `ContextProductDefinition.routine_ids`.
+    routine_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # R11-FP09: approved ontology versions the product is bound to.
+    ontology_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     allowed_consumer_roles: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     lineage_depth: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     quality_requirements: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
@@ -3248,7 +3393,9 @@ class AiAsset(Base, TimestampMixin):
         Index(
             "ix_ai_asset_org_kind_lifecycle", "organization_id", "asset_kind", "lifecycle_status"
         ),
-        CheckConstraint("asset_kind IN ('AI_USE_CASE', 'MODEL', 'AGENT')", name="ck_ai_asset_kind"),
+        CheckConstraint(
+            "asset_kind IN ('AI_USE_CASE', 'MODEL', 'AGENT', 'PROMPT')", name="ck_ai_asset_kind"
+        ),
         CheckConstraint("lifecycle_status IN ('ACTIVE', 'RETIRED')", name="ck_ai_asset_lifecycle"),
     )
 
@@ -3392,119 +3539,6 @@ class AiRemediation(Base, TimestampMixin):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class SearchIndex(Base, TimestampMixin):
-    """Full-text search index configuration for catalog metadata."""
-
-    __tablename__ = "search_index"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "index_key"),
-        Index("ix_search_index_org_status", "organization_id", "status"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    index_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    index_type: Mapped[str] = mapped_column(String(30), default="GIN", nullable=False)
-    source_table: Mapped[str] = mapped_column(String(100), nullable=False)
-    text_columns: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    language: Mapped[str] = mapped_column(String(30), default="english", nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-    last_rebuilt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class VectorEmbedding(Base, TimestampMixin):
-    """Vector embeddings for catalog metadata, stored as JSON float arrays.
-
-    Uses a JSON column for the embedding vector to avoid a hard dependency on
-    pgvector at import time.  The ``ix_vector_embedding_org_type`` index covers
-    the org-scoped type lookups the hybrid retrieval pipeline issues; a future
-    migration can add a pgvector ivfflat/hnsw index on the ``embedding`` column
-    once the extension is provisioned.
-    """
-
-    __tablename__ = "vector_embedding"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "object_type", "object_id"),
-        Index("ix_vector_embedding_org_type", "organization_id", "object_type"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    datasource_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
-    )
-    object_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    object_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    display_name: Mapped[str] = mapped_column(String(500), nullable=False)
-    text_content: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float]] = mapped_column(JSON, nullable=False)
-    embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
-    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-class AbacPolicyRecord(Base, TimestampMixin):
-    """Versioned ABAC policy rules for attribute-based access control."""
-
-    __tablename__ = "abac_policy"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "policy_key", "version"),
-        Index("ix_abac_policy_org_status", "organization_id", "status"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    policy_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    effect: Mapped[str] = mapped_column(String(10), nullable=False)
-    subject_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    resource_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    environment_conditions: Mapped[dict[str, Any]] = mapped_column(
-        JSON, default=dict, nullable=False
-    )
-    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class AbacDecisionRecord(Base):
-    """Immutable audit log of ABAC evaluation decisions."""
-
-    __tablename__ = "abac_decision"
-    __table_args__ = (
-        Index("ix_abac_decision_org_created", "organization_id", "evaluated_at"),
-        Index("ix_abac_decision_principal", "principal_id", "evaluated_at"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    decision: Mapped[str] = mapped_column(String(10), nullable=False)
-    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    resource_id: Mapped[str | None] = mapped_column(String(255))
-    subject_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    resource_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    environment_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    contributing_policy_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    evaluation_time_ms: Mapped[float] = mapped_column(Float, nullable=False)
-    policy_version: Mapped[str] = mapped_column(String(100), nullable=False)
-    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    evaluated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-
 class AiDecisionRecord(Base):
     """First-class AI decision edge for the lineage graph."""
 
@@ -3542,9 +3576,10 @@ class ViewLineageEdge(Base, TimestampMixin):
         Index("ix_view_lineage_edge_datasource", "datasource_id"),
         # AT-D2: without this, re-parsing the same view definition doubled
         # the graph on every call -- nothing stopped a blind insert of the
-        # same edge on top of itself. `view_lineage_api.py` pairs this with
-        # an application-level delete-then-insert scoped to the target
-        # table(s) a parse actually produced edges for.
+        # same edge on top of itself. The lineage agent
+        # (`aida.lineage_agent`) pairs this with an application-level
+        # natural-key check, so an edge already stored in any review state
+        # is never proposed a second time.
         UniqueConstraint(
             "datasource_id",
             "source_table",
@@ -3700,27 +3735,6 @@ class StudioChangeItem(Base, TimestampMixin):
     after_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     diff: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     test_status: Mapped[str] = mapped_column(String(30), default="UNTESTED", nullable=False)
-
-
-class StudioTestRun(Base, TimestampMixin):
-    """Test run evidence for a Studio change set."""
-
-    __tablename__ = "studio_test_run"
-    __table_args__ = (
-        Index("ix_studio_test_run_change_set", "change_set_id"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    change_set_id: Mapped[UUID] = mapped_column(
-        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class StudioEvalQuestion(Base, TimestampMixin):
@@ -4063,29 +4077,6 @@ class ContractViolationRecord(Base, TimestampMixin):
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_by: Mapped[str | None] = mapped_column(String(255))
-
-
-class ContractSlaRecord(Base, TimestampMixin):
-    """Periodic SLA compliance record for a data contract."""
-
-    __tablename__ = "contract_sla_record"
-    __table_args__ = (
-        UniqueConstraint("contract_id", "period_start", name="uq_contract_sla_period"),
-        Index("ix_contract_sla_org_contract", "organization_id", "contract_id"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    contract_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_contract_version.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    uptime_percent: Mapped[float] = mapped_column(Float, nullable=False)
-    violations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    breach_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 # ---------------------------------------------------------------------------
@@ -4968,6 +4959,8 @@ class DocumentMapping(Base, TimestampMixin):
     __tablename__ = "document_mapping"
     __table_args__ = (
         UniqueConstraint("document_section_id"),
+        # R11-FP08 deliberately left this narrow, for the reason stated on
+        # `DocumentClaim` below: a data dictionary describes tables and columns.
         CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
         CheckConstraint(
             "mapping_kind IN ('STRUCTURAL', 'SUGGESTED', 'UNMATCHED')",
@@ -5020,6 +5013,18 @@ class DocumentClaim(Base, TimestampMixin):
     __tablename__ = "document_claim"
     __table_args__ = (
         UniqueConstraint("governance_review_id"),
+        # R11-FP08 deliberately left this narrow. Routine descriptions joined
+        # the description family, and the shared tables that discriminate on a
+        # subject type were widened for them -- this one was not, and the scope
+        # cut is recorded here so it reads as a decision rather than an
+        # oversight. A `DocumentClaim` is a sentence lifted out of an uploaded
+        # *data dictionary*, and a data dictionary describes the tables and
+        # columns a reader queries. No dictionary format this platform ingests
+        # has a procedure section, `resolve_structural_mappings` has no name
+        # resolution for one, and admitting `ROUTINE` here would create a claim
+        # shape nothing can produce and `apply_document_claim` cannot publish.
+        # If routine documentation ever arrives as an upload, that is a mapping
+        # resolver and a publish branch, not a widened check.
         CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
         CheckConstraint("predicate IN ('DESCRIBES')", name="predicate_is_supported"),
         Index("ix_document_claim_org_status", "organization_id", "status"),
@@ -5186,18 +5191,6 @@ class AgentContract(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
-#: Terminal/in-flight states for `AgentContractRequest.status`. `PENDING` is
-#: the only state a `GovernanceReview` decision may act on (enforced by the
-#: generic PENDING-only guard every review decision already applies);
-#: `ACTIVATED` means the eval gate passed and the contract was written;
-#: `REJECTED` means a human declined it; `EVAL_BLOCKED` is currently unused
-#: by the write path (see `agent_contract_request_api`'s module docstring for
-#: why a failed eval gate raises rather than lands here) but is kept in the
-#: allowlist so a future row can distinguish "declined" from "not yet
-#: eval-ready" without a migration.
-AGENT_CONTRACT_REQUEST_STATUSES = ("PENDING", "ACTIVATED", "REJECTED", "EVAL_BLOCKED")
-
-
 class AgentContractRequest(Base, TimestampMixin):
     """AG-10 self-service extension: a *proposed* agent contract, submitted by
     a trusted-but-not-unilateral principal (an `AgentDeveloper`, typically —
@@ -5207,13 +5200,17 @@ class AgentContractRequest(Base, TimestampMixin):
     codebase already uses) AND a passing AT-8/N17 evaluation gate
     (`aida.agent_eval_gate.compute_agent_eval_gate`) at decision time.
 
-    This does not replace `AgentContract`'s existing direct-write path
-    (`PUT .../agents/{version}/contract`, still available to
-    `PlatformAdmin`/`AgentDeveloper`/`ModelRiskManager` for corrections) — it
-    adds a *reviewed, eval-gated* path alongside it, which is what makes a
-    contract change from an external or newly-onboarded agent developer
-    something the platform actually checked rather than something it merely
-    accepted.
+    This does not replace `AgentContract`'s direct-write path
+    (`PUT .../agents/{version}/contract`) — it adds a *reviewed, eval-gated*
+    path alongside it, which is what makes a contract change from an external
+    or newly-onboarded agent developer something the platform actually checked
+    rather than something it merely accepted.
+
+    Since R11-C6 (2026-09-12) the division between the two is enforced rather
+    than advisory: the direct write is bound to the agent version's registered
+    owner and refuses any edit that *widens* the contract's authority
+    (`agent_contracts.contract_widening`), so it really is limited to
+    corrections and this is the only path by which an agent's authority grows.
 
     `definition` stores exactly the fields `agent_contracts.
     AgentContractDefinition` needs to reconstruct itself
@@ -5272,11 +5269,13 @@ class AgentBudgetWindow(Base, TimestampMixin):
     standing, which is the safe direction: the day is treated as more spent
     than it was until the window rolls over.
 
-    Every number here is *estimated* tokens, by the same
-    4-bytes-per-token heuristic `ProviderNeutralModelGateway` uses -- see
-    `AgentRun.estimated_input_tokens`. No provider adapter reports billable
-    usage, so this bounds a modelled quantity and must not be presented as
-    spend.
+    A reservation is an *estimate*, by the same 4-bytes-per-token heuristic
+    `ProviderNeutralModelGateway` uses, because nothing has been billed yet.
+    Reconciliation replaces it with what the provider reported it billed for
+    the attempt that answered, where the provider reported that (OpenAI and
+    Gemini do), plus the input estimate of any attempt that failed before it.
+    A run's `budget_evidence.basis` records which, so this row is billed
+    tokens only as far as the providers reported them.
     """
 
     __tablename__ = "agent_budget_window"
@@ -5304,6 +5303,105 @@ class AgentBudgetWindow(Base, TimestampMixin):
     reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     #: How many runs contributed, for reconciliation diagnostics. Not a cap.
     run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class TenantUsageWindow(Base, TimestampMixin):
+    """One organization's consumption of one metered dimension inside one UTC day (R11-FP17).
+
+    Sibling of `AgentBudgetWindow` above, and deliberately the same shape for the
+    same reason: a quota that is enforced by reading a total and then deciding
+    cannot bound concurrent work, because two callers that both read a day's
+    consumption before either writes will both pass a cap they jointly break.
+    `used` is moved by a *conditional* UPDATE carrying the cap in its own
+    `WHERE`, so the database decides who fits. See `aida.usage_quotas`.
+
+    It is a second table rather than a `datasource_id`-nullable column on
+    `SourceUsageWindow` because PostgreSQL treats NULLs as distinct in a unique
+    constraint, so one table serving both scopes would not actually enforce one
+    row per scope per day -- and a duplicated window row is a quota that counts
+    half the traffic. Two tables, two honest unique constraints.
+
+    **Not a cost record.** `used` is a count of the dimension's own unit --
+    tokens, statements, runs -- never money. `aida.cost_showback`'s `COST_BASIS`
+    holds for these rows too: nothing here is a reconciled dollar figure, and the
+    token counts distinguish provider-reported from estimated only in the metric
+    series, not in this accumulator, because a quota has to bound both alike.
+    """
+
+    __tablename__ = "tenant_usage_window"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "dimension",
+            "window_date",
+            name="uq_tenant_usage_window_scope",
+        ),
+        Index("ix_tenant_usage_window_org_date", "organization_id", "window_date"),
+        CheckConstraint("used >= 0", name="ck_tenant_usage_window_non_negative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: A `aida.usage_quotas.UsageDimension` value. Stored as its string so a
+    #: dimension added later needs no migration, and constrained in code rather
+    #: than by a DB enum for the same reason `AgentRun.status` is.
+    dimension: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The UTC day, as a plain date -- stored rather than derived so the
+    #: conditional UPDATE has an equality predicate to match on.
+    window_date: Mapped[date] = mapped_column(Date, nullable=False)
+    #: `BigInteger`, unlike `AgentBudgetWindow.reserved_tokens`: a whole
+    #: organization's daily model tokens across every agent and every source can
+    #: exceed a signed 32-bit integer in a large estate, and a quota accumulator
+    #: that silently overflows fails *open*.
+    used: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    #: How many consumption events contributed. Diagnostics, not a cap.
+    event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class SourceUsageWindow(Base, TimestampMixin):
+    """One datasource's consumption of one metered dimension inside one UTC day (R11-FP17).
+
+    The per-source half of the same mechanism as `TenantUsageWindow`, and the
+    place per-source cost attribution actually lives. The review's ask ("parser
+    and model cost metrics per source") cannot be answered by a Prometheus label
+    -- a datasource id on a high-frequency series is the unbounded cardinality
+    F17 records the cost of -- so the source dimension is carried here, in rows
+    the database bounds, and the metric surface stays a small fixed set of
+    series. `aida.cost_metrics` explains that trade in full.
+
+    `organization_id` is present as well as `datasource_id`, and every statement
+    in `aida.usage_quotas` restates it in its predicate. It is redundant as a
+    lookup key and is not redundant as an invariant: INV-5 is that tenant
+    isolation is total, and a quota statement that matched on `datasource_id`
+    alone would be one caller's bad id away from moving another tenant's row.
+    """
+
+    __tablename__ = "source_usage_window"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "datasource_id",
+            "dimension",
+            "window_date",
+            name="uq_source_usage_window_scope",
+        ),
+        Index("ix_source_usage_window_source_date", "datasource_id", "window_date"),
+        CheckConstraint("used >= 0", name="ck_source_usage_window_non_negative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dimension: Mapped[str] = mapped_column(String(40), nullable=False)
+    window_date: Mapped[date] = mapped_column(Date, nullable=False)
+    used: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class AgentTask(Base, TimestampMixin):
@@ -5367,10 +5465,6 @@ class AgentTask(Base, TimestampMixin):
 # has its own lifecycle: it outlives the decision and is resolved by a
 # different principal at a different time.
 
-REVIEW_PRE_REVIEW_RECOMMENDATIONS = ("APPROVE", "REJECT", "NONE")
-REVIEW_AUDIT_SAMPLE_OUTCOMES = ("PENDING", "AGREED", "DISAGREED")
-
-
 class ReviewAuditSample(Base, TimestampMixin):
     """One agent decision the deterministic sampler routed to a human.
 
@@ -5431,3 +5525,7 @@ class ReviewerAgentState(Base, TimestampMixin):
     suspended_by: Mapped[str | None] = mapped_column(String(255))
     suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suspension_reason: Mapped[str | None] = mapped_column(Text)
+
+
+# Register ontology metadata for migrations and independent schema/test creation.
+from aida.ontology_models import OntologyHead, OntologyVersion  # noqa: E402,F401

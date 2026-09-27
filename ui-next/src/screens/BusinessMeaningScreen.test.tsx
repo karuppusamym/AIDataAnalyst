@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { DataSourceRead, MetadataBusinessAnnotationRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
@@ -13,7 +13,7 @@ import { ApiError } from "../lib/api";
    asserting the exact endpoint/args called, not superficial snapshots.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources =
+const listOrgDatasources =
   vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchBusinessAnnotations = vi.fn<
   (query: unknown, signal?: AbortSignal) => Promise<PageOf<MetadataBusinessAnnotationRead>>
@@ -28,8 +28,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     fetchBusinessAnnotations: (query: unknown, signal?: AbortSignal) =>
       fetchBusinessAnnotations(query, signal),
     fetchTableBusinessAnnotation: (tableId: string, signal?: AbortSignal) =>
@@ -67,6 +67,22 @@ vi.mock("../lib/_api_append", async (importOriginal) => {
 });
 
 
+/* R11-S13 (M4): the governed ontology is authored from this screen now, so its
+   three routes are reachable from here. Mocked at the same boundary as
+   everything else in this file. */
+const listOntologyVersions = vi.fn<(org: string, offset: number, signal?: AbortSignal) => Promise<unknown[]>>();
+const createOntologyVersion = vi.fn();
+vi.mock("../lib/api/ontology", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/api/ontology")>();
+  return {
+    ...actual,
+    listOntologyVersions: (...args: unknown[]) =>
+      (listOntologyVersions as (...a: unknown[]) => unknown)(...args),
+    createOntologyVersion: (...args: unknown[]) =>
+      (createOntologyVersion as (...a: unknown[]) => unknown)(...args),
+  };
+});
+
 const DATASOURCE: DataSourceRead = {
   id: "ds_1", organization_id: "org1", line_of_business_id: "lob1", data_domain_id: "dom1",
   project_id: "proj1", name: "snowflake_prod", connector_type: "SNOWFLAKE", dialect: "snowflake",
@@ -95,7 +111,7 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchBusinessAnnotations.mockReset();
   fetchTableBusinessAnnotation.mockReset();
   fetchBusinessMap.mockReset();
@@ -104,8 +120,11 @@ beforeEach(() => {
   createGlossaryTerm.mockReset();
   submitGlossaryTermVersion.mockReset();
   linkTermToTable.mockReset();
+  listOntologyVersions.mockReset();
+  createOntologyVersion.mockReset();
+  listOntologyVersions.mockResolvedValue([]);
   listGlossaryTerms.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchBusinessAnnotations.mockResolvedValue({ items: [], limit: 100, offset: 0, total: 0 });
   vi.resetModules();
   history.replaceState(null, "", "/");
@@ -116,11 +135,32 @@ afterEach(() => {
 });
 
 describe("BusinessMeaningScreen against the real UX-16 endpoints", () => {
+  it.each(["first", "next"])("ignores a late %s page after the datasource is cleared", async (pageKind) => {
+    let resolvePage!: (page: PageOf<MetadataBusinessAnnotationRead>) => void;
+    fetchBusinessAnnotations.mockImplementation((query) => {
+      if (pageKind === "next" && (query as { offset: number }).offset === 0) {
+        return Promise.resolve({ items: [ANNOTATION], limit: 100, offset: 0, total: 2 });
+      }
+      return new Promise((resolve) => { resolvePage = resolve; });
+    });
+    const BusinessMeaningScreen = await loadScreen();
+    render(<BusinessMeaningScreen />);
+    await screen.findByText("snowflake_prod");
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_1" } });
+    await waitFor(() => expect(resolvePage).toBeDefined());
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "" } });
+    await act(async () => {
+      resolvePage({ items: [ANNOTATION], limit: 100, offset: 0, total: 1 });
+    });
+    expect(screen.getByText("Pick a datasource to see its business annotations")).toBeInTheDocument();
+    expect(screen.queryByText(/annotated table/)).toBeNull();
+  });
+
   it("does not fetch business annotations before a datasource is selected", async () => {
     const BusinessMeaningScreen = await loadScreen();
     render(<BusinessMeaningScreen />);
 
-    await waitFor(() => expect(fetchOrgDatasources).toHaveBeenCalled());
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
     expect(
       screen.getByText("Pick a datasource to see its business annotations"),
     ).toBeInTheDocument();
@@ -231,6 +271,28 @@ describe("BusinessMeaningScreen Glossary tab (P1-03)", () => {
     expect(screen.getByText("mrr")).toBeInTheDocument();
   });
 
+  it("filters the glossary to ?q= so a link to one term arrives selected", async () => {
+    // R11-D5: a catalog glossary chip links here as ?view=glossary&q=<term>.
+    // The filter used to be local component state, so the link opened the full
+    // glossary and left the reader to find the term again -- most of the way to
+    // not having linked at all. Verified live in the browser as well.
+    listGlossaryTerms.mockResolvedValue({
+      items: [APPROVED_TERM, DRAFT_TERM],
+      limit: 200,
+      offset: 0,
+      total: 2,
+    });
+    history.replaceState(null, "", "/?view=glossary&q=Monthly%20Recurring%20Revenue");
+    const BusinessMeaningScreen = await loadScreen();
+
+    render(<BusinessMeaningScreen />);
+
+    expect(await screen.findByText("Monthly Recurring Revenue")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText("Annual Recurring Revenue")).not.toBeInTheDocument(),
+    );
+  });
+
   it("create-term flow calls createGlossaryTerm then submitGlossaryTermVersion", async () => {
     listGlossaryTerms.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
     createGlossaryTerm.mockResolvedValue({ ...DRAFT_TERM, id: "ver_new" });
@@ -293,5 +355,79 @@ describe("BusinessMeaningScreen Glossary tab (P1-03)", () => {
         expect.any(Object),
       ),
     );
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (M4) — Business meaning is the ontology authoring entry point.
+
+   `OntologyManager` had exactly one live importer in the app: a button in the
+   Unified lineage header. The concepts, relations and catalog mappings that
+   say what the business MEANS were therefore authored from a graph screen and
+   from nowhere else, while the screen named "Business meaning" offered no way
+   in at all. This is the entry point; `UnifiedLineageScreen.test.tsx` still
+   covers the contextual shortcut the review asks to keep.
+--------------------------------------------------------------------------- */
+
+describe("the governed ontology is authored from Business meaning (R11-S13 M4)", () => {
+  it("opens the ontology manager and reads this organization's versions", async () => {
+    const consoleError = vi.spyOn(console, "error");
+    const BusinessMeaningScreen = await loadScreen();
+    render(<BusinessMeaningScreen />);
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
+
+    // Closed until asked for: authoring is a write surface, not the screen's
+    // default state.
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage ontology" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Governed ontology" });
+    // Scoped to the org the shell has selected -- the same id every other read
+    // on this screen uses, not a second source of tenancy.
+    await waitFor(() =>
+      expect(listOntologyVersions).toHaveBeenCalledWith(
+        "00000000-0000-0000-0000-000000000001",
+        0,
+        expect.anything(),
+      ),
+    );
+    // The authoring surface itself, not a link to somewhere else.
+    expect(within(dialog).getByLabelText("Ontology key")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Ontology definition JSON")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: "Save ontology draft" }),
+    ).toBeInTheDocument();
+    expect(consoleError.mock.calls.some((args) =>
+      args.some((arg) => String(arg).includes("same key")),
+    )).toBe(false);
+    consoleError.mockRestore();
+  });
+
+  it("is a dialog rather than a fourth ?view= tab, so the read axis is unchanged", async () => {
+    const BusinessMeaningScreen = await loadScreen();
+    render(<BusinessMeaningScreen />);
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
+
+    // The three tabs still name the three READS, and there is no fourth.
+    // Adding a write to that axis would make "which view am I reading" and
+    // "am I editing" one control, and would put an unsaved JSON draft behind a
+    // tab switch.
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Annotations",
+      "Business map (supporting view)",
+      "Glossary",
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage ontology" }));
+    await screen.findByRole("dialog", { name: "Governed ontology" });
+
+    // Opening it leaves the tab axis alone -- no `?view=ontology`, so the
+    // screen's read state is exactly where the user left it when they close.
+    expect(new URLSearchParams(location.search).get("view")).toBeNull();
+    // `Dialog` makes the rest of the screen inert, which is how a modal is
+    // supposed to behave -- and is also why the tabs are counted above rather
+    // than while it is open.
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
   });
 });

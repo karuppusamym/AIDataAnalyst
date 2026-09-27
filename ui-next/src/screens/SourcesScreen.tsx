@@ -1,22 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DataSourceRead, ConnectorHealthScoreRead } from "../lib/types";
 import {
   ApiError,
   downloadDatasourceContextSnapshot,
   downloadProjectContextSnapshot,
   fetchDatasourceHealth,
-  fetchOrgDatasources,
 } from "../lib/api";
 import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
 import { WorkbookImport } from "../components/WorkbookImport";
+import { SourceAdministration, CONNECTION_ROLES, roleAllows } from "./SourcesScreenAdmin";
+import { RegisterDatasourceForm } from "./AdministrationForms";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { useScopeSelection } from "../lib/scope";
 import { useSession } from "../lib/session";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
+import { KnowledgeView } from "../components/KnowledgeView";
 import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
+/* R11-S13 (M5): `RegisterDatasourceForm` draws itself in `adminpanel` chrome.
+   Reusing the component means reusing its stylesheet too -- importing the
+   markup and re-describing it in `SourcesScreen.css` would be a second copy of
+   the thing this merge exists to stop having two of. */
+import "./AdministrationScreen.css";
 import "./SourcesScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -29,19 +37,18 @@ import "./SourcesScreen.css";
    permalinkable evidence-style detail pane -- but assembled from the real
    already-merged endpoints listed below, not an invented "sources" API.
 
-   1. List: reuses `fetchOrgDatasources` (`api.ts`, already called by
-      `NarratedLineageScreen`'s datasource picker) against
-      `GET /v1/organizations/{org}/datasources` -- no second copy of that
-      call. That function fetches one page of up to 500 sources and has no
-      free-text/status query parameter, so name/status filtering here is
-      client-side over the loaded fleet, the same way `NarratedLineageScreen`
-      client-filters catalog rows by datasource name. A fleet past 500
-      sources would need `fetchOrgDatasources` itself to grow cursor/offset
-      paging first -- an honest, stated gap, not silently truncated data.
+   1. List: `useDatasourcePicker` at organization reach (R11-D7) — the same
+      hook every other source picker in the app reads, so the fleet console
+      and a screen's dropdown cannot disagree about what exists. The screen's
+      `?q=` is handed to the hook, which sends it as the route's own `q=`;
+      the search this screen has always had is therefore a search of the
+      fleet rather than of the first page of it. This screen previously
+      fetched one `limit=500` page and filtered names inside it — the F15
+      truncation, re-introduced here and in ten other screens, which is the
+      defect R11-D7 exists to remove.
 
-      Known pre-existing type note (tracker UX-15's own comment on this same
-      function, UX-20's context): `fetchOrgDatasources` is typed as
-      `PageOf<DataSourceRead>`, but the real endpoint
+      Known pre-existing type note (tracker UX-15's own comment, UX-20's
+      context): the list is typed `DataSourceRead`, but the real endpoint
       (`operational_api.py::list_organization_datasources`) returns
       `DataSourceSummaryRead` items (`connectivity/schemas.py:58`), which is
       `DataSourceRead` minus `credential_reference`. Every field this screen
@@ -49,7 +56,9 @@ import "./SourcesScreen.css";
       `network_zone`/`status`/`max_concurrency`/`updated_at`) is present in
       both shapes, so this renders off the real response correctly; the
       shared type itself is left untouched per UX-20's own note not to "fix"
-      it without the same context that row had.
+      it without the same context that row had. `GET /v1/datasources/{id}`,
+      which the hook uses to resolve `?source=`, answers the same summary
+      projection — so a row resolved by id and a listed row are identical.
 
    2. Health: `GET /v1/datasources/{id}/health` (new `fetchDatasourceHealth`
       below) -- fetched ONLY for the selected source, not fanned out per
@@ -57,6 +66,12 @@ import "./SourcesScreen.css";
       per row, eager on load) would be the wrong default; health appears in
       the detail pane once a source is selected, permalinkable via `?source=`
       exactly like `EvidencePane`'s `?asset=`.
+
+   3. Administration: `SourcesScreenAdmin.tsx`, mounted in the detail pane for
+      the selected source only (R11-B7). Test connection, re-scan, read and
+      replace the scan policy, retry an interrupted run — five already-merged
+      endpoints this client could not previously reach. Same rule as health:
+      per-selection, never fanned out across the fleet.
 
    Scope cuts, stated rather than silently dropped: no connector
    capability-matrix reference panel and no per-source connector-certification
@@ -114,9 +129,19 @@ function SourceRow({
 function SourceDetailsPane({
   source,
   onClose,
+  onSourceChanged,
+  knowledgeOpen,
+  onToggleKnowledge,
 }: {
   source: DataSourceRead;
   onClose: () => void;
+  /** A connection test rewrites this source's status on the server, so the
+   *  fleet list is re-read rather than patched from the write's response --
+   *  the row and the pane then agree because both came from the same read. */
+  onSourceChanged: () => void;
+  /** R11-OKF02: whether this source's knowledge bundle is open below the list. */
+  knowledgeOpen: boolean;
+  onToggleKnowledge: () => void;
 }) {
   const roles = useSession().me?.roles;
   const canImportWorkbook =
@@ -230,6 +255,12 @@ function SourceDetailsPane({
           </>
         )}
 
+        {/* Operating the source, not just reading it (R11-B7): test the
+            connection, re-scan, schedule, and retry an interrupted run. Its
+            own component because this is a write surface with confirmation
+            and re-read cycles, where everything above is a read model. */}
+        <SourceAdministration source={source} onSourceChanged={onSourceChanged} />
+
         <section className="src__model" aria-labelledby="src-model-heading">
           <div className="evp__sub" id="src-model-heading">Model workbook</div>
           <div className="src__modelaction">
@@ -260,6 +291,25 @@ function SourceDetailsPane({
               Data Steward, Metadata Admin, Data Admin or Platform Admin access.
             </p>
           )}
+        </section>
+
+        {/* R11-OKF02: the source bundle -- this datasource's discovered,
+            authorized objects as one stored knowledge bundle. A toggle, not a
+            fetch: the bundle is read (and, if the source moved, rebuilt) only
+            when someone opens it, and it opens below the list at full width,
+            as a product's does in Context Products. */}
+        <section className="src__model" aria-labelledby="src-knowledge-heading">
+          <div className="evp__sub" id="src-knowledge-heading">Knowledge bundle</div>
+          <div className="src__modelaction">
+            <Button
+              aria-pressed={knowledgeOpen}
+              onClick={onToggleKnowledge}
+              title="Read this source's stored knowledge bundle: its discovered objects, structure and approved descriptions"
+            >
+              {knowledgeOpen ? "Close knowledge bundle" : "Open knowledge bundle"}
+            </Button>
+            <span>Only what you may read of this source is in it, and nothing else is counted.</span>
+          </div>
         </section>
 
         {health ? (
@@ -296,6 +346,15 @@ function SourceDetailsPane({
             { screen: "quality", label: "Quality", params: { ds: source.id }, title: "Open incidents for this source" },
             { screen: "relationships", label: "Relationships", params: { ds: source.id }, title: "Key and relationship candidates" },
             { screen: "lineage", label: "Lineage", params: { ds: source.id }, title: "Narrated lineage for this source" },
+            /* The T15 resumable setup, about THIS source. `FirstSourceSetup`
+               (review 2026-09-05, T15 · folded into R11-B7 by the 2026-09-11
+               reconciliation) derives every step from the server and reads its
+               subject from `?ds=`, so the checklist a half-finished source
+               left off at is resumed here rather than only from Overview. It
+               is linked rather than re-mounted: it runs five reads of its own,
+               which is the right cost on the landing screen and the wrong one
+               on a fleet console that has already answered most of them. */
+            { screen: "home", label: "Setup checklist", params: { ds: source.id }, title: "Resume this source's setup — workspace, source, scan, catalog, first question — each step re-derived from the server" },
           ]}
         />
         </div>
@@ -342,44 +401,52 @@ export function SourcesScreen() {
   const q = params.get("q") ?? "";
   const statusFilter = params.get("status") ?? "ALL";
   const selectedId = params.get("source");
+  // R11-OKF02: `?knowledge=1` keeps an open source bundle permalinkable with its `?source=`.
+  const knowledgeOpen = params.get("knowledge") === "1";
 
-  const [sources, setSources] = useState<DataSourceRead[]>([]);
-  const [total, setTotal] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [draftQ, setDraftQ] = useState(q);
   const [projectGenerating, setProjectGenerating] = useState<"markdown" | "json" | null>(null);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
 
-  const inflight = useRef<AbortController | null>(null);
-  const reqSeq = useRef(0);
+  /* R11-S13 (M5): registering a source is the first step of the journey this
+     screen owns the rest of, and it used to be on a different screen entirely
+     -- an operator had to open Administration to create a source, then find
+     their way back here to test its connection and schedule its first scan.
+     `RegisterDatasourceForm` is mounted, not re-implemented: it is the same
+     component Administration renders, which is why this merge adds a form and
+     no second POST path.
 
-  const load = useCallback(async () => {
-    inflight.current?.abort();
-    const ac = new AbortController();
-    inflight.current = ac;
-    const seq = ++reqSeq.current;
+     Administration KEEPS its copy. Org/project/workspace administration is a
+     sequence -- organization, line of business, project, source, binding --
+     and lifting the fourth step out of it would leave a wizard with a hole in
+     the middle. Two mount points, one component, one endpoint.
 
-    setLoading(true);
-    setError(null);
-    try {
-      const page = await fetchOrgDatasources(ORG, ac.signal);
-      if (seq !== reqSeq.current) return;
-      setSources(page.items);
-      setTotal(page.total);
-    } catch (e) {
-      if ((e as Error)?.name === "AbortError") return;
-      if (seq !== reqSeq.current) return;
-      setError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      if (seq === reqSeq.current) setLoading(false);
-    }
-  }, []);
+     Gated on `CONNECTION_ROLES`, imported from the pane below rather than
+     re-listed here, because `create_datasource` and `test_datasource` accept
+     the same two roles: an operator who is offered "register" must also be
+     offered the "test connection" that follows it. Per-view, not per-screen --
+     the rest of Sources is a read model and stays open to everyone. Fails open
+     while the session is unresolved; the server's 403 is the authority. */
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const mayRegister = roleAllows(useSession().me?.roles, CONNECTION_ROLES);
 
-  useEffect(() => {
-    void load();
-    return () => inflight.current?.abort();
-  }, [load]);
+  /* The fleet, through the one shared picker (R11-D7). `search` is the
+     screen's `?q=` sent to the route's own `q=`, not a filter over a loaded
+     page: on a fleet past the page budget the two answer differently, and
+     only one of them is the fleet. `selectedId` is what keeps `?source=`
+     permalinkable -- a source that the search excludes, or that sits past the
+     budget, is still resolved by id so the detail pane opens on it. */
+  const {
+    datasources: sources,
+    total,
+    loading,
+    error,
+    reload: load,
+  } = useDatasourcePicker(ORG, {
+    reach: "organization",
+    search: q,
+    selectedId,
+  });
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -393,15 +460,16 @@ export function SourcesScreen() {
     [sources],
   );
 
-  const filtered = useMemo(() => {
-    let items = sources;
-    if (q.trim()) {
-      const needle = q.trim().toLowerCase();
-      items = items.filter((s) => s.name.toLowerCase().includes(needle));
-    }
-    if (statusFilter !== "ALL") items = items.filter((s) => s.status === statusFilter);
-    return items;
-  }, [sources, q, statusFilter]);
+  /* Name matching is the server's now, so it is not repeated here: a second
+     pass over the same term would also strip out the row resolved by id for
+     `?source=`, which is the one row that has to survive a search. Status
+     stays client-side -- the options are derived from the rows on screen, so
+     filtering them server-side would mean offering a status and then getting
+     a list that cannot produce it. */
+  const filtered = useMemo(
+    () => (statusFilter === "ALL" ? sources : sources.filter((s) => s.status === statusFilter)),
+    [sources, statusFilter],
+  );
 
   const selected = useMemo(
     () => sources.find((s) => s.id === selectedId) ?? null,
@@ -456,7 +524,9 @@ export function SourcesScreen() {
           </p>
         </div>
         <div className="srcscreen__stats">
-          <span><b className="tnum">{total !== null ? total : "—"}</b> sources</span>
+          {/* The server's count, not the loaded rows': under a search it is
+              how many sources match, and on a large fleet the two differ. */}
+          <span><b className="tnum">{loading && total === 0 ? "—" : total}</b> sources</span>
           <span><b className="tnum">{activeCount}</b> active</span>
         </div>
       </header>
@@ -483,6 +553,50 @@ export function SourcesScreen() {
           {projectNotice && <span className="srcscreen__projectnotice">{projectNotice}</span>}
         </div>
       )}
+
+      {mayRegister ? (
+        <div className="srcscreen__register">
+          {/* The disclosure pattern `ScopePicker` already uses in this shell:
+              a real button carrying `aria-expanded`/`aria-controls` over a
+              `hidden` panel, so the form is one Tab and one Enter away and is
+              absent from the tab order while it is closed. Collapsed by
+              default because this screen's job is the fleet; registering is
+              the step you arrive here to do once. */}
+          <button
+            type="button"
+            className="srcscreen__registertoggle"
+            aria-expanded={registerOpen}
+            aria-controls="sources-register"
+            onClick={() => setRegisterOpen((open) => !open)}
+          >
+            <span aria-hidden="true">{registerOpen ? "−" : "+"}</span>
+            Register a data source
+          </button>
+          <div id="sources-register" hidden={!registerOpen}>
+            <RegisterDatasourceForm
+              projects={scope?.projects ?? []}
+              onCreated={(ds) => {
+                /* Three reads, no optimistic row. `scope.refresh()` because the
+                   new source belongs in every other screen's picker too; `load()`
+                   because this screen's fleet is the server's list, not a local
+                   array; `?source=` because the next step -- Test connection --
+                   lives in the detail pane that field opens. Registration
+                   deliberately does not chain `POST /datasources/{id}/test`
+                   (`AdministrationScreen.tsx`'s stated scope cut); this hands the
+                   operator to the screen that does own it instead. */
+                scope?.refresh();
+                load();
+                setParams({ source: ds.id });
+              }}
+            />
+            <p className="srcscreen__registernote">
+              Registering does not test the connection. The new source is selected in
+              the fleet below — open <b>Source administration</b> in its detail pane to
+              test it and schedule its first scan.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className="srcscreen__filters">
         <Field label="Search">
@@ -527,12 +641,22 @@ export function SourcesScreen() {
               />
             }
             renderItem={(s) => (
-              <SourceRow source={s} selected={s.id === selectedId} onSelect={() => setParams({ source: s.id })} />
+              <SourceRow
+                source={s}
+                selected={s.id === selectedId}
+                onSelect={() => setParams({ source: s.id, knowledge: null })}
+              />
             )}
           />
         )}
         {selected ? (
-          <SourceDetailsPane source={selected} onClose={() => setParams({ source: null })} />
+          <SourceDetailsPane
+            source={selected}
+            onClose={() => setParams({ source: null, knowledge: null })}
+            onSourceChanged={load}
+            knowledgeOpen={knowledgeOpen}
+            onToggleKnowledge={() => setParams({ knowledge: knowledgeOpen ? null : "1" })}
+          />
         ) : selectedId ? (
           <aside className="evp evp--idle" aria-label="Source details">
             <Empty
@@ -549,6 +673,14 @@ export function SourcesScreen() {
           </aside>
         )}
       </div>
+      {selected && knowledgeOpen ? (
+        <KnowledgeView
+          key={selected.id}
+          datasourceId={selected.id}
+          title={`${selected.name} · source bundle`}
+          onClose={() => setParams({ knowledge: null })}
+        />
+      ) : null}
     </div>
   );
 }

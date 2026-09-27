@@ -51,9 +51,6 @@ ColumnInput = tuple[str, str, bool]
 # A single table, as fetched by the caller: (table_id, table_name, columns).
 TableInput = tuple[UUID, str, Sequence[ColumnInput]]
 
-FAMILY_TYPES = ("SNAPSHOT", "HISTORY", "DELTA", "SCD")
-
-
 @dataclass(frozen=True)
 class FamilyCandidateDraft:
     """One detector finding, ready for the API layer to dedupe and persist."""

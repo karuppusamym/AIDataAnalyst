@@ -12,16 +12,25 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get } from "./transport";
+import { USE_FIXTURES, demoOr, get, postJson, putJson } from "./transport";
 import { fetchBusinessAnnotations, fetchTablesLegacy } from "./catalog";
 import { fetchQualityIncidents, fetchQualitySummary } from "./quality";
-import { makeFixtureDatasourceHealth } from "../fixtures";
 import { ApiError } from "../http";
-import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../types";
+import type {
+  AnalysisRunRead,
+  ConnectorHealthScoreRead,
+  DataSourceRead,
+  DiscoverySelection,
+  DiscoverySelectionPreviewRead,
+  DiscoverySelectionRead,
+  ProjectRead,
+  ScanPolicyRead,
+  ScanPolicyUpsert,
+} from "../types";
 
 /* ---------------------------------------------------------------------------
    Sources — UX-15/UX-16 follow-on (nav id `sources`). Reuses
-   `fetchOrgDatasources` (`./identity.ts`) for the fleet list (see that function's own
+   `listOrgDatasources` (`./identity.ts`) for the fleet list (see that function's own
    comment for the `DataSourceRead`/`DataSourceSummaryRead` shape note this
    screen also relies on -- `credential_reference` is typed but not actually
    present on this endpoint's wire response; this screen never reads it). The
@@ -40,11 +49,171 @@ export function fetchDatasourceHealth(
   signal?: AbortSignal,
 ): Promise<ConnectorHealthScoreRead> {
   return demoOr(
-    async () => makeFixtureDatasourceHealth(datasourceId),
+    async (fixtures) => fixtures.makeFixtureDatasourceHealth(datasourceId),
     async () => {
       return get<ConnectorHealthScoreRead>(`/v1/datasources/${datasourceId}/health`, signal);
     },
   );
+}
+
+/* ---------------------------------------------------------------------------
+   Source administration — the four write/read pairs that let an ALREADY
+   REGISTERED source be operated from the fleet console (tracker R11-B7).
+
+   THE GAP this closes: the backend for re-scanning, scheduling and retrying
+   has been merged for some time, and the only caller in this client was
+   `FirstSourceSetup`, which starts the FIRST scan of a source that has never
+   been scanned. A source that already existed could not be re-scanned, its
+   scan policy could not be read let alone changed, and a failed run could
+   only be retried by calling the API by hand.
+
+   Nothing below is a new endpoint or a composition: each is one already-merged
+   route, named for the handler that serves it, so a refusal the state machine
+   issues (a 409 from run admission, a 424 from a connection probe) arrives
+   here as the server's own sentence and is rendered as such rather than
+   collapsed into "something went wrong".
+
+   The demo build has no fixture for any of them. A write with nothing to
+   return is refused in words rather than faked -- `columnDescriptionDrafts.ts`
+   already established that convention -- because a scan that silently "worked"
+   against a fixture estate is worse than one that says it needs a backend.
+--------------------------------------------------------------------------- */
+
+const ADMIN_FIXTURE_NOTICE =
+  "Source administration acts on the real fleet; run against a live backend " +
+  "(VITE_USE_FIXTURES=0) to test a connection, scan, schedule or retry.";
+
+/** `POST /v1/datasources/{datasource_id}/test`
+ *  (`atlas.modules.connectivity.router.test_datasource`) — resolves the stored
+ *  credential reference, opens a connection and re-reads the connector's
+ *  capabilities. Returns the datasource with its NEW status: `CONNECTION_VERIFIED`
+ *  on success (an already-`ACTIVE` source keeps `ACTIVE`). A failed probe is not
+ *  a 5xx: the handler commits `CONNECTION_FAILED` and answers **424**, so the
+ *  caller must render that as "the connection is broken, and the source now says
+ *  so" rather than as a failed request. Roles: PlatformAdmin / DataAdmin. */
+export function testDatasourceConnection(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<DataSourceRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return postJson<DataSourceRead>(`/v1/datasources/${datasourceId}/test`, {}, signal);
+}
+
+/** `GET /v1/datasources/{datasource_id}/scan-policy`
+ *  (`atlas.modules.connectivity.router.get_scan_policy`) — the schedule the
+ *  scheduler actually reads: interval, mode, priority, maintenance window, and
+ *  the two facts no client can compute for itself, `next_run_at` and
+ *  `last_triggered_at`.
+ *
+ *  **404 is a real answer, not an error.** A datasource with no policy row has
+ *  never been scheduled; the handler says `scan policy not found` and the caller
+ *  is expected to offer to create one. Roles add Viewer to the write's three,
+ *  so a read-only principal can see the schedule it may not change. */
+export function fetchScanPolicy(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<ScanPolicyRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return get<ScanPolicyRead>(`/v1/datasources/${datasourceId}/scan-policy`, signal);
+}
+
+/** `PUT /v1/datasources/{datasource_id}/scan-policy`
+ *  (`atlas.modules.connectivity.router.upsert_scan_policy`) — create or replace
+ *  the whole policy. An UPSERT of the complete document, not a patch: every
+ *  field the caller omits falls back to the schema default (`enabled` true,
+ *  `mode` INCREMENTAL, `priority` 50, no maintenance window), so an editor must
+ *  send what the server currently holds for anything it is not changing.
+ *
+ *  Two server rules worth sending correctly rather than discovering as a 422:
+ *  `start_at` must carry a timezone, and the two maintenance-window hours are
+ *  all-or-nothing and may not be equal. `priority` here is the admin's own
+ *  choice; the server keeps it as `base_priority` so a later usage-weighted
+ *  rebalance never compounds a previously boosted value (ADR-0017 SS8). */
+export function upsertScanPolicy(
+  datasourceId: string,
+  body: ScanPolicyUpsert,
+  signal?: AbortSignal,
+): Promise<ScanPolicyRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return putJson<ScanPolicyRead>(`/v1/datasources/${datasourceId}/scan-policy`, body, signal);
+}
+
+/* Discovery scope (R11-FP01) -- which object kinds, schemas and names a scan
+   takes in. Three routes in `atlas.modules.connectivity.router`, logic in
+   `aida.discovery_selection`. Same fixture refusal as the rest of this block:
+   a scope saved against a demo estate would change nothing real. */
+
+/** `GET /v1/datasources/{datasource_id}/discovery-selection` — the stored
+ *  selection (empty lists: unrestricted), its fingerprint, and per object kind
+ *  whether the connector inventories it and captures its code. `NOT_APPLICABLE`
+ *  (the engine has no such kind) and `UNSUPPORTED` (Atlas does not collect it)
+ *  are different answers. Roles add Viewer to the write's three. */
+export function fetchDiscoverySelection(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<DiscoverySelectionRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return get<DiscoverySelectionRead>(`/v1/datasources/${datasourceId}/discovery-selection`, signal);
+}
+
+/** `POST /v1/datasources/{datasource_id}/discovery-selection/preview` — what a
+ *  selection would keep and leave out, **counted over the last completed scan**
+ *  (`basis: LAST_SCAN`): it neither stores the selection nor contacts the source,
+ *  so an object Atlas has never discovered is not in the counts. Names include
+ *  patterns that matched nothing, the likeliest typo. */
+export function previewDiscoverySelection(
+  datasourceId: string,
+  body: DiscoverySelection,
+  signal?: AbortSignal,
+): Promise<DiscoverySelectionPreviewRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return postJson<DiscoverySelectionPreviewRead>(
+    `/v1/datasources/${datasourceId}/discovery-selection/preview`,
+    body,
+    signal,
+  );
+}
+
+/** `PUT /v1/datasources/{datasource_id}/discovery-selection` — replace the
+ *  selection; an all-empty body removes it. Applies from the next run. Narrowing
+ *  it never retires what earlier runs found: a FULL run reconciles only objects
+ *  the selection covers. Roles: PlatformAdmin / MetadataAdmin / DataAdmin. */
+export function putDiscoverySelection(
+  datasourceId: string,
+  body: DiscoverySelection,
+  signal?: AbortSignal,
+): Promise<DiscoverySelectionRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return putJson<DiscoverySelectionRead>(
+    `/v1/datasources/${datasourceId}/discovery-selection`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/analysis-runs/{run_id}/resume` (`aida.api.resume_analysis_run`, 202)
+ *  — retry an interrupted run. The server does NOT restart the old run: it
+ *  reserves a NEW one carrying `resumed_from_run_id`, the previous run's mode
+ *  and its priority, with `trigger_type` RESUME. So the answer is a different
+ *  run id from the one that was retried, and the caller must re-read the run
+ *  list rather than mutate the failed row in place.
+ *
+ *  Two distinct 409s, both of which are answers to render:
+ *    - `only interrupted or failed runs can resume` — the status gate; a
+ *      COMPLETED or still-RUNNING run is not retryable.
+ *    - whatever `reserve_analysis_run` says when admission rejects it (a run
+ *      already in flight for this datasource, a concurrency budget).
+ *
+ *  Lives here rather than in `./operations.ts`, beside the other analysis-run
+ *  calls, because the Sources console is its only caller and `api/operations.ts`
+ *  is owned by a concurrent lane; the barrel test guarantees the name is not
+ *  also declared there. Roles: PlatformAdmin / MetadataAdmin / DataAdmin. */
+export function resumeAnalysisRun(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<AnalysisRunRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return postJson<AnalysisRunRead>(`/v1/analysis-runs/${runId}/resume`, {}, signal);
 }
 
 /* ---------------------------------------------------------------------------

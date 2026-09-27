@@ -174,11 +174,3 @@ async def current_descriptions_for_table(
     return {column_id: version for version, column_id in rows}
 
 
-async def resolve_column_description_version(
-    session: AsyncSession, version_id: UUID
-) -> ColumnDocumentationVersion | None:
-    """Resolve one version by id regardless of `status` -- a `SUPERSEDED` row
-    is still the exact content some past run or citation referenced, and must
-    stay resolvable.
-    """
-    return await session.get(ColumnDocumentationVersion, version_id)

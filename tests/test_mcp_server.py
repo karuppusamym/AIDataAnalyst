@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from aida import mcp_server
 from aida.asset_context import AssetContextSignals, ClassificationSummary
 from aida.authorization_gate import AuthorizationDenied
@@ -308,6 +310,21 @@ async def test_tools_call_reaches_datasource_resolution_when_role_is_eligible() 
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def lineage_gate(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """R11-D28: the native lineage tools ask the datasource's workspace gate before they
+    read. This suite fakes the session, so the gate here allows and records what it was
+    asked; the real refusal is proven against a database in
+    `tests/test_lineage_workspace_gate.py`."""
+    asked: list[dict[str, object]] = []
+
+    async def _allowing_gate(_session: object, _context: object, **kwargs: object) -> None:
+        asked.append(kwargs)
+
+    monkeypatch.setattr(mcp_server, "gate", _allowing_gate)
+    return asked
+
+
 class LineageToolSession:
     """Fake session: only `.get()` is used by _handle_native_lineage_tool_call
     itself (the payload builders are monkeypatched in success-path tests, so
@@ -441,7 +458,9 @@ async def test_native_lineage_tool_rejects_a_datasource_in_another_organization(
     assert result["content"] == [{"type": "text", "text": "Datasource not accessible."}]
 
 
-async def test_native_lineage_tool_requires_node_id_for_impact() -> None:
+async def test_native_lineage_tool_requires_node_id_for_impact(
+    lineage_gate: list[dict[str, object]],
+) -> None:
     org = uuid4()
     caller = SecurityContext(
         principal_id="analyst",
@@ -472,7 +491,9 @@ async def test_native_lineage_tool_requires_node_id_for_impact() -> None:
     }
 
 
-async def test_native_lineage_tool_resolve_entity_validates_query_length() -> None:
+async def test_native_lineage_tool_resolve_entity_validates_query_length(
+    lineage_gate: list[dict[str, object]],
+) -> None:
     org = uuid4()
     caller = SecurityContext(
         principal_id="analyst",
@@ -503,7 +524,9 @@ async def test_native_lineage_tool_resolve_entity_validates_query_length() -> No
     }
 
 
-async def test_native_lineage_tool_resolve_entity_validates_entity_type() -> None:
+async def test_native_lineage_tool_resolve_entity_validates_entity_type(
+    lineage_gate: list[dict[str, object]],
+) -> None:
     org = uuid4()
     caller = SecurityContext(
         principal_id="analyst",
@@ -540,6 +563,7 @@ async def test_native_lineage_tool_resolve_entity_validates_entity_type() -> Non
 
 async def test_native_lineage_tool_resolve_entity_returns_the_payload_as_json(
     monkeypatch: object,
+    lineage_gate: list[dict[str, object]],
 ) -> None:
     org = uuid4()
     caller = SecurityContext(
@@ -593,6 +617,7 @@ async def test_native_lineage_tool_resolve_entity_returns_the_payload_as_json(
 
 async def test_native_lineage_tool_get_lineage_graph_returns_the_payload_as_json(
     monkeypatch: object,
+    lineage_gate: list[dict[str, object]],
 ) -> None:
     org = uuid4()
     caller = SecurityContext(
@@ -642,9 +667,15 @@ async def test_native_lineage_tool_get_lineage_graph_returns_the_payload_as_json
     assert result["content"][0]["text"].startswith("\u2705 Unified lineage read")
     assert str(datasource.id) in result["content"][1]["text"]
     assert '"returned_node_count": 0' in result["content"][1]["text"]
+    assert [
+        (call["action"], call["resource_type"], call["resource_id"], call["datasource_id"])
+        for call in lineage_gate
+    ] == [("READ_METADATA", "datasource", str(datasource.id), datasource.id)]
 
 
-async def test_native_lineage_tool_get_transformation_detail_rejects_a_non_uuid_entity_id() -> None:
+async def test_native_lineage_tool_get_transformation_detail_rejects_a_non_uuid_entity_id(
+    lineage_gate: list[dict[str, object]],
+) -> None:
     org = uuid4()
     caller = SecurityContext(
         principal_id="analyst",
@@ -677,6 +708,7 @@ async def test_native_lineage_tool_get_transformation_detail_rejects_a_non_uuid_
 
 async def test_native_lineage_tool_get_transformation_detail_returns_the_payload_as_json(
     monkeypatch: object,
+    lineage_gate: list[dict[str, object]],
 ) -> None:
     org = uuid4()
     caller = SecurityContext(
@@ -747,6 +779,7 @@ async def test_native_lineage_tool_get_transformation_detail_returns_the_payload
 
 async def test_native_lineage_tool_get_transformation_detail_surfaces_not_found(
     monkeypatch: object,
+    lineage_gate: list[dict[str, object]],
 ) -> None:
     org = uuid4()
     caller = SecurityContext(
@@ -993,7 +1026,9 @@ def _dbt_resource_scenario(description: str) -> tuple[DataSource, DbtResource, D
     return datasource, resource, artifact
 
 
-async def test_transformation_detail_quarantines_a_multilingual_injection_description() -> None:
+async def test_transformation_detail_quarantines_a_multilingual_injection_description(
+    lineage_gate: list[dict[str, object]],
+) -> None:
     """AG-1/AG-2's corpus (`injection_corpus.py`), reached through the live MCP path.
 
     A Chinese "ignore all previous instructions" payload -- flagged by
@@ -1037,7 +1072,9 @@ async def test_transformation_detail_quarantines_a_multilingual_injection_descri
     assert session.committed is True
 
 
-async def test_transformation_detail_passes_through_a_benign_description() -> None:
+async def test_transformation_detail_passes_through_a_benign_description(
+    lineage_gate: list[dict[str, object]],
+) -> None:
     """The live screen must not become a false-positive tax on an ordinary manifest."""
     benign = "One row per active customer, refreshed nightly by the customers model."
     datasource, resource, artifact = _dbt_resource_scenario(benign)
@@ -1064,6 +1101,7 @@ async def test_transformation_detail_passes_through_a_benign_description() -> No
 
 async def test_native_lineage_tool_get_lineage_impact_surfaces_node_not_found(
     monkeypatch: object,
+    lineage_gate: list[dict[str, object]],
 ) -> None:
     org = uuid4()
     caller = SecurityContext(

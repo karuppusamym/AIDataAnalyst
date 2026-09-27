@@ -55,7 +55,7 @@
 
 .trresult{border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:8px}
 .trresult__answer{margin:0;font-size:13px;color:var(--ink)}
-.trresult__gate{background:var(--warn-soft);color:var(--warn);border-radius:var(--radius-sm);padding:8px 10px;font-size:12.5px}
+.trresult__gate{background:var(--warn-soft);color:var(--warn-ink);border-radius:var(--radius-sm);padding:8px 10px;font-size:12.5px}
 .trresult__strip{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-3)}
 .trresult__tablewrap{overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid var(--line-soft);border-radius:var(--radius-sm)}
 .trresult__table{border-collapse:collapse;width:100%;font-size:12px}

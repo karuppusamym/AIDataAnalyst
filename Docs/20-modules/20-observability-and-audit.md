@@ -38,10 +38,16 @@ U1 (every action on this asset), U2 (prove constraints), U4 (evidence pack), P2,
 ```text
 audit_event (actor, action, resource, tenancy, correlation_id, occurred_at, detail)
 outbox_event, dead_letter
-slo_definition, slo_state, error_budget
 compliance_pack, pack_artifact
 cost_record (dimension, tenancy, quantity, period)
 ```
+
+The SLO row of this model (`slo_definition`, `slo_state`, `error_budget`) was
+retired on 2026-09-12 (R11-D10). Only two of the three were ever built, and
+nothing ever wrote a measurement into them — an SLO was bound to no measurable
+signal, and "being the metrics store" is explicitly not this module's job (see
+the table above), so the indicator would have had to come from the enterprise
+observability stack that this platform does not integrate with.
 
 ## 6. The audit contract
 
@@ -136,3 +142,5 @@ Log scrubbing is a middleware, not a coding convention. A convention fails the f
 | OB-6 | Cost and showback aggregation | P1 |
 | OB-7 | Access review reporting | P1 |
 | OB-8 | Log-scrubbing verification test (sentinel scan) | P0 |
+
+> **Implementation status (2026-09-21).** OB-8's scrubbing covered structlog records only: `redact_sensitive_data` (`src/atlas/platform/logging.py`) redacts by key name and value pattern. Records that libraries emit through stdlib `logging` (httpx, uvicorn, aiokafka) never reached it. httpx logs `HTTP Request: GET <full url>` at INFO, and the model-route health check sent the Gemini key as `?key=...`, so a live provider key was written to the scheduler's container log on every pass (R11-AUD14). The call now sends `x-goog-api-key`, and `RedactStdlibLogRecords`, installed by `configure_logging` on the root handlers, scrubs secret-shaped query parameters and the same value patterns from stdlib records (`tests/test_log_scrubbing.py`, `tests/test_model_route_health.py`). A logger that installs its own handler and does not propagate is not covered.

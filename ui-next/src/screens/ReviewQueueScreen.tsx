@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 /* Filters and selection live in the URL so a filtered view is shareable and
    survives Back/Forward. This screen carried a verbatim copy of the old hook
    -- a `useState` seeded once from `location.search`, subscribed to nothing --
@@ -37,6 +37,20 @@ import {
 import "../components/ProposalRow.css";
 import "../components/EvidencePane.css";
 import "./ReviewQueueScreen.css";
+import { ReviewChangePreview } from "../components/ReviewChangePreview";
+/* R11-OKF03: an OKF import's own reviews get the import preview -- per
+   document, before and after text, and whether approving still applies each
+   change -- instead of the generic diff. Same gate: no decision until it has
+   loaded for this review. */
+import { OkfImportReviewPreview } from "../components/OkfImportReviewPreview";
+import { OKF_IMPORT_REVIEW_TYPES } from "../lib/api/okfImport";
+
+const FULL_PREVIEW_TYPES = new Set([
+  "MODEL_IMPORT_BATCH",
+  "CONTEXT_PRODUCT_VERSION",
+  "ONTOLOGY_VERSION",
+  ...OKF_IMPORT_REVIEW_TYPES,
+]);
 
 /* ---------------------------------------------------------------------------
    Review queue — UX-15, migrated onto UX-17's real read model.
@@ -88,9 +102,18 @@ const OBJECT_TYPES = [
   "GLOSSARY_LINK_PROPOSAL",
   "SEMANTIC_METRIC_PROPOSAL",
   "ASSET_DESCRIPTION_DRAFT",
+  "COLUMN_DESCRIPTION_DRAFT",
+  /* R11-FP08: a routine's description is reviewed through this same queue --
+     one decision path, not a second governance engine. Absent from this list
+     the drafts still arrived, but no reviewer could filter to them. */
+  "ROUTINE_DESCRIPTION_DRAFT",
   "TERM_SEMANTIC_BINDING",
   "COLUMN_CLASSIFICATION_PROMOTION",
   "CONTEXT_PRODUCT_VERSION",
+  "MODEL_IMPORT_BATCH",
+  "ONTOLOGY_VERSION",
+  "OKF_IMPORT_BATCH",
+  "OKF_IMPORT_ROUTINE_DESCRIPTION",
 ] as const;
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
@@ -165,10 +188,59 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
       subtitle: reason ? `Reason: ${reason}` : undefined,
     };
   }
+  if (
+    proposal.object_type === "COLUMN_DESCRIPTION_DRAFT" ||
+    proposal.object_type === "ASSET_DESCRIPTION_DRAFT" ||
+    proposal.object_type === "ROUTINE_DESCRIPTION_DRAFT"
+  ) {
+    // The proposed text arrives as the first evidence item: description
+    // drafts have no field diff, so without it the row would ask a reviewer
+    // to approve text it never showed them.
+    const proposed = extractEvidenceValue(proposal, "proposed_description");
+    const column = extractEvidenceValue(proposal, "column");
+    const signature = extractEvidenceValue(proposal, "signature");
+    const bodyState = extractEvidenceValue(proposal, "body_state");
+    const parts: string[] = [];
+    /* R11-FP08: a routine drafted without its body is a weaker claim than one
+       drafted from it, and the score alone does not say which happened. The
+       read model carries `body_state` for exactly this; say it here rather
+       than making a reviewer open the evidence to find out. CAPTURED is the
+       unremarkable case and stays silent. */
+    if (bodyState && bodyState !== "CAPTURED") {
+      parts.push(`body ${bodyState.toLowerCase().replace(/_/g, " ")}`);
+    }
+    // Said first, where a reviewer skimming the queue cannot miss it: a
+    // model's text can be wrong in a way that reads as right.
+    if (extractEvidenceValue(proposal, "origin")?.startsWith("MODEL_INFERRED")) {
+      parts.push("model-inferred: check it against the data");
+    }
+    if (proposed) parts.push(`“${proposed.length > 180 ? `${proposed.slice(0, 180)}…` : proposed}”`);
+    if (proposal.confidence !== null && proposal.confidence !== undefined) {
+      parts.push(`evidence ${pct(proposal.confidence)}`);
+    }
+    return {
+      subject:
+        proposal.object_type === "COLUMN_DESCRIPTION_DRAFT"
+          ? `Describe column ${column ?? proposal.object_id}`
+          : proposal.object_type === "ROUTINE_DESCRIPTION_DRAFT"
+            ? `Describe routine ${signature ?? proposal.object_id}`
+            : "Table description draft",
+      subtitle: parts.join(" — ") || undefined,
+    };
+  }
+  if (proposal.object_type === "OKF_IMPORT_BATCH") {
+    return { subject: "Descriptions imported from an edited OKF bundle" };
+  }
+  if (proposal.object_type === "OKF_IMPORT_ROUTINE_DESCRIPTION") {
+    return { subject: "Routine purpose imported from an edited OKF bundle" };
+  }
   return { subject: proposal.object_id };
 }
 
 function DiffEntries({ proposal }: { proposal: ReviewQueueProposalRead }) {
+  if (FULL_PREVIEW_TYPES.has(proposal.object_type)) {
+    return <p>Select this proposal to load its complete version or workbook change preview.</p>;
+  }
   if (!proposal.diff.diffable) {
     return <p className="prop__nodiff">{proposal.diff.message ?? "No structured diff for this object type."}</p>;
   }
@@ -200,6 +272,7 @@ function ProposalRow({
   deciding,
   ownProposal,
   decisionError,
+  previewBlocked,
 }: {
   proposal: ReviewQueueProposalRead;
   focused: boolean;
@@ -208,6 +281,7 @@ function ProposalRow({
   deciding: boolean;
   ownProposal: boolean;
   decisionError?: string;
+  previewBlocked?: boolean;
 }) {
   const decided = proposal.status !== "PENDING";
   const extras = renderRowExtras(proposal);
@@ -280,6 +354,8 @@ function ProposalRow({
           <span className="prop__own-review">
             You proposed this change. Another reviewer must approve or reject it.
           </span>
+        ) : previewBlocked ? (
+          <span>Open this proposal and load its full change preview before deciding.</span>
         ) : (
           <>
             <Button variant="primary" disabled={deciding} onClick={() => onDecide("APPROVE")}>
@@ -298,7 +374,12 @@ function ProposalRow({
   );
 }
 
-export function ReviewQueueScreen() {
+/* R11-S10: this is the governance queue itself -- one of the two queues the
+   exported `ReviewQueueScreen` below federates. It is unchanged by the merge:
+   its own fetch, its own filters, its own per-object-type renderers and its
+   own maker-checker decision call. What changed is that it is no longer the
+   only queue a reviewer has to find. */
+function GovernanceReviewQueue() {
   const [params, setParams] = useUrlState();
   const principalId = useSession().me?.principal_id ?? null;
   // "ALL" in the URL is this screen's own spelling for "every status" — the
@@ -325,6 +406,7 @@ export function ReviewQueueScreen() {
   const [rejecting, setRejecting] = useState<string | null>(null);
   const [decideError, setDecideError] = useState<string | null>(null);
   const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
+  const [detailReady, setDetailReady] = useState<string | null>(null);
   /* A 409 is not an error message. The decision service answers a lost claim
      with the review's refreshed state (F05), so the reviewer who lost is shown
      WHICH decision won rather than "409 Conflict" -- which is what the old
@@ -371,6 +453,11 @@ export function ReviewQueueScreen() {
 
   const decide = useCallback(
     async (reviewId: string, decision: "APPROVE" | "REJECT", reason: string | null) => {
+      // The detail pane can remain visible during a refresh. Never act on its
+      // old snapshot while the current queue is loading or unavailable.
+      if (loading || error !== null) return;
+      const proposal = proposals.find(item => item.review_id === reviewId);
+      if (proposal && FULL_PREVIEW_TYPES.has(proposal.object_type) && (detailReady !== reviewId || focusedId !== reviewId)) return;
       setDeciding(reviewId);
       setDecideError(null);
       setDecisionErrors((current) => {
@@ -412,12 +499,20 @@ export function ReviewQueueScreen() {
         setDeciding(null);
       }
     },
-    [load, setParams],
+    [load, setParams, loading, error, proposals, detailReady, focusedId],
   );
 
-  const totalPending = data?.byStatus["PENDING"] ?? 0;
-  const totalApproved = data?.byStatus["APPROVED"] ?? 0;
-  const totalRejected = data?.byStatus["REJECTED"] ?? 0;
+  /* A failed load must not leave three tiles asserting counts.
+     `data?.byStatus[...] ?? 0` rendered "0 pending review" beside "The review
+     queue could not be loaded" on a first failure, and the previous load's
+     counts -- unmarked as stale -- on a later one. Both state a fact the
+     screen does not have: "nothing is waiting for you" and "we could not find
+     out" are different answers, and only one of them is safe to act on.
+     Unknown renders as unknown, the same way the Catalog header renders its
+     asset total before the count arrives. */
+  const countsKnown = error === null && data !== null;
+  const tileCount = (status: string): string =>
+    countsKnown ? String(data?.byStatus[status] ?? 0) : "—";
 
   const focused = useMemo(
     () => proposals.find((p) => p.review_id === focusedId) ?? null,
@@ -468,15 +563,15 @@ export function ReviewQueueScreen() {
 
       <div className="rq__tiles">
         <div className="tile tile--warn">
-          <div className="tile__n tnum">{totalPending}</div>
+          <div className="tile__n tnum">{tileCount("PENDING")}</div>
           <div className="tile__l">pending review</div>
         </div>
         <div className="tile tile--ok">
-          <div className="tile__n tnum">{totalApproved}</div>
+          <div className="tile__n tnum">{tileCount("APPROVED")}</div>
           <div className="tile__l">approved</div>
         </div>
         <div className="tile">
-          <div className="tile__n tnum">{totalRejected}</div>
+          <div className="tile__n tnum">{tileCount("REJECTED")}</div>
           <div className="tile__l">rejected</div>
         </div>
       </div>
@@ -507,6 +602,7 @@ export function ReviewQueueScreen() {
                 deciding={deciding === p.review_id}
                 ownProposal={principalId !== null && p.requested_by === principalId}
                 decisionError={decisionErrors[p.review_id]}
+                previewBlocked={FULL_PREVIEW_TYPES.has(p.object_type) && (detailReady !== p.review_id || focusedId !== p.review_id)}
                 onDecide={(decision) =>
                   decision === "REJECT"
                     ? setRejecting(p.review_id)
@@ -535,13 +631,21 @@ export function ReviewQueueScreen() {
             decidedAt: focused.decided_at,
             decisionReason: focused.decision_reason,
             blockedReason:
-              focused.status !== "PENDING"
+              loading || error !== null
+                ? "Refresh the review queue successfully before deciding this proposal."
+                : focused.status !== "PENDING"
                 ? `This review is already ${focused.status.toLowerCase()}.`
                 : principalId !== null && focused.requested_by === principalId
                   ? "You proposed this change. Another reviewer must approve or reject it."
-                  : null,
+                  : FULL_PREVIEW_TYPES.has(focused.object_type) && detailReady !== focused.review_id
+                    ? "Load the full change preview before deciding."
+                    : null,
           }}
-          diff={<DiffEntries proposal={focused} />}
+          diff={OKF_IMPORT_REVIEW_TYPES.has(focused.object_type)
+            ? <OkfImportReviewPreview key={focused.review_id} reviewId={focused.review_id} onReady={setDetailReady} />
+            : FULL_PREVIEW_TYPES.has(focused.object_type)
+            ? <ReviewChangePreview key={focused.review_id} reviewId={focused.review_id} onReady={setDetailReady} />
+            : <DiffEntries proposal={focused} />}
           /* Impact: this queue composes no consumer/impact set today. Saying so
              is the honest state -- an empty "affects nothing" would be a claim
              the read model never made. */
@@ -617,7 +721,7 @@ export function ReviewQueueScreen() {
           <PropagationLog
             title="Quality propagation · ADR-0016 fails closed"
             illustrative
-            illustrativeNote="A hard-coded four-step story about a sample table. No lineage walk produced it: `quality_coupling.check_tool_gate` gates only on a tool's own declared dependencies, and no classification-propagation mechanism exists yet (AT-11). It is here to show the shape of the explanation a real traversal will render."
+            illustrativeNote="A hard-coded four-step story about a sample table. No lineage walk produced it: `quality_coupling.check_tool_gate` gates only on a tool's own declared dependencies. Classification propagation over column lineage does exist (AT-11, R11-B17), but it moves classifications, not quality incidents, and did not produce this story. It is here to show the shape of the explanation a quality traversal would render."
             steps={[
               {
                 kind: "origin",
@@ -643,6 +747,139 @@ export function ReviewQueueScreen() {
           />
         </section>
       ) : null}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   THE FEDERATED REVIEW SURFACE — R11-S10.
+
+   THE DEFECT this removes: a reviewer had to know that two separate queues
+   existed and visit both. `#/governance` held everything backed by the
+   `GovernanceReview` table -- twelve object types behind one type filter,
+   already federated -- and `#/parsed-lineage-review` held the parser-produced
+   lineage edges. Nothing on either screen mentioned the other. A steward
+   agent's proposals landed in one, a lineage agent's in the other, and the
+   only way to learn that was to be told.
+
+   WHY THIS IS A TAB AND NOT ONE LIST. Checked against the backend before
+   designing it: `GET /v1/governance/reviews/queue` takes an `object_type`
+   filter and is genuinely cross-type, but it reads one table. The parsed
+   lineage edges live in six separate parser tables, are decided through
+   `POST /v1/lineage/parsed-edges/{id}/decision`, and have their own bulk
+   semantics -- they never reach `GovernanceReview` and cannot be filtered
+   through `object_type`. Presenting them as rows of one list would mean
+   inventing a union the platform cannot decide over, and a reviewer would
+   learn that only when a bulk action silently applied to half a selection.
+
+   So the federation is honest about the seam: one destination, one place to
+   look, two queues named for what they decide. T18's shared
+   `ReviewDetailShell` already gives both the same detail contract, so the
+   thing a reviewer actually does is identical on either tab.
+
+   The retired `#/parsed-lineage-review` route resolves here with the parsed
+   lineage tab selected -- see `RETIRED_SCREEN_ALIASES` in `lib/routes.ts`.
+--------------------------------------------------------------------------- */
+
+/** The parsed-lineage queue stays its own lazily-loaded module: it is a
+ *  second tab, not a second screen, and a reviewer who never opens it should
+ *  not pay for its chunk. */
+const ParsedLineageReviewScreen = lazy(() =>
+  import("./ParsedLineageReviewScreen").then((module) => ({
+    default: module.ParsedLineageReviewScreen,
+  })),
+);
+
+/** R11-REV01: batch review over the same governance queue, paged by the server
+ *  and decided through frozen batches. A tab of this destination rather than a
+ *  new one, so R11-S13's Stewardship consolidation gains no sidebar entry. */
+const ReviewBatchQueue = lazy(() =>
+  import("./ReviewBatchQueue").then((module) => ({ default: module.ReviewBatchQueue })),
+);
+
+const QUEUES = [
+  { id: "governance", label: "Governance proposals" },
+  { id: "parsed-lineage", label: "Parsed lineage edges" },
+  { id: "batch", label: "Batch review" },
+] as const;
+
+type QueueId = (typeof QUEUES)[number]["id"];
+
+export function ReviewQueueScreen() {
+  const [params, setParams] = useUrlState();
+  const requested = params.get("queue");
+  const queue: QueueId =
+    requested === "parsed-lineage" || requested === "batch" ? requested : "governance";
+
+  return (
+    <div className="rqf">
+      {/* A tablist, not links: both queues are this one screen, and announcing
+          them as navigation would tell a screen-reader user they are leaving
+          it. Each queue still renders its own <h1>, so the heading always
+          names what is actually in front of the reviewer. */}
+      <div className="rqf__tabs" role="tablist" aria-label="Review queue">
+        {QUEUES.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            id={`review-queue-tab-${item.id}`}
+            className="rqf__tab"
+            aria-selected={item.id === queue}
+            aria-controls={`review-queue-panel-${item.id}`}
+            onClick={() =>
+              /* Switching queue drops the other queue's selection and filters.
+                 `review`, `status` and `type` are declared once for this screen
+                 because they mean the same thing in both queues -- but a
+                 focused governance review id is not an edge key, and leaving it
+                 behind would open a detail pane on an item the new queue has
+                 never heard of. */
+              setParams({
+                queue: item.id === "governance" ? null : item.id,
+                review: null,
+                status: null,
+                type: null,
+              })
+            }
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <div
+        role="tabpanel"
+        id={`review-queue-panel-${queue}`}
+        aria-labelledby={`review-queue-tab-${queue}`}
+      >
+        {queue === "governance" ? (
+          <GovernanceReviewQueue />
+        ) : queue === "batch" ? (
+          <Suspense
+            fallback={
+              <div className="screenloading" role="status">
+                Loading batch review…
+              </div>
+            }
+          >
+            <ReviewBatchQueue />
+          </Suspense>
+        ) : (
+          /* A local boundary, so downloading the second queue's chunk replaces
+             the panel rather than the whole screen -- the shell's own Suspense
+             sits above the tabs, and falling back to it would take the tabs off
+             screen mid-switch. */
+          <Suspense
+            fallback={
+              <div className="screenloading" role="status">
+                Loading parsed lineage edges…
+              </div>
+            }
+          >
+            <ParsedLineageReviewScreen />
+          </Suspense>
+        )}
+      </div>
     </div>
   );
 }

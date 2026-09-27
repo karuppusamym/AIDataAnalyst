@@ -71,10 +71,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+import structlog
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
+
+_log = structlog.get_logger(__name__)
 
 _FLOAT_FORMAT = "<f"  # little-endian float32; 4 bytes per dimension
 
@@ -388,17 +391,48 @@ class ExternalVectorIndex(VectorIndex):
             payload["owner_ids"] = sorted({c.owner_id for c in candidates})
         body = await self._post(f"/collections/{self._collection}/search", payload)
         matches = body.get("matches", []) if isinstance(body, dict) else []
-        return tuple(
-            ScoredMatch(
-                ref=EmbeddingRef(
-                    owner_type=str(match.get("owner_type", "")),
-                    owner_id=str(match.get("owner_id", "")),
-                    chunk_index=int(match.get("chunk_index", 0)),
-                ),
-                score=float(match.get("score", 0.0)),
-            )
-            for match in matches
+        # R11-MP16: the remote answer is re-checked here, not trusted. The request
+        # carries only owner ids, so a remote index that matched an id of the wrong
+        # owner type -- or answered for another organization or another index
+        # signature -- would otherwise put an object the policy never admitted
+        # into retrieval. The built-in index checks the full (owner type, owner
+        # id) pair itself; this holds the external one to the same allowlist.
+        allowed = (
+            None
+            if candidates is None
+            else {(c.owner_type, c.owner_id) for c in candidates}
         )
+        admitted: list[ScoredMatch] = []
+        dropped = 0
+        for match in matches:
+            if not isinstance(match, dict):
+                dropped += 1
+                continue
+            answered_org = match.get("organization_id")
+            answered_signature = match.get("index_signature")
+            ref = EmbeddingRef(
+                owner_type=str(match.get("owner_type", "")),
+                owner_id=str(match.get("owner_id", "")),
+                chunk_index=int(match.get("chunk_index", 0)),
+            )
+            if (
+                not ref.owner_type
+                or not ref.owner_id
+                or (answered_org is not None and str(answered_org) != str(organization_id))
+                or (answered_signature is not None and answered_signature != signature)
+                or (allowed is not None and (ref.owner_type, ref.owner_id) not in allowed)
+            ):
+                dropped += 1
+                continue
+            admitted.append(ScoredMatch(ref=ref, score=float(match.get("score", 0.0))))
+        if dropped:
+            _log.warning(
+                "external_vector_matches_dropped",
+                dropped=dropped,
+                returned=len(matches),
+                reason="OUTSIDE_ALLOWLIST_ORGANIZATION_OR_SIGNATURE",
+            )
+        return tuple(admitted[:limit])
 
     async def delete_owner(self, session: AsyncSession, organization_id: Any,
                            owner_type: str, owner_id: str) -> int:

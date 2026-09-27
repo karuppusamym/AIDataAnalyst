@@ -34,11 +34,19 @@ outbox backlog depth and the age of its oldest pending row (this deployment's
 projection-lag signal -- the outbox is what the graph projector and publisher
 consume). "UP, last succeeded 0.2s ago" and "UP, last succeeded never" are
 different claims and the report makes both sayable.
+
+The same question is asked of outbound delivery. `probe_delivery_backlog`
+reports how many governance notifications and SIEM events are still owed to a
+destination, how many have dead-lettered, and how old the oldest undelivered
+one is -- so that a wedged delivery worker or a destination that has been
+refusing all night is visible from `/health/ready` rather than only from the
+worker's logs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -57,8 +65,17 @@ from aida.authorization_posture import (
     unresolvable_posture,
 )
 from aida.db import session_factory as default_session_factory
-from aida.models import OutboxEvent
+from aida.delivery_intents import (
+    KIND_NOTIFICATION,
+    KIND_SIEM,
+    STATE_DEAD_LETTER,
+    STATE_DELIVERING,
+    STATE_PENDING,
+    STATE_RETRYING,
+)
+from aida.models import DeliveryIntent, OutboxEvent
 from aida.schemas import HealthResponse
+from aida.source_identity import running_source_digest
 from atlas.platform.config import Settings
 
 UP = "UP"
@@ -73,6 +90,22 @@ TEMPORAL = "temporal"
 AUDIT_ARCHIVE_TASK = "audit_archive_task"
 TEMPORAL_RECONNECT_TASK = "temporal_reconnect_task"
 OUTBOX_BACKLOG = "outbox_backlog"
+DELIVERY_BACKLOG = "delivery_backlog"
+
+#: Delivery-intent states that still owe a destination something. `DELIVERING`
+#: is here on purpose: a claimed intent has not been acknowledged, and a worker
+#: that died mid-attempt leaves rows in exactly this state until the claim
+#: expires -- which is the stall an operator most needs to see.
+UNDELIVERED_STATES: tuple[str, ...] = (STATE_PENDING, STATE_RETRYING, STATE_DELIVERING)
+
+#: Terminal failure. Never retried again, so it needs a human, not patience.
+#: `DISCARDED` and `DUPLICATE` are deliberately not counted here: both are
+#: correct, intended outcomes (nothing configured; an equivalent message
+#: already delivered), and paging on them would train operators to ignore this.
+FAILED_STATES: tuple[str, ...] = (STATE_DEAD_LETTER,)
+
+#: Short names for the two kinds sharing the ledger, for the per-kind counts.
+_KIND_LABELS: dict[str, str] = {KIND_NOTIFICATION: "notification", KIND_SIEM: "siem"}
 
 # Wall-clock time of the last successful probe, per probe name. Process-local
 # and deliberately not persisted: it answers "has this process seen the
@@ -294,6 +327,104 @@ async def probe_outbox_backlog(
     )
 
 
+async def probe_delivery_backlog(
+    settings: Settings,
+    *,
+    timeout_seconds: float,
+    now: datetime | None = None,
+    session_factory: Callable[[], Any] = default_session_factory,
+) -> ProbeResult:
+    """Outbound delivery lag: what is still owed, what died, and how stale it is.
+
+    The delivery worker (`aida.delivery_intents.run_delivery_worker_pass`) is
+    the only thing in the platform that opens a socket to Slack, Teams or a SOC
+    collector, and it runs from the fleet scheduler. Until this probe existed,
+    the only way to find out that it had stopped draining -- or that every
+    attempt was being rejected -- was to read worker logs. A queue that is
+    quietly not moving looks exactly like a queue that is empty from the
+    outside, which is the failure this reports.
+
+    **Age, not depth, is the signal.** A backlog of 900 draining normally is
+    healthy; a backlog of 3 whose oldest row was requested yesterday means the
+    worker is wedged, the scheduler is dead, or the destination has been
+    refusing for a day. So `oldest_age_seconds` is measured from
+    `requested_at` -- the timestamp that commits with the business decision --
+    and reported alongside the counts rather than behind them.
+
+    **`worker=` is reported because "off" is not "broken".** `delivery_worker_
+    enabled` defaults to False, and a deployment that has deliberately not
+    opted in accrues a growing, permanently un-drained backlog that is working
+    as configured. Alerting that cannot tell that apart from a wedged worker
+    would fire on every default install, so the state of the switch is part of
+    the reading.
+
+    Optional, and -- like `probe_outbox_backlog` -- never DOWN for being large:
+    this module does not own the threshold at which a backlog is an incident.
+    It is DOWN only when the backlog could not be measured at all.
+    """
+    detail_holder: dict[str, str] = {}
+    tracked = (*UNDELIVERED_STATES, *FAILED_STATES)
+
+    async def _run() -> str | None:
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        DeliveryIntent.kind,
+                        DeliveryIntent.state,
+                        func.count(),
+                        func.min(DeliveryIntent.requested_at),
+                    )
+                    .where(DeliveryIntent.state.in_(tracked))
+                    .group_by(DeliveryIntent.kind, DeliveryIntent.state)
+                )
+            ).all()
+
+        queued = 0
+        failed = 0
+        queued_by_kind: dict[str, int] = {}
+        failed_by_kind: dict[str, int] = {}
+        oldest: datetime | None = None
+        for kind, state, count, earliest in rows:
+            count = int(count or 0)
+            label = _KIND_LABELS.get(kind, str(kind).lower())
+            if state in FAILED_STATES:
+                failed += count
+                failed_by_kind[label] = failed_by_kind.get(label, 0) + count
+                continue
+            queued += count
+            queued_by_kind[label] = queued_by_kind.get(label, 0) + count
+            if earliest is not None:
+                if earliest.tzinfo is None:
+                    earliest = earliest.replace(tzinfo=UTC)
+                oldest = earliest if oldest is None else min(oldest, earliest)
+
+        detail_holder["queued"] = str(queued)
+        detail_holder["failed"] = str(failed)
+        detail_holder["worker"] = "enabled" if settings.delivery_worker_enabled else "disabled"
+        for label, count in queued_by_kind.items():
+            detail_holder[f"queued_{label}"] = str(count)
+        # Split too: a dead-lettered SIEM security event and a dead-lettered
+        # chat message need different people, and a single `failed` count
+        # cannot say which one is sitting there.
+        for label, count in failed_by_kind.items():
+            detail_holder[f"failed_{label}"] = str(count)
+        if oldest is not None:
+            reference = now or datetime.now(UTC)
+            detail_holder["oldest_age_seconds"] = f"{(reference - oldest).total_seconds():.1f}"
+        return f"queued={queued}"
+
+    result = await _bounded(
+        DELIVERY_BACKLOG, required=False, timeout_seconds=timeout_seconds, probe=_run
+    )
+    if not detail_holder:
+        return result
+    return replace(
+        result,
+        detail=";".join(f"{key}={value}" for key, value in sorted(detail_holder.items())),
+    )
+
+
 async def probe_workspace_authorization_posture(
     settings: Settings,
     *,
@@ -328,6 +459,62 @@ def _staleness_signals(names: tuple[str, ...], *, now: datetime) -> dict[str, st
     return signals
 
 
+async def _model_route_signals(settings: Settings) -> dict[str, str]:
+    """R11-B18: which approved model routes the provider no longer serves.
+
+    Reads the state the scheduled sweep recorded -- it makes **no** provider
+    call, because a readiness scrape whose latency and cost a third party
+    decides is not a readiness check. `never_checked` is reported separately
+    from `unreachable` so an operator can tell "all good" from "nothing has
+    looked yet", which is the distinction this signal exists to preserve.
+
+    Failure is swallowed to a reason string rather than propagated: a route
+    health summary must never be what takes readiness down, or the least
+    important probe here becomes the most dangerous.
+    """
+    from aida.model_route_health import unreachable_route_summary
+
+    try:
+        summary = await unreachable_route_summary(settings)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        return {"model_routes.detail": f"unavailable: {type(exc).__name__}"}
+    unreachable = summary["unreachable"]
+    detail = (
+        f"approved={summary['approved']};unreachable={len(unreachable)};"
+        f"never_checked={summary['never_checked']};"
+        f"sweep={'enabled' if summary['enabled'] else 'disabled'}"
+    )
+    signals = {"model_routes.detail": detail}
+    if unreachable:
+        signals["model_routes.unreachable"] = ", ".join(unreachable)
+    return signals
+
+
+#: R11-D17: what the running process is, published so a parity check can tell a stale image
+#: from a current one. Schema, API surface and settings cannot: a pure code change moves none
+#: of them, and on 2026-09-19 the parity check reported "running this tree" against an image
+#: 40 minutes older than HEAD for exactly that reason. The digest is the measurement; the
+#: commit is a label that tells a person which history the image came from.
+SOURCE_DIGEST_SIGNAL = "build.source_digest"
+BUILD_COMMIT_SIGNAL = "build.commit"
+_UNKNOWN_BUILD_COMMIT = "unknown"
+
+
+def build_commit() -> str:
+    """The commit named by the Dockerfile's `ATLAS_BUILD_COMMIT` build arg, or `"unknown"`.
+
+    A label, not a measurement: the image is built from the working tree, so it can hold
+    changes the commit does not, which is why parity compares `build.source_digest` and
+    only uses this to say how far behind a drifted image is. Read from the process
+    environment rather than `Settings` because it is provenance the build stamps into the
+    image, not configuration an operator chooses -- it has no default to document and no
+    place in the configuration inventory. A runtime environment entry would override the
+    baked value; that is harmless for a label nothing gates on.
+    """
+    value = (os.environ.get("ATLAS_BUILD_COMMIT") or "").strip()
+    return value or _UNKNOWN_BUILD_COMMIT
+
+
 async def evaluate_readiness(
     settings: Settings,
     *,
@@ -346,7 +533,7 @@ async def evaluate_readiness(
     timeout_seconds = settings.readiness_probe_timeout_seconds
     reference = now or datetime.now(UTC)
 
-    postgres, temporal, backlog, posture = await asyncio.gather(
+    postgres, temporal, backlog, delivery, posture = await asyncio.gather(
         probe_postgresql(timeout_seconds=timeout_seconds, session_factory=session_factory),
         probe_temporal(
             temporal_client, timeout_seconds=timeout_seconds, enabled=settings.temporal_enabled
@@ -354,11 +541,17 @@ async def evaluate_readiness(
         probe_outbox_backlog(
             timeout_seconds=timeout_seconds, now=reference, session_factory=session_factory
         ),
+        probe_delivery_backlog(
+            settings,
+            timeout_seconds=timeout_seconds,
+            now=reference,
+            session_factory=session_factory,
+        ),
         probe_workspace_authorization_posture(
             settings, timeout_seconds=timeout_seconds, session_factory=session_factory
         ),
     )
-    probes = [postgres, temporal, backlog]
+    probes = [postgres, temporal, backlog, delivery]
     probes.extend(probe_background_task(name, task) for name, task in background_tasks.items())
 
     required = {probe.name: probe.state for probe in probes if probe.required}
@@ -371,6 +564,10 @@ async def evaluate_readiness(
             signals[f"{probe.name}.detail"] = probe.detail
         signals[f"{probe.name}.duration_ms"] = f"{probe.duration_ms:.1f}"
     signals.update(posture.as_signals())
+    signals.update(await _model_route_signals(settings))
+    # Hashes the shipped source once per process; off the event loop for that first call.
+    signals[SOURCE_DIGEST_SIGNAL] = await asyncio.to_thread(running_source_digest)
+    signals[BUILD_COMMIT_SIGNAL] = build_commit()
 
     return ReadinessResponse(
         status=UP if ready else DOWN,

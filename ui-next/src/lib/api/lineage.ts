@@ -11,13 +11,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get } from "./transport";
-import {
-  makeFixtureLineageGraph,
-  makeFixtureLineageImpact,
-  makeFixtureRefusals,
-  makeFixtureRunDecisions,
-  makeFixtureUnifiedLineageGraph,
-} from "../fixtures";
 import type { AiDecisionRead, UnifiedLineageGraphRead, UnifiedLineageImpactRead } from "../types";
 import type { PageOf } from "../ui-types";
 
@@ -31,7 +24,7 @@ export function fetchLineageRefusals(
   signal?: AbortSignal,
 ): Promise<PageOf<AiDecisionRead>> {
   return demoOr(
-    async () => makeFixtureRefusals(opts),
+    async (fixtures) => fixtures.makeFixtureRefusals(opts),
     async () => {
       const params = new URLSearchParams({ organization_id: organizationId });
       params.set("limit", String(opts.limit ?? 50));
@@ -50,7 +43,7 @@ export function fetchRunDecisions(
   signal?: AbortSignal,
 ): Promise<AiDecisionRead[]> {
   return demoOr(
-    async () => makeFixtureRunDecisions(runId),
+    async (fixtures) => fixtures.makeFixtureRunDecisions(runId),
     async () => {
       const params = new URLSearchParams({ organization_id: organizationId });
       return get<AiDecisionRead[]>(`/v1/ai-decisions/${runId}?${params}`, signal);
@@ -78,7 +71,7 @@ export function fetchLineageImpact(
   signal?: AbortSignal,
 ): Promise<UnifiedLineageImpactRead> {
   return demoOr(
-    async () => makeFixtureLineageImpact(datasourceId, nodeId, query),
+    async (fixtures) => fixtures.makeFixtureLineageImpact(datasourceId, nodeId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("depth", String(query.depth ?? 5));
@@ -99,7 +92,7 @@ export function fetchLineageGraph(
   signal?: AbortSignal,
 ): Promise<UnifiedLineageGraphRead> {
   return demoOr(
-    async () => makeFixtureLineageGraph(datasourceId),
+    async (fixtures) => fixtures.makeFixtureLineageGraph(datasourceId),
     async () => {
       return get<UnifiedLineageGraphRead>(
         `/v1/datasources/${datasourceId}/unified-lineage/graph?node_limit=200&edge_limit=500`,
@@ -139,7 +132,7 @@ export function fetchUnifiedLineageGraph(
   signal?: AbortSignal,
 ): Promise<UnifiedLineageGraphRead> {
   return demoOr(
-    async () => makeFixtureUnifiedLineageGraph(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureUnifiedLineageGraph(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("node_limit", String(query.nodeLimit ?? 300));

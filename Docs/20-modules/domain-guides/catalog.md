@@ -40,7 +40,8 @@ It also owns two things built on that inventory:
 
 ## Entry points
 
-- **HTTP** — 10 routes, mounted by `aida.main` through
+- **HTTP** — 10 routes (as of 2026-09-20; count the `@router.` decorators in
+  `router.py`), mounted by `aida.main` through
   `atlas.modules.catalog.api`, this context's public face. The main ones are
   `GET /v1/organizations/{organization_id}/catalog/rows` (the read model), the
   table certification routes, and the four `bulk-*` routes.
@@ -68,11 +69,11 @@ It also owns two things built on that inventory:
 
 The module directory holds real content — `models.py` (the seven tables),
 `repository.py` (the batch helpers), `service.py` (the composer and the bulk
-apply functions), `router.py` (the 10 routes), `schemas.py` (read DTOs only).
-`contracts.py`, `events.py` and `workers/` are still empty scaffolds: this
-context publishes no typed cross-module contract and owns no background worker
-today. Work that touches catalog tables in the background runs from `aida.*`
-modules instead.
+apply functions), `router.py` (the 10 routes), `schemas.py` (read DTOs only) and
+`api.py` (the public face that re-exports the router). The empty `contracts.py`,
+`events.py` and `workers/` scaffolds were removed (R11-X4): this context
+publishes no typed cross-module contract and owns no background worker. Work that
+touches catalog tables in the background runs from `aida.*` modules instead.
 
 The classes here still declare no separate database schema — this was a
 Python-source move, not a database migration. The `catalog module privacy`

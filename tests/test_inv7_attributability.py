@@ -78,6 +78,17 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
         "validates a caller-supplied context product change-item shape (ST-A7) and "
         "returns the report; takes no session and persists nothing"
     ),
+    "POST /v1/datasources/{datasource_id}/discovery-selection/preview": (
+        "counts what a proposed discovery selection (R11-FP01) would keep and leave "
+        "out over the last completed scan; reads the catalog, stores no selection and "
+        "contacts no source -- the PUT that saves one is audited"
+    ),
+    "POST /graphql": (
+        "R11-GQL01 metadata GraphQL: POST only because a GraphQL document does not fit a "
+        "query string. The schema has no mutation and admits only `query` operations; it "
+        "reads the catalog through the same reads REST serves unaudited as GETs, and "
+        "executes nothing against a source (governed execution is R11-GQL02's mutation)"
+    ),
 }
 
 # Read endpoints whose only write is the idempotent creation of a per-organization

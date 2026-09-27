@@ -10,6 +10,7 @@ from aida.connectors.databricks import (
     _qualified_table,
     _quote_identifier,
 )
+from aida.connectors.discovery import facet_read_scope
 from aida.connectors.registry import connector_registry
 
 _JSON_DSN = json.dumps(
@@ -128,10 +129,21 @@ def test_databricks_registry_definition() -> None:
     assert defn.capabilities["constraints"] is True
     assert defn.capabilities["explain"] is True
     assert defn.capabilities["object_comments"] is True
-    # Honest gaps: not claimed until a certified, live-verified adapter closes them.
-    assert defn.capabilities["views"] is False
-    assert defn.capabilities["routines"] is False
+    # R11-FP01: the view and routine axes are now read from Unity Catalog's own
+    # information_schema, through the same best-effort path the foreign-key and
+    # comment queries use -- a refusal shrinks the envelope and records its
+    # reason rather than failing the run, which is what makes the flag
+    # claimable without a live workspace.
+    # `tests/test_connectors_triggers_and_sequences.py` drives both axes,
+    # including the refusal and the narrow-column retry.
+    assert defn.capabilities["views"] is True
+    assert defn.capabilities["routines"] is True
+    # Honest gaps, of two different kinds. `grants` is unimplemented on an
+    # engine that has the concept in a different shape; `triggers` and
+    # `sequences` are NOT_APPLICABLE, because Unity Catalog has neither object.
     assert defn.capabilities["grants"] is False
+    assert defn.capabilities["triggers"] is False
+    assert defn.capabilities["sequences"] is False
     assert defn.capabilities["delegated_identity"] is False
 
 
@@ -238,6 +250,16 @@ async def test_databricks_discover_assembles_catalog_with_constraints() -> None:
         ],
         [{"schema_name": "analytics", "comment": "Analytics schema"}],
         [{"catalog_name": "main", "comment": "Primary catalog"}],
+        # R11-FP01 added three queries after the comment reads: views, routines
+        # and parameters. Listed explicitly rather than left to run off the end
+        # of this `side_effect` -- a `StopIteration` would be swallowed by the
+        # best-effort guard and this test would pass by accident. Empty here
+        # because this test is about constraints and comments;
+        # `tests/test_connectors_triggers_and_sequences.py` drives both new
+        # axes with real rows, including a refusal and the narrow-column retry.
+        [],
+        [],
+        [],
     ]
 
     with patch.object(connector, "_get_connection", return_value=mock_conn):
@@ -268,13 +290,26 @@ async def test_databricks_discover_assembles_catalog_with_constraints() -> None:
     assert fk.referenced_columns == ("id",)
 
 
-@pytest.mark.asyncio
-async def test_databricks_discover_degrades_gracefully_when_optional_queries_fail() -> None:
-    """FK discovery and comment queries are best-effort (older metastore, no grant).
+def _refused_by_unity_catalog() -> Exception:
+    """A Unity Catalog refusal as databricks-sql-connector raises it: SQLSTATE 42501,
+    carried in the error's `context` mapping rather than as an attribute."""
+    from databricks.sql import exc as databricks_exc
 
-    A refusal on any of them must shrink the envelope rather than fail discovery
-    outright -- the same fail-open contract the BigQuery adapter's key-query fetch
-    uses for its own optional constraint query.
+    return databricks_exc.ServerOperationError(
+        "[INSUFFICIENT_PERMISSIONS] User does not have USE SCHEMA", {"sqlState": "42501"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_databricks_discover_degrades_gracefully_when_optional_queries_are_refused() -> None:
+    """A *refused* foreign-key or comment read shrinks the envelope rather than failing
+    discovery outright, and is recorded against its facet.
+
+    R11-FP02 follow-through: this test used to feed a plain `RuntimeError` -- "not
+    available on this metastore" -- and assert the same graceful shrink. Any failure
+    was absorbed then; only a refusal is now, because absorbing a failure that is not
+    one (a dropped connection) let a FULL run retire what it merely failed to read.
+    The companion test below pins that half.
     """
     connector = DatabricksConnector(_JSON_DSN)
 
@@ -305,12 +340,18 @@ async def test_databricks_discover_degrades_gracefully_when_optional_queries_fai
             return column_rows
         if call_count["n"] == 2:
             return []
-        raise RuntimeError("REFERENTIAL_CONSTRAINTS not available on this metastore")
+        raise _refused_by_unity_catalog()
 
     mock_cursor.fetchall.side_effect = fetchall
 
-    with patch.object(connector, "_get_connection", return_value=mock_conn):
+    with (
+        patch.object(connector, "_get_connection", return_value=mock_conn),
+        facet_read_scope() as scope,
+    ):
         catalogs = await connector.discover()
+
+    assert set(scope.outcomes) >= {"constraints", "object_comments"}
+    assert {state.value for state, _reason in scope.outcomes.values()} == {"PERMISSION_DENIED"}
 
     assert len(catalogs) == 1
     schema = catalogs[0].schemas[0]
@@ -318,6 +359,52 @@ async def test_databricks_discover_degrades_gracefully_when_optional_queries_fai
     assert len(table.constraints) == 0
     assert catalogs[0].source_description is None
     assert schema.source_description is None
+
+
+@pytest.mark.asyncio
+async def test_databricks_an_optional_read_failure_that_is_not_a_refusal_ends_the_run() -> None:
+    """R11-FP02 follow-through: the behaviour change, pinned. The foreign-key read used
+    to degrade to "no foreign keys observed" on any failure -- including a dropped
+    connection, after which a FULL run retired every foreign key an earlier run had
+    captured. A failure no structured code identifies as a refusal now ends the run,
+    recorded as UNAVAILABLE on its facet."""
+    connector = DatabricksConnector(_JSON_DSN)
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    column_rows = [
+        {
+            "table_schema": "analytics",
+            "table_name": "customers",
+            "table_type": "MANAGED",
+            "column_name": "id",
+            "ordinal_position": 1,
+            "data_type": "bigint",
+            "is_nullable": "NO",
+            "column_default": None,
+            "table_comment": None,
+            "column_comment": None,
+        }
+    ]
+    answers = iter([column_rows, []])
+
+    def fetchall() -> list[dict[str, object]]:
+        try:
+            return next(answers)
+        except StopIteration:
+            raise ConnectionResetError("connection reset by peer") from None
+
+    mock_cursor.fetchall.side_effect = fetchall
+
+    with (
+        patch.object(connector, "_get_connection", return_value=mock_conn),
+        facet_read_scope() as scope,
+        pytest.raises(ConnectionResetError),
+    ):
+        await connector.discover()
+
+    state, _reason = scope.outcomes["constraints"]
+    assert state.value == "UNAVAILABLE"
 
 
 @pytest.mark.asyncio

@@ -22,15 +22,27 @@ fourteen times, and nothing stopped the second from being forgotten.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
+
+from sqlalchemy.orm.attributes import flag_modified
 
 from aida.agent_runtime import RuntimeStage, RuntimeState
 
 if TYPE_CHECKING:
     from aida.agent_intelligence import AgentPlan, RetrievalHit
-    from aida.models import AgentContract, AgentRun, DataSource, ToolExecution
+    from aida.agent_orchestrator import ContextProductScope
+    from aida.conversations import EarlierTurn
+    from aida.model_gateway import ApprovedModelRoute
+    from aida.models import (
+        AgentContract,
+        AgentRun,
+        ContextProductVersion,
+        DataSource,
+        ToolExecution,
+    )
     from aida.prompt_risk import PromptRiskAssessment
     from aida.query_gateway import GatewayResult
     from aida.security import SecurityContext
@@ -70,6 +82,24 @@ class OrchestrationRequest:
     tool_parameters: dict[str, Any]
     requested_limit: int | None
     agent_asset_version_id: UUID | None = None
+    #: The published context product this question is asked through, if any.
+    context_product_key: str | None = None
+    #: F01: an already-resolved product version, for a surface that resolved one
+    #: itself. MCP's `contextProductUri` pins an exact version number and admits
+    #: a SUPPORTED one inside its support window, and it filters tool
+    #: eligibility against that version -- so re-resolving "the published
+    #: version" from a key would scope the tables to a *different* version than
+    #: the one the tool list was filtered by. The surface hands over what it
+    #: resolved; the orchestrator still applies its own consumer-role check to
+    #: it. Set at most one of these two.
+    context_product_version: ContextProductVersion | None = None
+    #: R11-MP08: the prompt optimiser's candidate instruction, already composed
+    #: with the safety clause. Only `draft` sets it; `run` never does, so an answer
+    #: a person receives always uses the approved instruction.
+    sql_instruction_override: str | None = None
+    #: R11-MP26: the earlier turns of the conversation this question continues,
+    #: oldest first -- redacted questions and the SQL that answered them.
+    earlier_turns: tuple[EarlierTurn, ...] = ()
 
     @property
     def organization_id(self) -> UUID:
@@ -89,6 +119,19 @@ class RunLedger:
     state: RuntimeState
     trace: list[dict[str, object]] = field(default_factory=list)
     plan_evidence: dict[str, Any] = field(default_factory=dict)
+    #: R11-MP06: told the name of each stage the run reaches, for a caller that
+    #: streams progress. Observes only: it cannot change the run, and a listener
+    #: that raises is ignored rather than allowed to fail a governed run.
+    stage_listener: Callable[[str], None] | None = None
+
+    def notify_stage(self) -> None:
+        """Tell the listener, if any, which stage the run is at now."""
+        if self.stage_listener is None:
+            return
+        try:
+            self.stage_listener(self.state.stage.value)
+        except Exception:  # noqa: BLE001 - progress reporting never fails a run
+            self.stage_listener = None
 
     def record(self, control_type: str, details: dict[str, object] | None = None) -> None:
         """Trace the current state without changing it -- used for the initial
@@ -105,6 +148,7 @@ class RunLedger:
     ) -> None:
         self.state = self.state.transition(stage, **transition)
         self.record(control_type, details)
+        self.notify_stage()
 
     def publish_plan_evidence(self) -> None:
         """Push accumulated evidence onto the run row.
@@ -112,8 +156,17 @@ class RunLedger:
         Called after every mutation of `plan_evidence` rather than at the end:
         a run that refuses partway through must persist the evidence that
         explains the refusal, not an empty dict.
+
+        Flagged modified explicitly. `plan_evidence` is a plain JSON column and
+        this dict is mutated in place, so reassigning the *same* object compared
+        equal to itself and was never written: until 2026-09-18 every key added
+        after the plan stage -- `model_call_evidence`, `budget_evidence`,
+        `lineage`, `withheld_context_fragments`, `okf_context` -- lived only on
+        the in-memory run and was missing from the stored row that run history
+        reads back.
         """
         self.agent_run.plan_evidence = self.plan_evidence
+        flag_modified(self.agent_run, "plan_evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,12 +185,17 @@ class RetrievalOutcome:
 
     `hits` is what the planner sees; `rejected` is what the retrieval bound
     discarded and is recorded as evidence rather than dropped silently.
+
+    `context_product_scope` is set when the question was asked through a published context
+    product: the hits are already scoped to it, and later stages hold generated SQL to the same
+    tables, so a model cannot reach past the product the caller asked through (R11-FP12).
     """
 
     semantic_version: str
     hits: list[RetrievalHit]
     rejected: list[RetrievalHit]
     evidence: list[dict[str, Any]]
+    context_product_scope: ContextProductScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +218,21 @@ class ValidatedStatement:
     sql: str
     generation_source: str
     tool_execution: ToolExecution | None = None
+    #: R11-MP05: on the model paths, the instruction, payload and routes the
+    #: statement was generated from, so a repair attempt resends exactly them.
+    generation_inputs: GenerationInputs | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationInputs:
+    """What one SQL generation sent to the model (R11-MP05)."""
+
+    system_instruction: str
+    payload: dict[str, Any]
+    approved_routes: tuple[ApprovedModelRoute, ...]
+    #: R11-MP21: token -> value for the values redacted from the question. Held
+    #: in memory for this run only, to restore them into what a model writes.
+    redacted_values: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

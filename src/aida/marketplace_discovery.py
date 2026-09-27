@@ -50,6 +50,7 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit
+from aida.ingest_screening import screen_text
 from aida.model_gateway import (
     ApprovedModelRoute,
     ModelGatewayError,
@@ -245,7 +246,17 @@ async def resolve_marketplace_filters(
             "'catalog'. Never include personal data, SQL, or any query language of your own "
             "-- only these four bounded filter fields."
         ),
-        payload={"question": question, "known_domains": sorted(known_domains)},
+        # AR-10: a domain name is steward-authored text on its way to the model.
+        # One that fails screening is not offered; `_bound_resolution` accepts
+        # only names from `known_domains`, so it cannot come back either way.
+        payload={
+            "question": question,
+            "known_domains": sorted(
+                name
+                for name in known_domains
+                if screen_text(name, content_origin="marketplace_domain_name").is_clean
+            ),
+        },
         output_schema=MarketplaceFilterResolution,
     )
     bounded = _bound_resolution(output, known_domains=known_domains)

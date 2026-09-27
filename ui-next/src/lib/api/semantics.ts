@@ -11,12 +11,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get } from "./transport";
-import {
-  makeFixtureSemanticMetricConsumers,
-  makeFixtureSemanticMetricVersions,
-  makeFixtureSemanticModelConsumers,
-  makeFixtureSemanticModelVersions,
-} from "../fixtures";
 import type {
   ConsumerFooterRead,
   SemanticMetricVersionRead,
@@ -30,7 +24,7 @@ import type { PageOf } from "../ui-types";
    is no org-wide "browse every published semantic model" endpoint, so this
    is a project picker (`fetchOrgProjects`, the real
    `GET /v1/organizations/{id}/projects`) feeding project-scoped model/metric
-   lists — the same composition shape `fetchOrgDatasources` (`./identity.ts`)
+   lists — the same composition shape `listOrgDatasources` (`./identity.ts`)
    already uses to bridge a display name to an id `unified-lineage` needs.
 --------------------------------------------------------------------------- */
 
@@ -48,7 +42,7 @@ export function fetchSemanticModelVersions(
   signal?: AbortSignal,
 ): Promise<PageOf<SemanticModelVersionRead>> {
   return demoOr(
-    async () => makeFixtureSemanticModelVersions(projectId, opts),
+    async (fixtures) => fixtures.makeFixtureSemanticModelVersions(projectId, opts),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(opts.limit ?? 100));
@@ -69,7 +63,7 @@ export function fetchSemanticMetricVersions(
   signal?: AbortSignal,
 ): Promise<PageOf<SemanticMetricVersionRead>> {
   return demoOr(
-    async () => makeFixtureSemanticMetricVersions(modelVersionId, opts),
+    async (fixtures) => fixtures.makeFixtureSemanticMetricVersions(modelVersionId, opts),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(opts.limit ?? 100));
@@ -90,7 +84,7 @@ export function fetchSemanticModelConsumers(
   signal?: AbortSignal,
 ): Promise<ConsumerFooterRead> {
   return demoOr(
-    async () => makeFixtureSemanticModelConsumers(modelVersionId),
+    async (fixtures) => fixtures.makeFixtureSemanticModelConsumers(modelVersionId),
     async () => {
       return get<ConsumerFooterRead>(
         `/v1/semantic-model-versions/${modelVersionId}/consumers`,
@@ -108,7 +102,7 @@ export function fetchSemanticMetricConsumers(
   signal?: AbortSignal,
 ): Promise<ConsumerFooterRead> {
   return demoOr(
-    async () => makeFixtureSemanticMetricConsumers(metricVersionId),
+    async (fixtures) => fixtures.makeFixtureSemanticMetricConsumers(metricVersionId),
     async () => {
       return get<ConsumerFooterRead>(
         `/v1/semantic-metric-versions/${metricVersionId}/consumers`,

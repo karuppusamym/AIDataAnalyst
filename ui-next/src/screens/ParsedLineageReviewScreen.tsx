@@ -33,8 +33,8 @@ import { useUrlState } from "../lib/useUrlState";
    P1-05 / ADR-0026 — parsed-lineage-edge review queue.
 
    First-cut, functional table view of PROPOSED lineage edges across the
-   five non-governed parser-produced edge tables (view / procedure /
-   dbt-column / OpenLineage-table / OpenLineage-column). Approve / Reject
+   non-governed parser-produced edge tables (view / procedure SQL / captured
+   routine / dbt-column / OpenLineage-table / OpenLineage-column). Approve / Reject
    post to the same maker-checker endpoint the RelationshipCandidate
    review flow uses. Single and bulk decisions require a reason; the queue
    supports pagination and filtering by edge type and confidence.
@@ -43,9 +43,14 @@ import { useUrlState } from "../lib/useUrlState";
 const EDGE_TYPES: ParsedLineageEdgeType[] = [
   "VIEW",
   "PROCEDURE",
+  "ROUTINE",
   "DBT",
   "OPENLINEAGE_TABLE",
   "OPENLINEAGE_COLUMN",
+  /* R11-FP01: a trigger's edge. Its source is the table the trigger fires on,
+     which the body never names; `source_sql_reference` carries the trigger and
+     that firing table by name, and the evidence list below renders both. */
+  "TRIGGER",
 ];
 
 const CONFIDENCE_STRING_TO_FLOAT: Record<string, number> = {
@@ -67,7 +72,7 @@ function confidenceFloat(raw: string | number | null): number | null {
   return CONFIDENCE_STRING_TO_FLOAT[key] ?? null;
 }
 
-/** One edge's stable key across the five parser tables. `edge_id` alone is not
+/** One edge's stable key across the parser tables. `edge_id` alone is not
  *  unique: each table has its own id space, which is why every selection in
  *  this screen is `${edge_type}:${edge_id}`. */
 const edgeKey = (item: { edge_type: string; edge_id: string }) =>
@@ -86,7 +91,14 @@ export function ParsedLineageReviewScreen() {
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [edgeType, setEdgeType] = useState<ParsedLineageEdgeType | "">("");
+  /* The edge-type filter lives in the URL too, so a link -- the lineage
+     agent's "Open in review queue" -- can open the queue already filtered. */
+  const typeParam = params.get("type");
+  const edgeType: ParsedLineageEdgeType | "" = EDGE_TYPES.includes(
+    typeParam as ParsedLineageEdgeType,
+  )
+    ? (typeParam as ParsedLineageEdgeType)
+    : "";
   const [minConfidence, setMinConfidence] = useState<string>("");
   const [inflight, setInflight] = useState<string | null>(null);
   const [ackMessage, setAckMessage] = useState<string | null>(null);
@@ -204,9 +216,10 @@ export function ParsedLineageReviewScreen() {
       <header style={{ marginBottom: "1rem" }}>
         <h1 id="parsed-lineage-review-title">Parsed lineage review</h1>
         <p style={{ maxWidth: "60ch" }}>
-          PROPOSED lineage edges from the five non-governed parsers — view,
-          procedure, dbt, OpenLineage table, OpenLineage column. Approve to
-          fold into the shared graph; reject to keep out and record why.
+          PROPOSED lineage edges from the non-governed parsers — view,
+          procedure SQL, captured routine, captured trigger, dbt, OpenLineage
+          table, OpenLineage column. Approve to fold into the shared graph;
+          reject to keep out and record why.
           Maker-checker enforced: you cannot decide an edge you created.
         </p>
       </header>
@@ -217,7 +230,7 @@ export function ParsedLineageReviewScreen() {
         <Field label="Edge type">
           <select
             value={edgeType}
-            onChange={(event) => { setOffset(0); setEdgeType(event.target.value as ParsedLineageEdgeType | ""); }}
+            onChange={(event) => { setOffset(0); setParams({ type: event.target.value || null }); }}
           >
             <option value="">All</option>
             {EDGE_TYPES.map((type) => (
@@ -389,13 +402,16 @@ export function ParsedLineageReviewScreen() {
           }
           impact={
             <p className="rvd__none">
-              {focused.edge_type === "OPENLINEAGE_COLUMN" || focused.edge_type === "DBT"
-                ? "A column-level edge. Approving affects column lineage and any impact answer that traverses it."
-                : "A table-level edge. Approving affects table lineage and any impact answer that traverses it."}
+              {/* Every parser here states column pairs except OpenLineage's
+                  run-level table edges; view, procedure and routine edges were
+                  once described as table-level here too. */}
+              {focused.edge_type === "OPENLINEAGE_TABLE"
+                ? "A table-level edge. Approving affects table lineage and any impact answer that traverses it."
+                : "A column-level edge. Approving affects column lineage and any impact answer that traverses it."}
             </p>
           }
           evidence={
-            /* The type-specific slot. Each of the five parser tables carries a
+            /* The type-specific slot. Each of the parser tables carries a
                different natural key back to its source SQL, so what establishes
                the edge differs by kind -- that is exactly what the shell must
                not flatten. */
@@ -455,11 +471,16 @@ export function ParsedLineageReviewScreen() {
             })
           }
           onClose={() => setParams({ review: null })}
+          /* R11-S10: this queue is a tab of the review surface now, so a
+             permalink names that screen and the queue within it. A link built
+             with the old `parsed-lineage-review` screen id would still resolve
+             -- the alias keeps it working -- but it must not be what we hand
+             someone to paste. */
           footer={
             <CopyLinkButton
               target={{
-                screen: "parsed-lineage-review",
-                params: { review: edgeKey(focused) },
+                screen: "governance",
+                params: { queue: "parsed-lineage", review: edgeKey(focused) },
               }}
               label="Copy permalink"
             />

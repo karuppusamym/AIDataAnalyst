@@ -9,6 +9,9 @@
 .wbi__lede{margin:0 0 8px;font-size:12px;color:var(--ink-2);line-height:1.45}
 .wbi__file{font-size:12px;color:var(--ink-2);max-width:100%}
 .wbi__load{margin-top:8px;font-size:12.5px;color:var(--ink-3)}
+.wbi__pages{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0;font-size:12px;color:var(--ink-2)}
+.wbi__pages>span{overflow-wrap:anywhere}
+.wbi__reset:disabled{cursor:default;opacity:.6}
 
 .wbi__counts{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:9px}
 .wbi__file-name{font-family:var(--mono);font-size:11px;color:var(--ink-2);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -33,6 +36,7 @@
 .wbi__old{font-size:11.5px;color:var(--ink-3);line-height:1.4;text-decoration:line-through}
 .wbi__old--empty{text-decoration:none;font-style:italic}
 .wbi__new{font-size:12px;color:var(--ink);line-height:1.45;margin-top:2px}
+.wbi__new--empty{font-style:italic;color:var(--ink-3)}
 .wbi__reason{margin-top:3px;font-size:11.5px;color:var(--bad);line-height:1.45}
 
 /* An excluded row stays visible and dimmed rather than disappearing: it is a

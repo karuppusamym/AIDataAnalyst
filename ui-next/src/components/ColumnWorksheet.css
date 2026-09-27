@@ -1,0 +1,7 @@
+.column-worksheet{width:min(1080px,calc(100vw - 32px));max-width:calc(100vw - 32px)}
+.column-worksheet__table{overflow:auto;margin:12px 0}
+.column-worksheet table{width:100%;border-collapse:collapse;min-width:600px}
+.column-worksheet :is(td,th){padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.column-worksheet td:first-child{width:23%}.column-worksheet td:nth-child(2){width:27%}
+.column-worksheet textarea{width:100%;min-width:200px;box-sizing:border-box}
+.column-worksheet nav{display:flex;flex-wrap:wrap;align-items:center;gap:8px}

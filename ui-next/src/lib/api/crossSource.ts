@@ -263,8 +263,15 @@ const FIXTURE_RESOLUTION_CANDIDATES: CrossSourceResolutionCandidateRead[] = [
  *
  *  Domains are listed per line of business, so this walks
  *  organization -> lines of business -> domains. Bounded: an organization has
- *  a handful of lines of business, and the alternative (an org-wide domain
- *  endpoint) does not exist on the server. */
+ *  a handful of lines of business.
+ *
+ *  Corrected 2026-09-20: this comment used to say an org-wide domain endpoint
+ *  does not exist on the server. It does: `GET
+ *  /v1/organizations/{organization_id}/data-domains`, served by
+ *  `list_organization_data_domains` in `src/aida/operational_api.py`, takes an
+ *  optional `line_of_business_id` and a `limit` of up to 1000, and is in the
+ *  OpenAPI baseline. This function does not call it; switching would change
+ *  behaviour, which a comment-only correction does not. */
 export async function fetchOrgDataDomains(
   organizationId: string,
   signal?: AbortSignal,

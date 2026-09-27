@@ -89,6 +89,19 @@ def effective_agent_ceiling(configured: RiskTier | None) -> RiskTier:
 _TIERS: Final[Mapping[str, str]] = {
     # --- T0: language attached to an asset -------------------------------
     "ASSET_DESCRIPTION_DRAFT": TIER_T0,
+    "COLUMN_DESCRIPTION_DRAFT": TIER_T0,
+    # R11-FP08: the routine-level sibling of the two above, and the same kind of
+    # change -- language attached to one catalog object, published append-only,
+    # withdrawable. Registered here and not left to `risk_tier_for`'s unknown-type
+    # fallback: that fails closed to T3, which sounds safe and is wrong in a way
+    # that would be hard to see. T3 is *above every agent's hard ceiling*
+    # (`HARD_MAX_AGENT_TIER` is T1), so an unregistered routine draft would sit
+    # outside the tier ladder entirely -- not "held to a higher bar" but
+    # invisible to `agent_decidable_object_types`, absent from the oversight
+    # bounds that count by tier, and mis-reported to any auditor reading tiers as
+    # a description of what the platform lets automation touch. The honest tier
+    # for a drafted description is T0, whatever the agent then does with it.
+    "ROUTINE_DESCRIPTION_DRAFT": TIER_T0,
     "ASSET_DOCUMENTATION_VERSION": TIER_T0,
     "BUSINESS_ANNOTATION": TIER_T0,
     "METADATA_ENRICHMENT_PROPOSAL": TIER_T0,
@@ -96,7 +109,6 @@ _TIERS: Final[Mapping[str, str]] = {
     "GLOSSARY_LINK_PROPOSAL": TIER_T1,
     "TERM_SEMANTIC_BINDING": TIER_T1,
     "COLUMN_CLASSIFICATION_PROMOTION": TIER_T1,
-    "QUERY_HISTORY_METRIC_CANDIDATE": TIER_T1,
     "DOCUMENT_CLAIM": TIER_T1,
     # Bulk stewardship is T1 only below the governance threshold; see
     # `risk_tier_for`, which reads the item count out of the payload.
@@ -115,10 +127,26 @@ _TIERS: Final[Mapping[str, str]] = {
     # correctable; silently un-publishing good language is neither, and an
     # agent should never be the one to do it unattended.
     "DESCRIPTION_WITHDRAWAL": TIER_T2,
+    # R11-OKF03: descriptions imported from an edited OKF bundle. The same batch
+    # store and apply path as a workbook import, but the text came from a file
+    # anyone may have edited, so it is T2 at every size -- no agent decides it.
+    "OKF_IMPORT_BATCH": TIER_T2,
+    # R11-OKF03: an edited routine purpose from the same source. It publishes through the
+    # routine description workflow (whose own draft is T0), but the text came from a file
+    # anyone may have edited -- the reason `OKF_IMPORT_BATCH` above is T2 at every size --
+    # so it is the same tier. Registered rather than left to `risk_tier_for`'s fail-closed
+    # T3: T3 sits above every agent's hard ceiling too, but an unregistered type is invisible
+    # to the oversight bounds that count by tier and misreports what the ladder covers.
+    "OKF_IMPORT_ROUTINE_DESCRIPTION": TIER_T2,
     # --- T2: published meaning and executable capability ------------------
     "SEMANTIC_MODEL_VERSION": TIER_T2,
     "SEMANTIC_METRIC": TIER_T2,
     "SEMANTIC_METRIC_PROPOSAL": TIER_T2,
+    # A mined query-history candidate publishes a real `SemanticMetric` when
+    # approved, exactly as a metric proposal does, so it is the same tier. It
+    # was T1, one below, which put a path to published meaning inside the
+    # reviewer agent's ceiling (AR-03).
+    "QUERY_HISTORY_METRIC_CANDIDATE": TIER_T2,
     "GLOSSARY_TERM": TIER_T2,
     "GLOSSARY_TERM_VERSION": TIER_T2,
     "GLOSSARY_CONFLICT": TIER_T2,
@@ -128,6 +156,17 @@ _TIERS: Final[Mapping[str, str]] = {
     "CONTEXT_PRODUCT_VERSION": TIER_T2,
     "DATA_PRODUCT_VERSION": TIER_T2,
     "DATA_CONTRACT_VERSION": TIER_T2,
+    # A quality rule is an executable control: its incidents gate governed
+    # tools, demote retrieval and attach trust warnings to answers
+    # (`custom_quality_rules`). A wrong threshold switches a capability off or
+    # hides a regression -- the harm a data contract's quality clause can do,
+    # so the same tier. The quality agent proposes these (ADR-0029); no agent
+    # decides them.
+    "QUALITY_RULE_PROPOSAL": TIER_T2,
+    # A published ontology version is published meaning -- the concepts, the
+    # relations between them and the tables they map to -- the same kind of
+    # change as a glossary term version.
+    "ONTOLOGY_VERSION": TIER_T2,
     # --- T3: the trust boundary itself ------------------------------------
     "MODEL_ROUTE_CONFIGURATION": TIER_T3,
     "AI_ASSET": TIER_T3,
@@ -167,6 +206,18 @@ def risk_tier_for(object_type: str, payload: Mapping[str, Any] | None = None) ->
     tier = _TIERS.get(object_type)
     if tier is None:
         return TIER_T3
+    if payload is not None and payload.get("reverses_operation_id"):
+        # AR-11: an operation that exists to undo an applied one is T2 whatever
+        # its size, so no agent may decide it. The same asymmetry that puts
+        # DESCRIPTION_WITHDRAWAL (T2) above publishing a description (T0):
+        # undoing removes a change a reviewer already accepted and that
+        # downstream readers may have acted on, and a three-table reversal is
+        # not a smaller *kind* of act than a thirty-table one. It also closes
+        # the specific loop AR-11 is about -- a reversal is usually raised
+        # because a human disagreed with this agent, so letting the agent wave
+        # the correction through would put the disputed party back in charge
+        # of the dispute.
+        return TIER_T2
     if object_type in _COUNT_ESCALATED and payload is not None:
         count = (
             payload.get("item_count")

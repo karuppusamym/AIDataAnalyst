@@ -27,6 +27,7 @@ import aida.models  # noqa: F401 -- registers every table on the metadata
 from aida.config import Settings
 from aida.db import Base
 from aida.embedding_provider import EmbeddingBatch, EmbeddingUnavailable
+from aida.envelope_models import MetadataRoutine
 from aida.models import (
     DataSource,
     Embedding,
@@ -39,6 +40,7 @@ from aida.models import (
     Project,
 )
 from aida.vector_index_service import (
+    _text_hash,
     index_freshness,
     rebuild_vector_index,
 )
@@ -401,3 +403,71 @@ async def test_the_index_stores_a_hash_not_the_text(
     for row in rows:
         assert len(row.text_hash) == 64
         assert "accounts_" not in row.text_hash
+
+
+@pytest.mark.asyncio
+async def test_a_routine_is_indexed_under_the_name_retrieval_scores_it_by(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """R11-FP11: routines were the one candidate kind the index did not carry.
+
+    Every question paid a provider call to embed them live. The text indexed here is the one
+    the live path composes -- the `schema.name` display name a ROUTINE hit carries -- so the
+    move changes what a routine costs to rank, never where it ranks.
+    """
+    org, datasource, _tables = await _seed_estate(session)
+    schema = await session.scalar(select(MetadataSchema))
+    assert schema is not None
+    session.add_all(
+        [
+            MetadataRoutine(
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                schema_id=schema.id,
+                name="rebuild_revenue",
+                signature="()",
+                routine_type="PROCEDURE",
+                body_sql_redacted="BEGIN NULL; END;",
+                redaction_status="LEXICAL",
+                status="ACTIVE",
+                fingerprint="fp",
+            ),
+            MetadataRoutine(
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                schema_id=schema.id,
+                name="retired_helper",
+                signature="()",
+                routine_type="FUNCTION",
+                body_sql_redacted="BEGIN NULL; END;",
+                redaction_status="LEXICAL",
+                status="DEPRECATED",
+                fingerprint="fp",
+            ),
+        ]
+    )
+    await session.flush()
+    provider = _StubEmbeddingProvider()
+    monkeypatch.setattr(
+        "aida.vector_index_service.resolve_embedding_provider", lambda *a, **k: provider
+    )
+
+    await rebuild_vector_index(session, org.id, settings=_settings())
+    await session.flush()
+
+    embedded = [text for call in provider.calls for text in call]
+    assert "ROUTINE public.rebuild_revenue" in embedded
+    # A retired routine is not embedded, for the same reason a deprecated table is not: it
+    # would answer a search with a confident score about something the source no longer has.
+    assert not [text for text in embedded if "retired_helper" in text]
+    rows = (
+        await session.execute(
+            select(Embedding.owner_id, Embedding.text_hash).where(
+                Embedding.owner_type == "ROUTINE"
+            )
+        )
+    ).all()
+    (indexed,) = rows
+    # The text itself is never stored beside the vector (INV-6 keeps the table to a hash), so
+    # what the index holds for this routine is pinned by the hash of that same text.
+    assert indexed.text_hash == _text_hash("ROUTINE public.rebuild_revenue")

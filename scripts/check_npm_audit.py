@@ -56,6 +56,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_ROOT = REPO_ROOT / "ui-next"
 LOCKFILE = UI_ROOT / "package-lock.json"
 
+#: R11-B11's browser-journey suite committed a second lockfile, and this gate
+#: scanned only `ui-next` -- so a dependency set that installs and runs in CI was
+#: covered by nothing. It is held to a **stricter** rule than `ui-next`: no
+#: baseline at all. `ui-next` has one because it inherited advisories predating
+#: the gate; `e2e` starts clean, and the moment to refuse a first exception is
+#: before there is one.
+E2E_ROOT = REPO_ROOT / "e2e"
+E2E_LOCKFILE = E2E_ROOT / "package-lock.json"
+
 
 @dataclass(frozen=True, slots=True)
 class BaselineEntry:
@@ -67,98 +76,50 @@ class BaselineEntry:
 
 # --- THE BASELINE ----------------------------------------------------------
 #
-# Dated 2026-09-06. Measured, not copied: produced by running
-# `npm audit --json --package-lock-only` in `ui-next` against the committed
-# `package-lock.json` and, separately, `npm audit --json --package-lock-only
-# --omit=dev` to establish which of them reach the runtime dependency graph.
+# **It is empty, and that is the finished state, not an unfilled stub.**
 #
-# WHAT IT CONTAINS AND WHY, in full:
+# The baseline existed because this gate was added to a dependency set that
+# already had advisories in it: 14 across esbuild 0.21.5, vite 5.4.11 and
+# vitest 2.1.9 on 2026-09-06, all dev-scope, which R11-D13 cut to 6 on
+# 2026-09-11 by pinning vite to 5.4.21. The 2026-09-06 note reasoned that the
+# rest needed "vite 5 -> 7, vitest 2 -> 3", and that a major bump is a change
+# with its own build, test and review rather than a side effect of adding the
+# gate that found it. That was right, and this is that change: vitest 2.1.9 ->
+# 5.0.0, which forces vite 5.4.21 -> 7.3.6 (vitest 5 peers on vite >= 6.4) and
+# @vitejs/plugin-react 4.3.4 -> 5.2.0. All six remaining advisories are fixed
+# by it -- not suppressed, *fixed*, by versions that no longer contain the
+# defect -- and both scans now report zero:
 #
-#   14 advisories across 3 packages -- esbuild 0.21.5, vite 5.4.11 and
-#   vitest 2.1.9 -- every one of them reached only through `devDependencies`.
-#   The runtime scan (`--omit=dev`, covering react 18.3.1, react-dom 18.3.1 and
-#   @tanstack/react-virtual 3.13.6) returns **zero** advisories, so nothing here
-#   is present in the bundle a browser loads.
+#   esbuild  GHSA-67mh-4wv8-2f99   dev server accepts any origin  (0.21.5 -> 0.28.2)
+#   vite     GHSA-4w7w-66w2-5vf9   optimized-deps .map traversal  (5.4.21 -> 7.3.6)
+#   vite     GHSA-fx2h-pf6j-xcff   server.fs.deny bypass, Windows       "
+#   vite     GHSA-v6wh-96g9-6wx3   launch-editor NTLMv2 via UNC         "
+#   vitest   GHSA-82fw-gwwq-j7x9   @vitest/mocker redirect traversal (2.1.9 -> 5.0.0)
+#   vitest   GHSA-5xrq-8626-4rwp   Vitest UI arbitrary file read/exec      "
 #
-#   Thirteen of the fourteen are the same class of defect: Vite's dev server
-#   (`server.fs.deny` bypasses, dev-server request forgery, a dev-server path
-#   traversal). Vite's dev server is not run in any deployed configuration of
-#   this repository -- production serves the built SPA from nginx
-#   (`ui-next/nginx.conf`, the image the `ui-proxy` CI job exercises) -- so their
-#   exposure here is a developer's own workstation, not a deployment. The
-#   fourteenth (GHSA-5xrq-8626-4rwp, critical) is the Vitest **UI** server, which
-#   this repository never starts: `npm run test` is `vitest run`, one-shot and
-#   headless, with no `--ui` anywhere in `package.json` or `ci.yml`.
+# Measured, not copied: `npm audit --json --package-lock-only` in `ui-next`
+# against the committed `package-lock.json`, and separately with `--omit=dev`,
+# both returning 0 of 228 resolved dependencies. The 795-test suite passes
+# unchanged across all three majors.
 #
-#   They are baselined rather than fixed because fixing them means major version
-#   bumps -- vite 5 -> 7, vitest 2 -> 3 -- and a dependency bump is a change with
-#   its own build, test and review, not a side effect of adding the gate that
-#   found it. That is the same reasoning, and the same shape, as the backend's
-#   2026-08-31 pip-audit baseline of 16 pre-existing CVEs. Recorded as debt with
-#   an owner: REVIEW.md section 7, "Frontend dependency scanning".
-#
-# THE POINT OF THE BASELINE: a *new* advisory, a new vulnerable package, or any
-# advisory that reaches the runtime dependency graph fails this job immediately.
-# The gate blocks regressions from today; it does not red-line every push over
-# pre-existing, out-of-scope debt, because a gate that is red on arrival gets
-# turned off and then proves nothing.
-BASELINE_DATE = "2026-09-06"
-BASELINE: dict[str, BaselineEntry] = {
-    "GHSA-67mh-4wv8-2f99": BaselineEntry(
-        "esbuild", "moderate", "dev", "dev server accepts any origin's requests"
-    ),
-    "GHSA-vg6x-rcgg-rjx6": BaselineEntry(
-        "vite", "moderate", "dev", "dev server accepts any origin's requests"
-    ),
-    "GHSA-x574-m823-4x7w": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via ?raw"
-    ),
-    "GHSA-356w-63v5-8wf4": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via invalid request-target"
-    ),
-    "GHSA-859w-5945-r5v3": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via /. under project root"
-    ),
-    "GHSA-xcj6-pq6g-qj4x": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via .svg or relative paths"
-    ),
-    "GHSA-93m4-6634-74q7": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via backslash on Windows"
-    ),
-    "GHSA-4r4m-qw57-chr8": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass for inline/raw with ?import"
-    ),
-    "GHSA-4w7w-66w2-5vf9": BaselineEntry(
-        "vite", "moderate", "dev", "path traversal in optimized-deps .map handling"
-    ),
-    "GHSA-fx2h-pf6j-xcff": BaselineEntry(
-        "vite", "high", "dev", "server.fs.deny bypass on Windows alternate paths"
-    ),
-    "GHSA-v6wh-96g9-6wx3": BaselineEntry(
-        "vite", "moderate", "dev", "launch-editor NTLMv2 hash disclosure via UNC paths"
-    ),
-    "GHSA-g4jq-h2w9-997c": BaselineEntry(
-        "vite", "low", "dev", "middleware may serve same-prefix files"
-    ),
-    "GHSA-jqfw-vq24-v9c3": BaselineEntry(
-        "vite", "low", "dev", "server.fs settings not applied to HTML files"
-    ),
-    "GHSA-5xrq-8626-4rwp": BaselineEntry(
-        "vitest",
-        "critical",
-        "dev",
-        "Vitest UI server arbitrary file read/exec -- the UI server is never started "
-        "here (`npm run test` is `vitest run`, headless, no --ui)",
-    ),
-}
+# THE POINT OF THE BASELINE, unchanged: a *new* advisory, a new vulnerable
+# package, or any advisory reaching the runtime dependency graph fails this job
+# immediately. What has changed is that there is now nothing to except, so
+# `ui-next` is held to the same rule `e2e` above already was. Adding an entry
+# here is a deliberate act that needs the package, severity, scope and a
+# reason -- and `evaluate()` will fail the job the moment an entry stops being
+# reported, so an exception cannot outlive the advisory it was written for.
+BASELINE_DATE = "2026-09-12"
+BASELINE: dict[str, BaselineEntry] = {}
 
 
-def _run_npm_audit(omit_dev: bool) -> dict[str, Any]:
+def _run_npm_audit(omit_dev: bool, root: Path = UI_ROOT) -> dict[str, Any]:
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if npm is None:
         raise SystemExit(
             "npm was not found on PATH. This gate needs npm to read "
-            f"{LOCKFILE.relative_to(REPO_ROOT)}; install Node or run with --input."
+            f"{(root / 'package-lock.json').relative_to(REPO_ROOT)}; "
+            "install Node or run with --input."
         )
     command = [npm, "audit", "--json", "--package-lock-only"]
     if omit_dev:
@@ -170,7 +131,7 @@ def _run_npm_audit(omit_dev: bool) -> dict[str, Any]:
     # plus `shutil.which("npm")`; no caller input reaches it, and `shell=False`
     # (the default) means nothing here is interpreted by a shell.
     completed = subprocess.run(  # noqa: S603
-        command, cwd=UI_ROOT, capture_output=True, text=True, encoding="utf-8", check=False
+        command, cwd=root, capture_output=True, text=True, encoding="utf-8", check=False
     )
     try:
         return json.loads(completed.stdout)  # type: ignore[no-any-return]
@@ -247,6 +208,37 @@ def _summary(report: dict[str, Any], label: str) -> str:
     )
 
 
+def _check_e2e_lockfile(*, offline: bool) -> bool:
+    """Audit the browser-journey lockfile, with no baseline. True when it fails.
+
+    Skipped under `--input`, which exists so this gate can run from a saved
+    report with no network: auditing a second project would need a second
+    report and the flag takes one. Saying it was skipped beats reporting a pass
+    for a scan that did not happen.
+    """
+    if not E2E_LOCKFILE.is_file():
+        return False
+    relative = E2E_LOCKFILE.relative_to(REPO_ROOT)
+    if offline:
+        print(f"\nskipped {relative}: --input supplies one report only")
+        return False
+    report = _run_npm_audit(omit_dev=False, root=E2E_ROOT)
+    found = advisories(report)
+    print("\n" + _summary(report, "e2e, full lockfile (dev included)"))
+    if not found:
+        return False
+    for identifier in sorted(found):
+        package, severity, title = found[identifier]
+        print(f"  {identifier}  {package}  {severity}  [NOT BASELINED]  {title[:80]}")
+    print(
+        f"\nERROR: advisories in {relative}. This project has no baseline by design -- it "
+        "started clean, so the fix is to upgrade the package rather than to open an "
+        "exception list here.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -292,7 +284,8 @@ def main() -> int:
         state = "baselined" if identifier in BASELINE else "NOT BASELINED"
         print(f"  {identifier}  {package}  {severity}  [{state}]  {title[:80]}")
 
-    failed = False
+    failed = _check_e2e_lockfile(offline=bool(args.input))
+
     if unbaselined:
         print(
             "\nERROR: unbaselined advisories in ui-next/package-lock.json:\n"

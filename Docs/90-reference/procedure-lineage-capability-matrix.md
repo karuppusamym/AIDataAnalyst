@@ -1,6 +1,6 @@
 # Procedure lineage parser capability matrix
 
-Generated 2026-09-02T15:48:45.619696+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
+Generated 2026-09-19T19:15:54.230142+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
 
 ## Dialects attempted
 
@@ -24,12 +24,34 @@ Generated 2026-09-02T15:48:45.619696+00:00 by `scripts/generate_procedure_capabi
 | IF/ELSIF ... THEN (PL/SQL) | N/A | SUPPORTED |
 | WHILE ... BEGIN (T-SQL) | N/A | SUPPORTED |
 | WHILE ... LOOP (PL/SQL) | N/A | SUPPORTED |
-| CASE ... WHEN ... THEN (PL/SQL statement form) | N/A | SUPPORTED |
-| cursor FOR ... IN (SELECT ...) LOOP (PL/SQL) | N/A | SUPPORTED |
+| CASE [selector] WHEN ... THEN (PL/SQL statement form, searched or simple) | N/A | SUPPORTED |
+| cursor FOR rec IN (SELECT ...) LOOP (PL/SQL; the rows read into the loop record, whose fields carry them to the loop's writes) | N/A | SUPPORTED |
 | bare FOR ... LOOP (PL/SQL) | N/A | SUPPORTED |
 | EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL) | N/A | EXPLICIT_UNPARSED |
 | EXEC/CALL <procedure_name> (nested procedure call) | N/A | EXPLICIT_UNPARSED |
 | DECLARE/SET/OPEN/FETCH/CLOSE/RAISERROR/... (no table lineage) | N/A | RECOGNISED_NO_LINEAGE |
+| EXCEPTION WHEN ... THEN handler (PL/SQL, PL/pgSQL) | N/A | SUPPORTED |
+| EXECUTE <expression> (PL/pgSQL dynamic SQL) | N/A | EXPLICIT_UNPARSED |
+| RETURN QUERY <query> (PL/pgSQL result set) | N/A | SUPPORTED |
+| PERFORM <query> (PL/pgSQL; PERFORM fn(...) is a nested-call gap) | N/A | SUPPORTED |
+| variable := <query> / SELECT ... INTO variable (PL/pgSQL local state) | N/A | SUPPORTED |
+| CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL) | N/A | SUPPORTED |
+| FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query; read into the loop record) | N/A | SUPPORTED |
+| FOR rec IN c [(args)] LOOP over a declared cursor (PL/SQL, PL/pgSQL; the cursor's query read into the loop record) | N/A | SUPPORTED |
+| CREATE PROCEDURE/FUNCTION header, and DO $$ ... $$ (anonymous block) | N/A | SUPPORTED |
+| RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body) | N/A | SUPPORTED |
+| PROCEDURE/FUNCTION header without CREATE, or with EDITIONABLE (Oracle ALL_SOURCE) | N/A | SUPPORTED |
+| PACKAGE / PACKAGE BODY (Oracle; each member's edges attributed to the member) | N/A | SUPPORTED |
+| PROCEDURE p / FUNCTION f RETURN t declaration (Oracle spec or forward declaration) | N/A | RECOGNISED_NO_LINEAGE |
+| RETURN <expression> (PL/SQL; no subquery is allowed there) | N/A | RECOGNISED_NO_LINEAGE |
+| PL/SQL call statement p(x); / pkg.p; (nested call; a sibling package member is read through) | N/A | EXPLICIT_UNPARSED |
+| CURSOR c IS <query> declaration (PL/SQL; read into routine-local state) | N/A | SUPPORTED |
+| TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL) | N/A | RECOGNISED_NO_LINEAGE |
+| OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state, or the result set when c is an OUT ref cursor or the one a function returns; OPEN c FOR <string> / FOR EXECUTE is dynamic SQL) | N/A | SUPPORTED |
+| DECLARE c CURSOR ... FOR <query> / SET @c = CURSOR FOR <query> (T-SQL; read into routine-local state) | N/A | SUPPORTED |
+| c [NO] [SCROLL] CURSOR [(args)] FOR <query> declaration (PL/pgSQL; read into routine-local state) | N/A | SUPPORTED |
+| v type := (<query>) declaration (PL/pgSQL; the default read into routine-local state; %TYPE/%ROWTYPE anchors and ALIAS FOR are not reads) | N/A | SUPPORTED |
+| <<label>> statement label (PL/SQL, PL/pgSQL) | N/A | SUPPORTED |
 
 `SUPPORTED` -- real column/table-level lineage extracted.
 `EXPLICIT_UNPARSED` -- recognised, but this parser cannot safely resolve it: an explicit `UNPARSED` marker edge is produced instead (INV-9/AT-C4), never a silent drop.
@@ -43,6 +65,8 @@ Every `EXPLICIT_UNPARSED` row above surfaces as one of these named reasons on th
 
 - `DYNAMIC_SQL`
 - `NESTED_PROCEDURE_CALL`
+- `TABLE_FUNCTION_READ`
 - `UNSUPPORTED_STATEMENT_SHAPE`
 - `PARSE_ERROR`
 - `UNRESOLVED_CONTROL_FLOW`
+- `UNRESOLVED_TRIGGER_SUBJECT`

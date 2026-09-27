@@ -81,14 +81,14 @@ def test_role_affinity_is_symmetric_and_neutral_outside_the_two_role_groups() ->
     technical = score_marketplace_product(
         domain_name="Ops",
         owned_domains=frozenset(),
-        roles=frozenset({"DataScientist"}),
+        roles=frozenset({"Analyst"}),
         technical_port_count=2,
         curated_port_count=1,
     )
     business = score_marketplace_product(
         domain_name="Ops",
         owned_domains=frozenset(),
-        roles=frozenset({"DataConsumer"}),
+        roles=frozenset({"Viewer"}),
         technical_port_count=1,
         curated_port_count=2,
     )

@@ -9,7 +9,7 @@ import type { CatalogRowRead, CursorPage, PageOf } from "../lib/ui-types";
    (`unified_lineage_api.py::build_unified_lineage_impact_payload`).
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchCatalogRows = vi.fn<(query: unknown, signal?: AbortSignal) => Promise<CursorPage<CatalogRowRead>>>();
 const fetchLineageImpact = vi.fn<
   (datasourceId: string, nodeId: string, query: unknown, signal?: AbortSignal) => Promise<UnifiedLineageImpactRead>
@@ -19,7 +19,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchCatalogRows: (query: unknown, signal?: AbortSignal) => fetchCatalogRows(query, signal),
     fetchLineageImpact: (datasourceId: string, nodeId: string, query: unknown, signal?: AbortSignal) =>
       fetchLineageImpact(datasourceId, nodeId, query, signal),
@@ -60,10 +60,10 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchCatalogRows.mockReset();
   fetchLineageImpact.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchCatalogRows.mockResolvedValue({ items: [CANDIDATE], limit: 25, offset: 0, total: 1, next_cursor: null });
   fetchLineageImpact.mockResolvedValue(IMPACT);
   vi.resetModules();
@@ -101,35 +101,47 @@ describe("NarratedLineageScreen against the real unified-lineage impact endpoint
     );
     // Streaming reveal: advance past both hops' reveal timers.
     await vi.advanceTimersByTimeAsync(500);
-    await waitFor(() => expect(screen.getByText(/raw_sales/)).toBeInTheDocument());
-    expect(screen.getByText(/revenue_agg/)).toBeInTheDocument();
-    expect(screen.getByText(/a foreign key/)).toBeInTheDocument();
-    expect(screen.getByText(/a dbt dependency/)).toBeInTheDocument();
+    /* Scoped to the narration. R11-S13 (M1) put the bounded diagram on this
+       same view rather than behind a tab, so it names the same assets -- which
+       is the point of it, and makes an unscoped `getByText` ambiguous rather
+       than wrong. */
+    const narration = await screen.findByRole("list", { name: /Traversal from/ });
+    await waitFor(() => expect(within(narration).getByText(/raw_sales/)).toBeInTheDocument());
+    expect(within(narration).getByText(/revenue_agg/)).toBeInTheDocument();
+    expect(within(narration).getByText(/a foreign key/)).toBeInTheDocument();
+    expect(within(narration).getByText(/a dbt dependency/)).toBeInTheDocument();
     expect(new URLSearchParams(location.search).get("node")).toBe("t_orders_raw");
   });
 
-  it("the graph tab is a supporting view, not the entry point -- narrated renders first", async () => {
+  /* R11-S13 (M1): the diagram is no longer behind a tab on this screen.
+   *
+   * This screen is the Explain view of the merged lineage destination, and
+   * `?view=` is that destination's own discriminator now -- so the two-tab bar
+   * that used to own the field is gone. The diagram it opened is not: it
+   * renders beneath the narration, as the picture of the sentences above it,
+   * and the merged destination's Graph view is where the full merged graph
+   * lives. Both of these cases used to click that tab; neither needs to. */
+  it("renders the bounded diagram beneath the narration, with no tab to find", async () => {
     history.replaceState(null, "", "/?ds=ds_1&node=t_orders_raw");
     const NarratedLineageScreen = await loadScreen();
     render(<NarratedLineageScreen />);
 
     await vi.advanceTimersByTimeAsync(500);
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Narrated" })).toHaveAttribute("aria-selected", "true"));
-    expect(screen.getByRole("tab", { name: "Graph (supporting view)" })).toHaveAttribute("aria-selected", "false");
 
-    fireEvent.click(screen.getByRole("tab", { name: "Graph (supporting view)" }));
-
-    /* Not `role="img"` any more: the diagram's nodes are real buttons, and an
-       image role hid every one of them from assistive technology (review
-       2026-09-05, F21). */
-    await waitFor(() =>
-      expect(screen.getByRole("group", { name: /grouped by hop distance/ })).toBeInTheDocument(),
-    );
-    expect(new URLSearchParams(location.search).get("view")).toBe("graph");
+    // The narration is the page …
+    const narration = await screen.findByRole("list", { name: /Traversal from/ });
+    await waitFor(() => expect(within(narration).getByText(/raw_sales/)).toBeInTheDocument());
+    /* … and the diagram is under it. Not `role="img"`: the diagram's nodes are
+       real buttons, and an image role hid every one of them from assistive
+       technology (review 2026-09-05, F21). */
+    expect(screen.getByRole("group", { name: /grouped by hop distance/ })).toBeInTheDocument();
+    // No sub-tabs at all: this screen no longer owns `?view=`.
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(new URLSearchParams(location.search).get("view")).toBeNull();
   });
 
   it("offers the same lineage as a table, so the edges are not mouse-only", async () => {
-    history.replaceState(null, "", "/?ds=ds_1&node=t_orders_raw&view=graph");
+    history.replaceState(null, "", "/?ds=ds_1&node=t_orders_raw");
     const NarratedLineageScreen = await loadScreen();
     render(<NarratedLineageScreen />);
 

@@ -25,6 +25,12 @@ import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { ConnectTab } from "./AgentGatewayConnect";
+import { UpstreamTab } from "./AgentGatewayUpstream";
+import {
+  ChangedSincePublishedPill,
+  MeaningMovedPill,
+  useChangesSincePublished,
+} from "./ContextProductFreshness";
 import "./AgentGatewayScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -55,13 +61,15 @@ import "./AgentGatewayScreen.css";
    from read endpoints the caller is already entitled to.
 --------------------------------------------------------------------------- */
 
-type TabId = "connect" | "exposure" | "register" | "consumption";
+type TabId = "connect" | "exposure" | "register" | "consumption" | "upstream";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "connect", label: "Connect" },
   { id: "exposure", label: "What agents see" },
   { id: "register", label: "Register" },
   { id: "consumption", label: "Consumption" },
+  // R11-MP10: the other direction -- upstream servers Atlas reads tool lists from.
+  { id: "upstream", label: "Upstream servers" },
 ];
 
 const AUTONOMY_TIERS = ["T0", "T1", "T2", "T3"] as const;
@@ -97,6 +105,10 @@ function ExposureTab({
     (p) => p.latest_version.status === "PUBLISHED" || p.latest_version.status === "SUPPORTED",
   );
   const unpublished = products.length - published.length;
+  /* R11-FP12: an agent is served exactly these versions, so a version whose coverage moved
+     since publication is the one worth flagging here. One read for the project, and only by
+     a session the coverage roles admit. */
+  const changes = useChangesSincePublished(hasProject ? projectId : null);
 
   if (!hasProject) {
     return (
@@ -142,6 +154,8 @@ function ExposureTab({
                   </div>
                   <div className="aglist__meta">
                     <Pill tone={v.status === "PUBLISHED" ? "ok" : "info"}>{v.status.toLowerCase()}</Pill>
+                    <ChangedSincePublishedPill count={changes.byVersion.get(v.id)} />
+                    <MeaningMovedPill count={changes.meaningByVersion.get(v.id)} />
                     <span className="aglist__roles">{v.allowed_consumer_roles.join(", ") || "no roles"}</span>
                   </div>
                 </li>
@@ -226,6 +240,7 @@ function RegisterTab({
   const [samplingRate, setSamplingRate] = useState("0.1");
   const [toolSlugs, setToolSlugs] = useState("");
   const [contextProductIds, setContextProductIds] = useState("");
+  const [nativeTools, setNativeTools] = useState("");
   const [dailyTokenCap, setDailyTokenCap] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
@@ -242,6 +257,7 @@ function RegisterTab({
       capability_envelope: {
         tool_slugs: csv(toolSlugs),
         context_product_ids: csv(contextProductIds),
+        native_tools: csv(nativeTools),
         write_lanes: [],
       },
       daily_token_cap: dailyTokenCap.trim() ? Number(dailyTokenCap) : null,
@@ -252,6 +268,7 @@ function RegisterTab({
       setAgentPrincipalId("");
       setToolSlugs("");
       setContextProductIds("");
+      setNativeTools("");
       setDailyTokenCap("");
     }
   };
@@ -330,6 +347,13 @@ function RegisterTab({
                 value={contextProductIds}
                 onChange={(e) => setContextProductIds(e.target.value)}
                 placeholder="cp_…, …"
+              />
+            </Field>
+            <Field label="Native tools (comma-separated)">
+              <input
+                value={nativeTools}
+                onChange={(e) => setNativeTools(e.target.value)}
+                placeholder="get_lineage_graph, validate_sql, …"
               />
             </Field>
             <Field label="Daily token cap (optional)">
@@ -668,7 +692,7 @@ export function AgentGatewayScreen() {
         ))}
       </nav>
 
-      {tab === "connect" ? <ConnectTab me={me} /> : null}
+      {tab === "connect" ? <ConnectTab me={me} projectId={projectId} /> : null}
       {tab === "exposure" ? (
         <ExposureTab
           products={products}
@@ -702,6 +726,7 @@ export function AgentGatewayScreen() {
           onConsumerFilterChange={setConsumerFilter}
         />
       ) : null}
+      {tab === "upstream" ? <UpstreamTab organizationId={ORG} /> : null}
     </div>
   );
 }

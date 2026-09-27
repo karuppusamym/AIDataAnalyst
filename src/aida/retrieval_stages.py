@@ -40,7 +40,7 @@ remaining channel to completion for an answer nobody is waiting for.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from aida.config import Settings
+from aida.embedding_governance import governed_embedding_provider
 from aida.embedding_provider import (
     AsyncEmbeddingProvider,
     EmbeddingUnavailable,
@@ -356,6 +357,65 @@ async def select_authorized_candidates(
 # ---------------------------------------------------------------------------
 
 
+async def _live_vector_scores(
+    session: AsyncSession,
+    embedding_provider: AsyncEmbeddingProvider,
+    request: RetrievalRequest,
+    candidates: Sequence[Any],
+    *,
+    query_emb: tuple[float, ...] | None = None,
+) -> list[tuple[str, str, float]]:
+    """Embed these candidates now and score them against the question.
+
+    One batched call for the question and every candidate text, rather than a
+    call per candidate: the provider bills and rate-limits per request, and N+1
+    network round trips inside a retrieval path is a latency budget spent on
+    nothing. `query_emb` is passed when the caller has already embedded the
+    question -- the persisted path has -- so closing the index's coverage gap
+    costs one request rather than two.
+
+    R11-FP08: the text comes from `vector_index_service.compose_vector_texts`,
+    the same function the index builder uses, so a ROUTINE candidate is
+    embedded with its approved description here exactly as it is in the
+    persisted index. It used to call `build_embedding_text` itself, which is
+    why an approved description could reach neither side: adding it to one
+    would have made the two sides embed different text for the same object.
+    """
+    from aida.vector_index_service import compose_vector_texts
+    from aida.vector_retrieval import vector_search
+
+    if not candidates:
+        return []
+    candidate_texts = await compose_vector_texts(
+        session,
+        request.organization_id,
+        [(hit.object_type, str(hit.object_id), hit.display_name) for hit in candidates],
+    )
+    if query_emb is None:
+        batch = await embedding_provider.embed([request.question, *candidate_texts])
+        query_vector = list(batch.vectors[0])
+        candidate_embeddings = [list(v) for v in batch.vectors[1:]]
+    else:
+        batch = await embedding_provider.embed(candidate_texts)
+        query_vector = list(query_emb)
+        candidate_embeddings = [list(v) for v in batch.vectors]
+    vector_candidates: list[dict[str, Any]] = [
+        {
+            "object_type": hit.object_type,
+            "object_id": hit.object_id,
+            "display_name": hit.display_name,
+            "embedding": emb,
+            "datasource_id": hit.metadata.get("datasource_id"),
+            "metadata": hit.metadata,
+        }
+        for hit, emb in zip(candidates, candidate_embeddings, strict=True)
+    ]
+    return [
+        (vhit.object_type, str(vhit.object_id), vhit.similarity)
+        for vhit in vector_search(query_vector, vector_candidates, top_k=request.result_limit)
+    ]
+
+
 async def run_vector_channel(
     session: AsyncSession, request: RetrievalRequest, pool: CandidatePool
 ) -> ChannelResult:
@@ -372,18 +432,50 @@ async def run_vector_channel(
     RT-1: the *persisted* index is preferred when it is fresh. The live path
     embeds every candidate on every query, which is correct but pays a model
     call per candidate per query -- cost that grows with the estate and with
-    traffic at the same time. The fallback is not a degradation: it is the same
-    computation, and it is what runs whenever the index is empty, stale, built
-    under a different embedding model, or the estate has changed since the last
-    build. Which path ran is recorded per hit (`vector_path`) so "why was this
-    ranked here" stays answerable.
+    traffic at the same time. It is what runs whenever the index is empty,
+    stale, built under a different embedding model, or the estate has changed
+    since the last build. Which path ran is recorded per hit (`vector_path`) so
+    "why was this ranked here" stays answerable.
+
+    **The two paths are not interchangeable, and this said they were until
+    2026-09-12.** The index covers `INDEXED_OWNER_TYPES` only -- TABLE, COLUMN,
+    ROUTINE (R11-FP11) and GLOSSARY_TERM -- so a TOOL candidate, which this
+    platform does retrieve, has no index entry and the persisted search cannot
+    score it. It used to
+    leave the stage with no vector signal at all while the live path scored it,
+    reported as `PERSISTED_INDEX / USABLE` with nothing saying a candidate class
+    had been dropped. Measured on the AG-8 corpus, that cost 6 points of
+    recall-within-bound purely from the tool candidates losing their score
+    (R11-B2). Candidates the index does not cover are now embedded live and
+    scored alongside, and `retrieval_vector_index_gap` reports how many needed
+    it -- so the computation is complete on both paths, the index still carries
+    the bulk of the estate, and the gap stays visible if the covered set
+    changes again.
+
+    **A persisted vector is used only while it encodes today's text (R11-FP08).**
+    A routine's embedded text now carries its approved description, and a
+    description is published, superseded and withdrawn without touching the
+    catalog row `index_freshness` watches -- so a freshness verdict of `USABLE`
+    says nothing about whether one routine's vector still describes it. Before
+    the persisted search, every indexed candidate's current text is composed
+    (`compose_vector_texts`, the builder's own function) and fingerprinted, and
+    an entry whose stored fingerprint differs -- or that does not exist -- is
+    kept out of the persisted search and embedded live instead. A withdrawn
+    description therefore stops steering this stage on the next question, not
+    on the next rebuild.
 
     Policy still filters before ranking: the candidate set handed to the index
     is exactly the authorized set, so the index can only reorder what the
     caller was already entitled to.
     """
-    from aida.vector_index_service import index_freshness, search_persisted_index
-    from aida.vector_retrieval import build_embedding_text, vector_search
+    from aida.vector_index_service import (
+        INDEXED_OWNER_TYPES,
+        compose_vector_texts,
+        index_freshness,
+        search_persisted_index,
+        stale_index_entries,
+        text_fingerprint,
+    )
     from aida.vector_store import EmbeddingRef, VectorIndexUnavailable
 
     started = time.perf_counter()
@@ -408,8 +500,14 @@ async def run_vector_channel(
 
     embedding_provider: AsyncEmbeddingProvider
     try:
-        embedding_provider = resolve_embedding_provider(
-            request.settings, SecretResolver(request.settings)
+        # R11-MP15: the kill switch, the approved EMBEDDINGS route, the token
+        # quota and spend attribution, before anything is embedded.
+        embedding_provider = await governed_embedding_provider(
+            session,
+            request.settings,
+            organization_id=request.organization_id,
+            datasource_id=request.datasource.id,
+            inner=resolve_embedding_provider(request.settings, SecretResolver(request.settings)),
         )
     except EmbeddingUnavailable as exc:
         logger.info(
@@ -419,71 +517,133 @@ async def run_vector_channel(
         )
         return skipped(SkipReason.PROVIDER_UNAVAILABLE)
 
-    authorized = pool.authorized
-    freshness = await index_freshness(session, request.organization_id, settings=request.settings)
-    hit_by_key = {f"{hit.object_type}:{hit.object_id}": hit for hit in authorized}
-    vector_path = "PERSISTED_INDEX" if freshness.usable else "LIVE_EMBED"
-    logger.info(
-        "retrieval_vector_stage_path",
-        path=vector_path,
-        reason=freshness.reason,
-        indexed_entries=freshness.entries,
-        datasource_id=str(request.datasource.id),
-    )
-
-    scored: list[tuple[str, str, float]] = []
-    if freshness.usable:
-        batch = await embedding_provider.embed([request.question])
-        query_emb = tuple(batch.vectors[0])
-        refs = tuple(
-            EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
-            for hit in authorized
+    # R11-MP15: a governed embedding call can be refused part way through the
+    # stage (a spent token quota). That drops the vector signal and says so, as
+    # an unavailable provider always has; it never fails the question.
+    try:
+        authorized = pool.authorized
+        freshness = await index_freshness(
+            session, request.organization_id, settings=request.settings
         )
-        try:
-            scored = list(
-                await search_persisted_index(
-                    session,
-                    request.organization_id,
-                    query_emb,
-                    settings=request.settings,
-                    candidates=refs or None,
-                    limit=request.result_limit,
-                )
-            )
-        except VectorIndexUnavailable as exc:
-            # The index went away between the freshness check and the search.
-            # Fall back rather than losing the stage.
-            logger.info("retrieval_vector_index_unavailable", reason=str(exc))
-            vector_path = "LIVE_EMBED"
-            freshness = replace(freshness, usable=False)
+        hit_by_key = {f"{hit.object_type}:{hit.object_id}": hit for hit in authorized}
+        vector_path = "PERSISTED_INDEX" if freshness.usable else "LIVE_EMBED"
+        logger.info(
+            "retrieval_vector_stage_path",
+            path=vector_path,
+            reason=freshness.reason,
+            indexed_entries=freshness.entries,
+            datasource_id=str(request.datasource.id),
+        )
 
-    if not freshness.usable:
-        # One batched call for the question and every candidate text, rather
-        # than a call per candidate: the provider bills and rate-limits per
-        # request, and N+1 network round trips inside a retrieval path is a
-        # latency budget spent on nothing.
-        candidate_texts = [
-            build_embedding_text(name=hit.display_name, object_type=hit.object_type)
-            for hit in authorized
-        ]
-        batch = await embedding_provider.embed([request.question, *candidate_texts])
-        query_emb_list = list(batch.vectors[0])
-        candidate_embeddings = [list(v) for v in batch.vectors[1:]]
-        vector_candidates: list[dict[str, Any]] = [
-            {
-                "object_type": hit.object_type,
-                "object_id": hit.object_id,
-                "display_name": hit.display_name,
-                "embedding": emb,
-                "datasource_id": hit.metadata.get("datasource_id"),
-                "metadata": hit.metadata,
-            }
-            for hit, emb in zip(authorized, candidate_embeddings, strict=True)
-        ]
-        scored = [
-            (vhit.object_type, str(vhit.object_id), vhit.similarity)
-            for vhit in vector_search(query_emb_list, vector_candidates, top_k=request.result_limit)
-        ]
+        scored: list[tuple[str, str, float]] = []
+        if freshness.usable:
+            # R11-FP08: which persisted entries still encode the text this stage would embed now.
+            # Composed by the builder's own function, so "the same text" is not a convention two
+            # call sites keep but one function's output compared with its stored fingerprint.
+            indexed = [hit for hit in authorized if hit.object_type in INDEXED_OWNER_TYPES]
+            current_texts = await compose_vector_texts(
+                session,
+                request.organization_id,
+                [(hit.object_type, str(hit.object_id), hit.display_name) for hit in indexed],
+            )
+            stale = await stale_index_entries(
+                session,
+                request.organization_id,
+                {
+                    (hit.object_type, str(hit.object_id)): text_fingerprint(text)
+                    for hit, text in zip(indexed, current_texts, strict=True)
+                },
+                settings=request.settings,
+            )
+            batch = await embedding_provider.embed([request.question])
+            query_emb = tuple(batch.vectors[0])
+            # A stale entry is left out of the persisted search entirely rather than scored and
+            # then overwritten: the search ranks top-`result_limit`, so a stale vector allowed in
+            # would still displace a fresh candidate from that window even if its own score were
+            # replaced afterwards.
+            refs = tuple(
+                EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
+                for hit in authorized
+                if (hit.object_type, str(hit.object_id)) not in stale
+            )
+            try:
+                scored = list(
+                    await search_persisted_index(
+                        session,
+                        request.organization_id,
+                        query_emb,
+                        settings=request.settings,
+                        # `refs`, never `refs or None`: an empty authorized set is
+                        # the policy filter's answer, and `None` means "no candidate
+                        # filter" to `search_persisted_index`, which then ranks the
+                        # whole organization's index. Passing the empty tuple hits
+                        # its `if not candidates: return ()` guard instead, so a
+                        # caller authorized for nothing retrieves nothing.
+                        candidates=refs,
+                        limit=request.result_limit,
+                    )
+                )
+            except VectorIndexUnavailable as exc:
+                # The index went away between the freshness check and the search.
+                # Fall back rather than losing the stage.
+                logger.info("retrieval_vector_index_unavailable", reason=str(exc))
+                vector_path = "LIVE_EMBED"
+                freshness = replace(freshness, usable=False)
+            else:
+                # The index covers `vector_index_service.INDEXED_OWNER_TYPES` only
+                # -- TABLE, COLUMN, ROUTINE and GLOSSARY_TERM. A candidate of any
+                # other type, and a TOOL is the one this platform actually
+                # retrieves, has no index entry, so the persisted search cannot
+                # score it and it silently left the stage with no vector signal
+                # at all. The live path embeds every candidate and scores all of
+                # them, which
+                # is why this module's own docstring claiming the fallback "is the
+                # same computation" was wrong: measured on the AG-8 corpus, using
+                # the index cost 6 points of recall-within-bound purely by
+                # dropping the tool candidates' vector score (R11-B2, 2026-09-12).
+                #
+                # So the uncovered candidates are embedded live and scored here.
+                # The index still carries the bulk -- tables and columns are the
+                # estate -- so the cost saving RT-1 exists for is kept, and the
+                # computation is complete either way. `vector_index_gap` reports
+                # how many needed it, because a stage that quietly scores a subset
+                # is the failure this fixes and it must stay visible if the
+                # covered set changes again.
+                #
+                # R11-FP08: a candidate whose entry is stale or missing (see above) is embedded
+                # live the same way, from its current text, and reported beside the uncovered
+                # types as `stale_entries` -- a count that stays high after a rebuild would mean the
+                # builder and this stage disagree about text again, which is the failure the shared
+                # composer exists to prevent.
+                uncovered = [
+                    hit
+                    for hit in authorized
+                    if hit.object_type not in INDEXED_OWNER_TYPES
+                    or (hit.object_type, str(hit.object_id)) in stale
+                ]
+                if uncovered:
+                    logger.info(
+                        "retrieval_vector_index_gap",
+                        uncovered=len(uncovered),
+                        stale_entries=len(stale),
+                        object_types=sorted({hit.object_type for hit in uncovered}),
+                        datasource_id=str(request.datasource.id),
+                    )
+                    scored.extend(
+                        await _live_vector_scores(
+                            session, embedding_provider, request, uncovered, query_emb=query_emb
+                        )
+                    )
+
+        if not freshness.usable:
+            scored = await _live_vector_scores(session, embedding_provider, request, authorized)
+    except EmbeddingUnavailable as exc:
+        logger.info(
+            "retrieval_vector_stage_skipped",
+            reason=str(exc),
+            datasource_id=str(request.datasource.id),
+        )
+        return skipped(SkipReason.PROVIDER_UNAVAILABLE)
 
     contributions = [
         SignalContribution(
@@ -695,6 +855,85 @@ async def _build_knowledge_graph(
                         edge_type="TOOL_REFERENCES_TABLE",
                     )
                 )
+
+    # R11-FP11: a ROUTINE candidate's reviewed procedure lineage -- the tables it
+    # reads and the tables it writes -- becomes ROUTINE -> TABLE edges, exactly as
+    # a governed tool's declared tables do. "Which procedure rebuilds the revenue
+    # rollup" then reaches the rollup table even when no word of the question
+    # names it.
+    routine_hits = [hit for hit in authorized if hit.object_type == "ROUTINE"]
+    routine_table_ids = {
+        UUID(str(raw))
+        for hit in routine_hits
+        for key in ("reads_table_ids", "writes_table_ids")
+        for raw in hit.metadata.get(key) or []
+    }
+    if routine_table_ids:
+        routine_tables = {
+            table.id: table
+            for table in (
+                await session.scalars(
+                    select(MetadataTable).where(
+                        MetadataTable.id.in_(routine_table_ids),
+                        MetadataTable.datasource_id == datasource.id,
+                        MetadataTable.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        }
+        for hit in routine_hits:
+            routine_node_id = f"{hit.object_type}:{hit.object_id}"
+            for key, edge_type in (
+                ("reads_table_ids", "ROUTINE_READS_TABLE"),
+                ("writes_table_ids", "ROUTINE_WRITES_TABLE"),
+            ):
+                for raw in hit.metadata.get(key) or []:
+                    routine_table = routine_tables.get(UUID(str(raw)))
+                    if routine_table is None:
+                        continue
+                    kg.add_edge(
+                        GraphEdge(
+                            source_id=routine_node_id,
+                            target_id=ensure_table_node(routine_table.id, routine_table.name),
+                            edge_type=edge_type,
+                        )
+                    )
+
+    # R11-FP09: an ONTOLOGY_CONCEPT candidate's valid mappings become CONCEPT -> TABLE edges,
+    # so a question in the business's words reaches the table the approved ontology says
+    # carries that meaning, even when no word of it names the table.
+    concept_hits = [hit for hit in authorized if hit.object_type == "ONTOLOGY_CONCEPT"]
+    concept_table_ids = {
+        UUID(str(raw))
+        for hit in concept_hits
+        for raw in hit.metadata.get("mapped_table_ids") or []
+    }
+    if concept_table_ids:
+        concept_tables = {
+            table.id: table
+            for table in (
+                await session.scalars(
+                    select(MetadataTable).where(
+                        MetadataTable.id.in_(concept_table_ids),
+                        MetadataTable.datasource_id == datasource.id,
+                        MetadataTable.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        }
+        for hit in concept_hits:
+            concept_node_id = f"{hit.object_type}:{hit.object_id}"
+            for raw in hit.metadata.get("mapped_table_ids") or []:
+                concept_table = concept_tables.get(UUID(str(raw)))
+                if concept_table is None:
+                    continue
+                kg.add_edge(
+                    GraphEdge(
+                        source_id=concept_node_id,
+                        target_id=ensure_table_node(concept_table.id, concept_table.name),
+                        edge_type="ONTOLOGY_CONCEPT_MAPS_TABLE",
+                    )
+                )
     return kg
 
 
@@ -832,6 +1071,11 @@ def _candidate_table_ids(pool: CandidatePool) -> tuple[dict[str, set[UUID]], set
             for field_name in ("table_id", "source_table_id"):
                 raw = candidate.metadata.get(field_name)
                 if raw:
+                    table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
+            # R11-FP11: a routine stands on the tables its reviewed lineage reads and writes;
+            # R11-FP09: an ontology concept on the tables its approved mappings name.
+            for field_name in ("reads_table_ids", "writes_table_ids", "mapped_table_ids"):
+                for raw in candidate.metadata.get(field_name) or []:
                     table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
             if candidate.object_type == "GOVERNED_TOOL":
                 tool_name_pool.update(candidate.metadata.get("referenced_tables") or [])

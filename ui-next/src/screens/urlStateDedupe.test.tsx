@@ -157,7 +157,7 @@ describe("permalink round-trip", () => {
     within(pane).getByRole("button", { name: "Copy link" }).click();
     await waitFor(() => expect(writeText).toHaveBeenCalled());
     const copied = new URL(String(writeText.mock.calls[0]![0]));
-    expect(copied.hash).toBe("#/studio");
+    expect(copied.hash).toBe("#/steward/studio");
     expect(copied.searchParams.get("cs")).toBe("cs_1");
 
     first.unmount();

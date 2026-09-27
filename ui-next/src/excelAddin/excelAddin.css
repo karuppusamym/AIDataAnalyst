@@ -1,0 +1,16 @@
+/* The add-in task pane is ~320px wide and scrolls as a document; the shell's
+   full-height grid does not apply here. Small text uses `--ink-3`, the token the
+   WCAG AA audit measured as passing on these surfaces. */
+html,body{height:auto;min-height:100%;overflow:auto;background:var(--paper)}
+.xl{padding:14px 14px 24px;display:grid;gap:12px;max-width:520px;color:var(--ink)}
+.xl__h1{margin:0;font-size:17px;font-weight:650}
+.xl__h2{margin:0 0 6px;font-size:14px;font-weight:600}
+.xl__lede{margin:0 0 10px;font-size:12.5px;line-height:1.5;color:var(--ink-3)}
+.xl__meta{margin:0;font-size:12px;color:var(--ink-3)}
+.xl__card{padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);display:grid;gap:8px}
+.xl__card p{margin:0;font-size:13px;line-height:1.5}
+.xl__result{display:grid;gap:8px;padding-top:8px;border-top:1px solid var(--line)}
+.xl__link{font-size:12.5px}
+.xl__error{padding:8px 10px;border-radius:6px;font-size:12.5px;line-height:1.45;background:var(--sunk);border-left:3px solid var(--bad, #b42318)}
+.xl__notice{padding:8px 10px;border-radius:6px;font-size:12.5px;line-height:1.45;background:var(--sunk)}
+.xl select{width:100%;font:inherit;font-size:13px;padding:5px 7px}

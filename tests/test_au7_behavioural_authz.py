@@ -42,9 +42,9 @@ name names a sensitive concern (`kill-switch`, `security`, `credential`, `policy
 paired-constant module was checked by hand against its own module's documented intent before
 this suite was written. No route allows a role narrower than its own documentation calls for
 and no mutating route grants an unqualified read-only role write access it was not
-deliberately given (`graph_perspectives_api.py`'s broad-reader-role writes are a documented
-exception: a personal productivity artifact with its own owner-only check inside the handler
-body, not a governed object -- see that module's docstring). This is a clean bill of health,
+deliberately given. (The one documented exception at the time,
+`graph_perspectives_api.py`'s broad-reader-role writes on a personal productivity
+artifact, was removed with that module by R11-X5.) This is a clean bill of health,
 not the absence of a check: see the tracker row for the specific routes inspected.
 """
 

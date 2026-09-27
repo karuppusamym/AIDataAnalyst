@@ -307,7 +307,11 @@ async def _make_session() -> tuple[AsyncSession, object]:
     """A fresh in-memory sqlite database with every table registered -- the same
     pattern `test_rt7_quality_trust_ranking.py`'s `db` fixture uses. Returns the
     session and the engine (caller disposes the engine when done)."""
+    import aida.change_signal_models  # noqa: F401
+    import aida.envelope_models  # noqa: F401 -- routines: retrieval reads them (R11-FP11)
     import aida.models  # noqa: F401 -- registers every table on Base.metadata
+    import aida.ontology_models  # noqa: F401 -- published ontologies: retrieval reads them
+    import aida.procedure_lineage_models  # noqa: F401
     from aida.db import Base
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
@@ -329,6 +333,9 @@ class RetrievalCase:
     expected_object_type: str
     expected_object_key: str
     min_rank: int
+    #: R11-FP13: a gap case -- the expected object must NOT be retrieved, because the only path
+    #: to it is evidence nobody has approved. Passing means the gap was preserved.
+    expect_absent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +383,29 @@ def _rate(flags: Iterable[bool]) -> float:
     return sum(1 for v in values if v) / len(values)
 
 
+def expected_object_id(catalog: SeededCatalog, object_type: str, object_key: str) -> str:
+    """The id `seed_catalog`/`enrich_footprint` gave the object a corpus names by slug.
+
+    Module-level rather than nested inside `run_retrieval_benchmark`, because the answer
+    evaluation (`scripts/answer_evaluation_benchmark.py`, R11-FP13) resolves the *same*
+    corpus slugs against the *same* enriched catalog and must not derive them a second,
+    independently-drifting way.
+
+    The routine and ontology ids are derived the way `enrich_footprint` assigns them rather
+    than looked up, so a case still resolves -- and honestly misses -- against a catalog that
+    was never enriched.
+    """
+    if object_type == "TABLE":
+        return str(catalog.table_ids[object_key])
+    if object_type == "GOVERNED_TOOL":
+        return str(catalog.tool_version_ids[object_key])
+    if object_type == "ROUTINE":
+        return str(_fixed_id("routine", object_key))
+    if object_type == "ONTOLOGY_CONCEPT":
+        return str(uuid5(_fixed_id("ontology-version", "1"), object_key))
+    raise ValueError(f"unsupported expected_object_type: {object_type!r}")
+
+
 def load_retrieval_corpus(path: Path) -> list[RetrievalCase]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return [
@@ -385,6 +415,7 @@ def load_retrieval_corpus(path: Path) -> list[RetrievalCase]:
             expected_object_type=case["expected_object_type"],
             expected_object_key=case["expected_object_key"],
             min_rank=case["min_rank"],
+            expect_absent=bool(case.get("expect_absent", False)),
         )
         for case in data["cases"]
     ]
@@ -394,25 +425,20 @@ async def run_retrieval_benchmark(
     session: AsyncSession, catalog: SeededCatalog, cases: list[RetrievalCase]
 ) -> RetrievalQualityReport:
     from aida.agent_intelligence import GovernedRetriever
-    from aida.config import Settings
+    from aida.config import get_settings
     from aida.models import DataSource
 
     datasource = await session.get(DataSource, catalog.datasource_id)
     if datasource is None:
         raise RuntimeError("seeded datasource missing -- seed_catalog did not commit")
 
-    def _expected_object_id(case: RetrievalCase) -> str:
-        if case.expected_object_type == "TABLE":
-            return str(catalog.table_ids[case.expected_object_key])
-        if case.expected_object_type == "GOVERNED_TOOL":
-            return str(catalog.tool_version_ids[case.expected_object_key])
-        raise ValueError(f"unsupported expected_object_type: {case.expected_object_type!r}")
-
-    retriever = GovernedRetriever(Settings())
+    retriever = GovernedRetriever(get_settings())
     results: list[RetrievalCaseResult] = []
     for case in cases:
         hits = await retriever.retrieve(session, datasource=datasource, question=case.question)
-        expected_id = _expected_object_id(case)
+        expected_id = expected_object_id(
+            catalog, case.expected_object_type, case.expected_object_key
+        )
         rank = next(
             (
                 idx + 1
@@ -424,6 +450,228 @@ async def run_retrieval_benchmark(
         reciprocal_rank = 1.0 / rank if rank else 0.0
         results.append(RetrievalCaseResult(case=case, rank=rank, reciprocal_rank=reciprocal_rank))
     return RetrievalQualityReport(results=results)
+
+
+# ---------------------------------------------------------------------------
+# Footprint enrichment (R11-FP13)
+# ---------------------------------------------------------------------------
+
+#: (routine, table it reads, table it writes, review state of that lineage). The second
+#: routine's lineage is an undecided proposal: it must steer nothing.
+FOOTPRINT_ROUTINE_SEEDS: tuple[tuple[str, str, str, str], ...] = (
+    ("nightly_settlement_rollup", "fact_payments", "fact_account_balances", "ACTIVE"),
+    ("quarterly_fee_accrual", "fact_loan_applications", "fact_fraud_alerts", "PROPOSED"),
+)
+#: (concept key, name, aliases, the table its approved mapping names).
+FOOTPRINT_CONCEPT: tuple[str, str, tuple[str, ...], str] = (
+    "end_of_day_position",
+    "End of day position",
+    ("closing position",),
+    "fact_account_balances",
+)
+#: (routine key, its APPROVED Atlas-authored description). R11-FP08: the reviewed
+#: description of a routine is a retrieval signal, so the benchmark has to hold one
+#: -- otherwise the gate measures a catalog in which no routine has ever been
+#: described and the signal is untested at this level. Deliberately worded in
+#: business language that appears nowhere in the routine's *name*, so the corpus case
+#: it backs can only be answered through the description; and deliberately sharing no
+#: word with the other footprint questions ("closing position", "quarterly fee
+#: accrual"), so it cannot reorder their cases.
+FOOTPRINT_ROUTINE_DESCRIPTION: tuple[str, str] = (
+    "nightly_settlement_rollup",
+    "Applies the cleared interbank drafts received each night to every depositor's "
+    "holdings.",
+)
+
+
+async def enrich_footprint(session: AsyncSession, catalog: SeededCatalog) -> None:
+    """Add what the database-footprint work taught Atlas to read: routines with reviewed and
+    undecided lineage (R11-FP11), a published ontology concept mapped to a table (R11-FP09),
+    and -- R11-FP08 -- one routine's APPROVED Atlas-authored description.
+    Deterministic ids, like `seed_catalog`, so the before/after runs compare exactly."""
+    from aida.envelope_models import (
+        MetadataRoutine,
+        RoutineDocumentation,
+        RoutineDocumentationVersion,
+    )
+    from aida.models import DataSource
+    from aida.ontology_models import OntologyHead, OntologyVersion
+    from aida.procedure_lineage_models import DeepProcedureLineageEdge
+
+    datasource = await session.get(DataSource, catalog.datasource_id)
+    if datasource is None:  # pragma: no cover - seed_catalog guarantees it
+        raise RuntimeError("seeded datasource missing")
+    organization_id = datasource.organization_id
+    for key, _reads, _writes, _review in FOOTPRINT_ROUTINE_SEEDS:
+        session.add(
+            MetadataRoutine(
+                id=_fixed_id("routine", key),
+                organization_id=organization_id,
+                datasource_id=datasource.id,
+                schema_id=_fixed_id("schema"),
+                name=key,
+                signature="()",
+                routine_type="PROCEDURE",
+                language="plpgsql",
+                body_sql_redacted="BEGIN NULL; END;",
+                redaction_status="LEXICAL",
+                screening_status="CLEAN",
+                status="ACTIVE",
+                fingerprint=f"fp-quality-benchmark-routine-{key}",
+            )
+        )
+    await session.flush()
+
+    # R11-FP08: one routine carries a published, APPROVED description. Written as rows
+    # rather than through `publish_routine_documentation_version` only to keep the ids
+    # fixed like everything else here; there is no prior version to supersede, which is
+    # the one thing that function does beyond this.
+    described_key, described_text = FOOTPRINT_ROUTINE_DESCRIPTION
+    documentation_id = _fixed_id("routine-documentation", described_key)
+    session.add(
+        RoutineDocumentation(
+            id=documentation_id,
+            organization_id=organization_id,
+            datasource_id=datasource.id,
+            routine_id=_fixed_id("routine", described_key),
+        )
+    )
+    await session.flush()
+    session.add(
+        RoutineDocumentationVersion(
+            id=_fixed_id("routine-documentation-version", described_key),
+            organization_id=organization_id,
+            documentation_id=documentation_id,
+            version=1,
+            status="APPROVED",
+            description=described_text,
+            created_by="quality-benchmark",
+            approved_by="quality-benchmark",
+            # Fixed, not `now()`: nothing about this benchmark should differ between
+            # two runs, and an approval timestamp is as much a seeded fact as an id.
+            approved_at=datetime(2026, 9, 17, tzinfo=UTC),
+        )
+    )
+    await session.flush()
+
+    for key, reads, writes, review_status in FOOTPRINT_ROUTINE_SEEDS:
+        session.add(
+            DeepProcedureLineageEdge(
+                id=_fixed_id("routine-edge", key),
+                organization_id=organization_id,
+                datasource_id=datasource.id,
+                routine_id=_fixed_id("routine", key),
+                statement_ordinal=1,
+                source_table=f"public.{reads}",
+                source_column="amount",
+                target_table=f"public.{writes}",
+                target_column="amount",
+                source_resolved=True,
+                source_table_id=catalog.table_ids[reads],
+                target_table_id=catalog.table_ids[writes],
+                transformation_type="DIRECT",
+                confidence="FULL",
+                dialect="postgres",
+                is_write=True,
+                is_intermediate=False,
+                sql_hash="quality-benchmark",
+                review_status=review_status,
+            )
+        )
+    head = OntologyHead(
+        id=_fixed_id("ontology"),
+        organization_id=organization_id,
+        ontology_key="banking",
+        last_version=1,
+        published_version=1,
+    )
+    session.add(head)
+    await session.flush()
+    concept_key, concept_name, aliases, table_key = FOOTPRINT_CONCEPT
+    session.add(
+        OntologyVersion(
+            id=_fixed_id("ontology-version", "1"),
+            organization_id=organization_id,
+            ontology_id=head.id,
+            version=1,
+            base_version=0,
+            status="APPROVED",
+            created_by="quality-benchmark",
+            approved_by="quality-benchmark-reviewer",
+            definition={
+                "name": "Banking",
+                "owner": "quality-benchmark",
+                "provenance": "benchmark fixture",
+                "lifecycle": "ACTIVE",
+                "concepts": [
+                    {
+                        "key": concept_key,
+                        "name": concept_name,
+                        "description": "The ledger position a day closes on.",
+                        "aliases": list(aliases),
+                        "deprecated": False,
+                    }
+                ],
+                "relations": [],
+                "mappings": [
+                    {
+                        "concept": concept_key,
+                        "subject_type": "TABLE",
+                        "subject_id": str(catalog.table_ids[table_key]),
+                    }
+                ],
+            },
+        )
+    )
+    await session.flush()
+
+
+@dataclass(frozen=True, slots=True)
+class FootprintReport:
+    """The same corpus against the same seeded catalog, before and after enrichment."""
+
+    before: RetrievalQualityReport
+    after: RetrievalQualityReport
+
+    @staticmethod
+    def _recall(report: RetrievalQualityReport) -> float:
+        return _rate(r.within_bound for r in report.results if not r.case.expect_absent)
+
+    @property
+    def recall_before(self) -> float:
+        return self._recall(self.before)
+
+    @property
+    def recall_after(self) -> float:
+        return self._recall(self.after)
+
+    @property
+    def reachability_case_count(self) -> int:
+        return sum(1 for r in self.after.results if not r.case.expect_absent)
+
+    @property
+    def gap_case_count(self) -> int:
+        return sum(1 for r in self.after.results if r.case.expect_absent)
+
+    @property
+    def gap_preservation_rate(self) -> float:
+        """Of the cases whose only path is unapproved evidence, how many stayed unreached."""
+        return _rate(r.rank is None for r in self.after.results if r.case.expect_absent)
+
+
+async def run_footprint_benchmark(cases: list[RetrievalCase]) -> FootprintReport:
+    reports: list[RetrievalQualityReport] = []
+    for enrich in (False, True):
+        session, engine = await _make_session()
+        try:
+            catalog = await seed_catalog(session)
+            if enrich:
+                await enrich_footprint(session, catalog)
+            reports.append(await run_retrieval_benchmark(session, catalog, cases))
+        finally:
+            await session.close()
+            await engine.dispose()  # type: ignore[attr-defined]
+    return FootprintReport(before=reports[0], after=reports[1])
 
 
 # ---------------------------------------------------------------------------
@@ -487,14 +735,14 @@ async def run_tool_selection_benchmark(
     session: AsyncSession, catalog: SeededCatalog, cases: list[ToolSelectionCase]
 ) -> ToolSelectionReport:
     from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
-    from aida.config import Settings
+    from aida.config import get_settings
     from aida.models import DataSource
 
     datasource = await session.get(DataSource, catalog.datasource_id)
     if datasource is None:
         raise RuntimeError("seeded datasource missing -- seed_catalog did not commit")
 
-    settings = Settings()
+    settings = get_settings()
     retriever = GovernedRetriever(settings)
     planner = GovernedPlanner(settings)
     tool_key_by_version_id = {str(v): k for k, v in catalog.tool_version_ids.items()}
@@ -507,6 +755,7 @@ async def run_tool_selection_benchmark(
             roles=case.roles,
             candidate_sql_available=case.candidate_sql_available,
             tool_parameters={},
+            question=case.question,
         )
         actual_tool_key = (
             tool_key_by_version_id.get(plan.selected_tool_version_id)
@@ -550,11 +799,19 @@ class ModelGenerationPosture:
 
 
 def check_model_generation_posture() -> ModelGenerationPosture:
-    from aida.config import Settings
+    from aida.config import get_settings
     from aida.embedding_provider import EmbeddingUnavailable, resolve_embedding_provider
     from aida.secrets import SecretResolver
 
-    settings = Settings()
+    # `get_settings()` rather than `Settings()`, and the difference was a real
+    # defect for this script's whole purpose: a bare `Settings()` reads the
+    # process environment and never `.env`, which is how this repository
+    # actually configures a development deployment. So the posture check
+    # answered "no provider configured" from a *different* configuration source
+    # than the application reads, and reported a stub posture for a deployment
+    # that had a live route. A posture check must answer from where the app
+    # answers from, or it is checking something else.
+    settings = get_settings()
 
     def _has_secret(secret: object) -> bool:
         if secret is None:
@@ -589,6 +846,9 @@ TRACKED_METRICS = (
     "retrieval_recall_within_bound_rate",
     "retrieval_mrr",
     "tool_selection_pass_rate",
+    # R11-FP13: measured after enrichment; the before figure is reported beside it.
+    "footprint_recall_within_bound_rate",
+    "footprint_gap_preservation_rate",
 )
 
 
@@ -660,6 +920,7 @@ def _write_report(
     current_metrics: dict[str, float],
     baseline_metrics: dict[str, float] | None,
     regressions: list[MetricRegression],
+    footprint: FootprintReport | None = None,
 ) -> None:
     lines: list[str] = []
     lines.append("# Quality benchmark results (AG-8)")
@@ -713,6 +974,54 @@ def _write_report(
         )
     )
     lines.append("")
+
+    if footprint is not None:
+        lines.append("## Footprint enrichment (R11-FP13)")
+        lines.append("")
+        lines.append(
+            "The same `footprint_enrichment_corpus.json` cases against the same seeded catalog, "
+            "run once as seeded and once after `enrich_footprint` adds routines with reviewed "
+            "and undecided lineage, a published ontology concept, and (R11-FP08) one routine's "
+            "APPROVED Atlas-authored description. Every question's wording misses its target "
+            "table's name and description, so only the enrichment can reach it -- and the "
+            "R11-FP08 case's wording misses the routine's *name* too, so its only path is the "
+            "reviewed description. Gap cases must stay unreached: their only path is lineage "
+            "nobody approved."
+        )
+        lines.append("")
+        lines.append("| Measure | Before enrichment | After enrichment |")
+        lines.append("|---|---|---|")
+        lines.append(
+            f"| Recall within bound ({footprint.reachability_case_count} cases) | "
+            f"{footprint.recall_before:.4f} | {footprint.recall_after:.4f} |"
+        )
+        lines.append(
+            f"| Gap preservation ({footprint.gap_case_count} cases) | — | "
+            f"{footprint.gap_preservation_rate:.4f} |"
+        )
+        lines.append("")
+        lines.append("| Metric | Value | Baseline | Change |")
+        lines.append("|---|---|---|---|")
+        for name in ("footprint_recall_within_bound_rate", "footprint_gap_preservation_rate"):
+            lines.append(_metric_row(name, current_metrics, baseline_metrics))
+        lines.append("")
+        lines.append("| Case | Question | Expected | Rank before | Rank after |")
+        lines.append("|---|---|---|---|---|")
+        for before, after in zip(footprint.before.results, footprint.after.results, strict=True):
+            expected = f"{after.case.expected_object_type}:{after.case.expected_object_key}"
+            if after.case.expect_absent:
+                expected += " (must stay absent)"
+            lines.append(
+                f"| {after.case.id} | {after.case.question} | {expected} | "
+                f"{before.rank or 'not found'} | {after.rank or 'not found'} |"
+            )
+        lines.append("")
+        lines.append(
+            "Not measured here: whether answers over enriched context are *correct*. That is "
+            "`execution_match_benchmark.py` against a live model route (paid calls), and the "
+            "acceptance thresholds for both are for the domain owner to set before that run."
+        )
+        lines.append("")
 
     lines.append("## Tool / generation-path selection quality")
     lines.append("")
@@ -798,12 +1107,57 @@ def _metric_row(
 # ---------------------------------------------------------------------------
 
 
+async def _build_vector_index(session: AsyncSession, catalog: SeededCatalog) -> None:
+    """Build the persisted vector index over the seeded catalog, if we can.
+
+    RT-1 built a persisted, rebuildable index and the vector channel prefers it
+    when it is fresh -- but with no embedding provider ever configured, the
+    index was always empty, the channel always took the live-embed fallback,
+    and the persisted path had never run outside its own unit tests. Building
+    it here means the benchmark measures the path a deployment would actually
+    serve from.
+
+    Failure is reported and swallowed on purpose: with no provider configured
+    this is the ordinary state, the vector channel skips itself with a recorded
+    reason, and the rest of the benchmark is still worth running. What must not
+    happen is a silent skip, because "the index was not built" and "the index
+    was built and found nothing" are different results.
+    """
+    from aida.config import get_settings
+    from aida.embedding_provider import EmbeddingUnavailable
+    from aida.models import DataSource
+    from aida.vector_index_service import rebuild_vector_index
+
+    datasource = await session.get(DataSource, catalog.datasource_id)
+    if datasource is None:  # pragma: no cover - seed_catalog guarantees it
+        return
+    try:
+        result = await rebuild_vector_index(
+            session,
+            datasource.organization_id,
+            settings=get_settings(),
+            datasource_id=datasource.id,
+        )
+    except EmbeddingUnavailable as exc:
+        print(f"vector index not built: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - reported, never hidden
+        print(f"vector index build failed: {type(exc).__name__}: {exc}")
+        return
+    await session.commit()
+    print(f"vector index built: {result}")
+
+
 async def _run(
-    *, retrieval_corpus_path: Path, tool_selection_corpus_path: Path
-) -> tuple[RetrievalQualityReport, ToolSelectionReport, ModelGenerationPosture]:
+    *,
+    retrieval_corpus_path: Path,
+    tool_selection_corpus_path: Path,
+    footprint_corpus_path: Path,
+) -> tuple[RetrievalQualityReport, ToolSelectionReport, ModelGenerationPosture, FootprintReport]:
     session, engine = await _make_session()
     try:
         catalog = await seed_catalog(session)
+        await _build_vector_index(session, catalog)
         retrieval_cases = load_retrieval_corpus(retrieval_corpus_path)
         tool_cases = load_tool_selection_corpus(tool_selection_corpus_path)
         retrieval_report = await run_retrieval_benchmark(session, catalog, retrieval_cases)
@@ -812,7 +1166,8 @@ async def _run(
     finally:
         await session.close()
         await engine.dispose()
-    return retrieval_report, tool_report, posture
+    footprint_report = await run_footprint_benchmark(load_retrieval_corpus(footprint_corpus_path))
+    return retrieval_report, tool_report, posture, footprint_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -831,6 +1186,11 @@ def main(argv: list[str] | None = None) -> int:
         default=CORPUS_DIR / "tool_selection_corpus.json",
     )
     parser.add_argument(
+        "--footprint-corpus",
+        type=Path,
+        default=CORPUS_DIR / "footprint_enrichment_corpus.json",
+    )
+    parser.add_argument(
         "--accept-baseline",
         action="store_true",
         help=(
@@ -847,10 +1207,11 @@ def main(argv: list[str] | None = None) -> int:
         print("Run `uv run python scripts/quality_benchmark.py --accept-baseline` to create one.")
         return 1
 
-    retrieval_report, tool_report, posture = asyncio.run(
+    retrieval_report, tool_report, posture, footprint_report = asyncio.run(
         _run(
             retrieval_corpus_path=args.retrieval_corpus,
             tool_selection_corpus_path=args.tool_selection_corpus,
+            footprint_corpus_path=args.footprint_corpus,
         )
     )
 
@@ -859,18 +1220,28 @@ def main(argv: list[str] | None = None) -> int:
         "retrieval_recall_within_bound_rate": retrieval_report.recall_within_bound_rate,
         "retrieval_mrr": retrieval_report.mrr,
         "tool_selection_pass_rate": tool_report.pass_rate,
+        "footprint_recall_within_bound_rate": footprint_report.recall_after,
+        "footprint_gap_preservation_rate": footprint_report.gap_preservation_rate,
     }
     case_counts = {
         "retrieval_hit_at_1_rate": retrieval_report.case_count,
         "retrieval_recall_within_bound_rate": retrieval_report.case_count,
         "retrieval_mrr": retrieval_report.case_count,
         "tool_selection_pass_rate": tool_report.case_count,
+        "footprint_recall_within_bound_rate": footprint_report.reachability_case_count,
+        "footprint_gap_preservation_rate": footprint_report.gap_case_count,
     }
 
     print("Retrieval quality:")
     print(f"  hit@1:                 {retrieval_report.hit_at_1_rate:.4f}")
     print(f"  recall (within bound): {retrieval_report.recall_within_bound_rate:.4f}")
     print(f"  MRR:                   {retrieval_report.mrr:.4f}")
+    print("Footprint enrichment (R11-FP13):")
+    print(
+        f"  recall before -> after: {footprint_report.recall_before:.4f} -> "
+        f"{footprint_report.recall_after:.4f}"
+    )
+    print(f"  gap preservation:      {footprint_report.gap_preservation_rate:.4f}")
     print("Tool/generation-path selection quality:")
     print(f"  pass rate:             {tool_report.pass_rate:.4f}")
     print("Model generation posture:")
@@ -895,6 +1266,7 @@ def main(argv: list[str] | None = None) -> int:
                 current_metrics=current_metrics,
                 baseline_metrics=current_metrics,
                 regressions=[],
+                footprint=footprint_report,
             )
             print(f"Report written to {args.report}.")
         return 0
@@ -913,6 +1285,7 @@ def main(argv: list[str] | None = None) -> int:
             current_metrics=current_metrics,
             baseline_metrics=baseline_metrics,
             regressions=regressions,
+            footprint=footprint_report,
         )
         print(f"\nReport written to {args.report}.")
 

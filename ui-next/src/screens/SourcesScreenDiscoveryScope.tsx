@@ -1,0 +1,577 @@
+import { useCallback, useState } from "react";
+
+import {
+  fetchDiscoverySelection,
+  previewDiscoverySelection,
+  putDiscoverySelection,
+} from "../lib/api";
+import type {
+  DataSourceRead,
+  DiscoverySelection,
+  DiscoverySelectionPreviewRead,
+  DiscoverySelectionRead,
+  ObjectKindCapabilityRead,
+  SelectionCountRead,
+} from "../lib/types";
+import { Button, ConfirmDialog, ErrorState, Field, Pill } from "../components/primitives";
+import type { Tone } from "../components/primitives";
+import { LoadingPanel, useAsyncResource, useSubmitAction } from "../components/screenState";
+
+/* ---------------------------------------------------------------------------
+   Discovery scope (R11-FP01) — which object kinds, schemas and names a scan of
+   this source takes in.
+
+   THREE ROUTES, none composed:
+     GET  /v1/datasources/{id}/discovery-selection          the stored scope
+     POST /v1/datasources/{id}/discovery-selection/preview  counts, stores nothing
+     PUT  /v1/datasources/{id}/discovery-selection          replace (empty = remove)
+
+   WHAT AN OPERATOR MUST NOT BE MISLED ABOUT, and why each sentence below exists:
+
+     1. NARROWING NEVER DELETES. A full scan retires objects it did not see, and
+        an object outside the scope is never seen -- so the server reconciles
+        only objects the scope covers. Leaving a schema out stops maintaining
+        it; it does not remove what earlier scans found. The confirmation says
+        so, because "exclude" reads like "delete".
+
+     2. THE PREVIEW IS THE LAST SCAN, NOT THE SOURCE. It counts what Atlas
+        already holds; an object never discovered is not in it. A preview is
+        also only true of the form it was asked for, so editing discards it.
+
+     3. "ALL KINDS" IS NOT A LIST. Every kind ticked is sent as no restriction,
+        which also takes in kinds this list does not name. An Oracle package is
+        named since R11-FP03, a trigger and a sequence since R11-FP01; a native
+        kind no connector reports yet is not.
+        Unticking every kind is refused: the server reads an empty list as
+        "everything", the opposite of what the operator did.
+
+        A kind MISSING from this list is worse than unticked: the form is
+        seeded from the stored scope and sent back whole, so a kind the list
+        does not name would be silently dropped from a scope that already had
+        it. This list therefore carries every member of the server's
+        `OBJECT_KINDS`, in its order.
+
+     4. FOUR WAYS OF NOT BEING READ, AND THEY ARE NOT ONE. The capability table
+        keeps the server's own answers apart (review 2026-09-16 §5): SQL Server
+        has no materialized-view kind at all and Snowflake no trigger
+        (NOT_APPLICABLE -- nothing to grant or implement); Databricks views
+        exist but their code is not captured yet (UNSUPPORTED -- the adapter);
+        a PostgreSQL trigger has no body of its own, only the function it fires
+        (PARTIAL); and a kind this source's own scope leaves out reads
+        NOT_SELECTED, which one tick reverses. Collapsing them into one dash is
+        how a reader stops asking, so each prints its own words and the table
+        says underneath what those words mean.
+--------------------------------------------------------------------------- */
+
+export type ObjectKind = NonNullable<DiscoverySelection["object_kinds"]>[number];
+
+export const SCOPE_KINDS: readonly ObjectKind[] = [
+  "TABLE",
+  "VIEW",
+  "MATERIALIZED_VIEW",
+  "PROCEDURE",
+  "FUNCTION",
+  "PACKAGE",
+  // R11-FP01: a trigger is not called but fires, and a sequence holds no rows
+  // and is read by somebody else's default expression -- each its own kind
+  // server-side, so each selectable here. A deployment that does not want them
+  // unticks them and reads NOT_SELECTED, which is neither a missing feature nor
+  // a missing concept.
+  "TRIGGER",
+  "SEQUENCE",
+];
+
+const KIND_WORDS: Record<string, string> = {
+  SCHEMA: "Schemas",
+  TABLE: "Tables",
+  VIEW: "Views",
+  MATERIALIZED_VIEW: "Materialized views",
+  PROCEDURE: "Procedures",
+  FUNCTION: "Functions",
+  PACKAGE: "Packages",
+  TRIGGER: "Triggers",
+  SEQUENCE: "Sequences",
+};
+
+/** The server's own bounds (`aida.discovery_selection`). */
+export const MAX_PATTERNS = 100;
+export const MAX_PATTERN_LENGTH = 200;
+
+const kindWords = (kind: string): string =>
+  KIND_WORDS[kind] ?? `${kind.charAt(0)}${kind.slice(1).toLowerCase().replace(/_/g, " ")}`;
+
+const CAPABILITY_TONES: Record<string, Tone> = {
+  SUPPORTED: "ok",
+  PARTIAL: "warn",
+  UNSUPPORTED: "warn",
+  // Mute, not warn: nothing is wrong and nothing can be done about it.
+  NOT_APPLICABLE: "mute",
+  // Info, not warn: it is this deployment's own choice, and reversible here.
+  NOT_SELECTED: "info",
+};
+
+const CAPABILITY_WORDS: Record<string, string> = {
+  SUPPORTED: "yes",
+  PARTIAL: "in part",
+  UNSUPPORTED: "not supported",
+  NOT_APPLICABLE: "no such object",
+  NOT_SELECTED: "left out by this scope",
+};
+
+const capabilityTone = (status: ObjectKindCapabilityRead["inventory"]): Tone =>
+  CAPABILITY_TONES[status] ?? "mute";
+
+/** The server's state as a reader's words. An unknown state -- this vocabulary was widened
+ *  once already -- echoes the server rather than being flattened to "n/a", which would be a
+ *  claim about the engine that nobody made. */
+const capabilityWords = (status: ObjectKindCapabilityRead["inventory"]): string =>
+  CAPABILITY_WORDS[status] ?? status.toLowerCase().replace(/_/g, " ");
+
+/** What each answer that is not a plain "yes" means, and -- the part that matters -- what
+ *  would change it. Printed only for the states actually in the table, so a source with
+ *  nothing to explain carries no footnotes. */
+const CAPABILITY_LEGEND: Record<string, string> = {
+  PARTIAL:
+    "in part — implemented, and known to return only some of the fact. A PostgreSQL trigger " +
+    "has no body of its own: the function it fires is captured on the routine axis instead.",
+  UNSUPPORTED:
+    "not supported — the engine has the concept and this connector does not read it yet. It " +
+    "is an Atlas gap, not a source one, so no grant here will change it.",
+  NOT_APPLICABLE:
+    "no such object — this engine has nothing of that kind, so there is nothing to grant, " +
+    "implement or tick. Snowflake and BigQuery have no triggers; Databricks has neither " +
+    "triggers nor sequences.",
+  NOT_SELECTED:
+    "left out by this scope — the connector would read it and this source's discovery " +
+    "selection excludes it. Ticking the kind in the editor below takes it back in from the " +
+    "next scan.",
+};
+
+export interface ScopeFormState {
+  kinds: ObjectKind[];
+  /** One pattern per line (commas also separate). */
+  includeSchemas: string;
+  excludeSchemas: string;
+  includeObjects: string;
+  excludeObjects: string;
+}
+
+/** Trimmed, blank-free and de-duplicated ignoring case -- the server matches
+ *  ignoring case, so `Sales` and `sales` are one pattern. */
+export function parsePatterns(text: string): string[] {
+  const unique = new Map<string, string>();
+  for (const raw of text.split(/[\n,]/)) {
+    const value = raw.trim();
+    if (value && !unique.has(value.toLowerCase())) unique.set(value.toLowerCase(), value);
+  }
+  return [...unique.values()];
+}
+
+export function scopeToForm(selection: DiscoverySelection | undefined): ScopeFormState {
+  const kinds = selection?.object_kinds ?? [];
+  return {
+    kinds: kinds.length === 0 ? [...SCOPE_KINDS] : SCOPE_KINDS.filter((kind) => kinds.includes(kind)),
+    includeSchemas: (selection?.include_schemas ?? []).join("\n"),
+    excludeSchemas: (selection?.exclude_schemas ?? []).join("\n"),
+    includeObjects: (selection?.include_objects ?? []).join("\n"),
+    excludeObjects: (selection?.exclude_objects ?? []).join("\n"),
+  };
+}
+
+export function scopeFormToBody(form: ScopeFormState): DiscoverySelection {
+  const everyKind = SCOPE_KINDS.every((kind) => form.kinds.includes(kind));
+  return {
+    object_kinds: everyKind ? [] : SCOPE_KINDS.filter((kind) => form.kinds.includes(kind)),
+    include_schemas: parsePatterns(form.includeSchemas),
+    exclude_schemas: parsePatterns(form.excludeSchemas),
+    include_objects: parsePatterns(form.includeObjects),
+    exclude_objects: parsePatterns(form.excludeObjects),
+  };
+}
+
+export const isRestricted = (body: DiscoverySelection): boolean =>
+  [body.object_kinds, body.include_schemas, body.exclude_schemas, body.include_objects, body.exclude_objects].some(
+    (list) => (list?.length ?? 0) > 0,
+  );
+
+/** Refused before the request, in the rule's own terms. `null` when sendable. */
+export function validateScopeForm(form: ScopeFormState): string | null {
+  if (form.kinds.length === 0) {
+    return "Tick at least one object kind. A scope with no kind would be read as no restriction at all.";
+  }
+  const lists: [string, string][] = [
+    ["Include schemas", form.includeSchemas],
+    ["Exclude schemas", form.excludeSchemas],
+    ["Include objects", form.includeObjects],
+    ["Exclude objects", form.excludeObjects],
+  ];
+  for (const [label, text] of lists) {
+    const patterns = parsePatterns(text);
+    if (patterns.length > MAX_PATTERNS) return `${label}: at most ${MAX_PATTERNS} patterns.`;
+    if (patterns.some((pattern) => pattern.length > MAX_PATTERN_LENGTH)) {
+      return `${label}: a pattern may be at most ${MAX_PATTERN_LENGTH} characters.`;
+    }
+    // eslint-disable-next-line no-control-regex
+    if (patterns.some((pattern) => /[ -]/.test(pattern))) {
+      return `${label}: a pattern may not contain control characters.`;
+    }
+  }
+  return null;
+}
+
+const patternsOrAll = (patterns: string[] | undefined, none: string): string =>
+  patterns && patterns.length > 0 ? patterns.join(", ") : none;
+
+function CapabilityTable({
+  rows,
+  source,
+}: {
+  rows: ObjectKindCapabilityRead[];
+  source: DiscoverySelectionRead["capability_source"];
+}) {
+  // Review 2026-09-16 §5: the states present in THIS table, in the legend's own order so
+  // the footnotes do not reshuffle between sources. A state nobody is reading needs no
+  // explanation, and four sentences under a table of plain yeses would be noise.
+  const explained = Object.keys(CAPABILITY_LEGEND).filter((state) =>
+    rows.some((row) => row.inventory === state || row.definition === state),
+  );
+  return (
+    <>
+      <div className="srcscope__tablewrap">
+        <table className="srcscope__table" aria-label="What this connector discovers">
+          <thead>
+            <tr>
+              <th scope="col">Kind</th>
+              <th scope="col">Inventory</th>
+              <th scope="col">Code</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.kind}>
+                <th scope="row">{kindWords(row.kind)}</th>
+                <td>
+                  <Pill tone={capabilityTone(row.inventory)}>{capabilityWords(row.inventory)}</Pill>
+                </td>
+                <td>
+                  <Pill tone={capabilityTone(row.definition)}>{capabilityWords(row.definition)}</Pill>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="srcadmin__note">
+        {source === "CONNECTION_TEST"
+          ? "As this source reported at its last connection test."
+          : "The connector's declared defaults. Test the connection to confirm them for this source."}
+      </p>
+      {explained.map((state) => (
+        <p className="srcadmin__note" key={state}>
+          {CAPABILITY_LEGEND[state]}
+        </p>
+      ))}
+    </>
+  );
+}
+
+function PreviewTable({ preview }: { preview: DiscoverySelectionPreviewRead }) {
+  const rows: SelectionCountRead[] = [preview.schemas, ...preview.kinds];
+  return (
+    <div className="srcscope__preview" role="region" aria-label="Scope preview">
+      <p className="srcadmin__note">
+        Counted over the last completed scan, not read from the source: an object Atlas has never
+        discovered is not in these numbers. Nothing has been saved.
+      </p>
+      <div className="srcscope__tablewrap">
+        <table className="srcscope__table">
+          <thead>
+            <tr>
+              <th scope="col">Kind</th>
+              <th scope="col">In scope</th>
+              <th scope="col">Left out</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.kind}>
+                <th scope="row">{kindWords(row.kind)}</th>
+                <td>{row.in_scope}</td>
+                <td>{row.excluded}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {preview.unmatched_include_patterns.length > 0 ? (
+        <p className="srcadmin__err" role="alert">
+          These include patterns match nothing in the last scan:{" "}
+          {preview.unmatched_include_patterns.join(", ")}. An include that matches nothing leaves
+          that part of the source out entirely — check it for a typo.
+        </p>
+      ) : null}
+      {preview.truncated ? (
+        <p className="srcadmin__note">
+          The last scan holds more objects than one preview reads, so these counts are partial.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function DiscoveryScope({ source, mayEdit }: { source: DataSourceRead; mayEdit: boolean }) {
+  const scope = useAsyncResource<DiscoverySelectionRead>(
+    (signal) => fetchDiscoverySelection(source.id, signal),
+    [source.id],
+  );
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<ScopeFormState>(() => scopeToForm(undefined));
+  const [formError, setFormError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<DiscoverySelectionPreviewRead | null>(null);
+  const [confirming, setConfirming] = useState<DiscoverySelection | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const previewAction = useSubmitAction<DiscoverySelectionPreviewRead>();
+  const saveAction = useSubmitAction<DiscoverySelectionRead>();
+
+  const update = useCallback((next: Partial<ScopeFormState>) => {
+    setForm((previous) => ({ ...previous, ...next }));
+    // A preview describes the form it was asked for; this is no longer that form.
+    setPreview(null);
+  }, []);
+
+  const openEditor = useCallback(() => {
+    setForm(scopeToForm(scope.data?.selection));
+    setFormError(null);
+    setPreview(null);
+    setNotice(null);
+    setEditing(true);
+  }, [scope.data]);
+
+  const sendable = useCallback((): DiscoverySelection | null => {
+    const invalid = validateScopeForm(form);
+    setFormError(invalid);
+    return invalid ? null : scopeFormToBody(form);
+  }, [form]);
+
+  const runPreview = useCallback(async () => {
+    const body = sendable();
+    if (!body) return;
+    const result = await previewAction.run(() => previewDiscoverySelection(source.id, body));
+    if (result) setPreview(result as DiscoverySelectionPreviewRead);
+  }, [previewAction, sendable, source.id]);
+
+  const askToSave = useCallback(() => {
+    const body = sendable();
+    if (body) setConfirming(body);
+  }, [sendable]);
+
+  const save = useCallback(async () => {
+    if (!confirming) return;
+    const saved = await saveAction.run(() => putDiscoverySelection(source.id, confirming));
+    if (!saved) return;
+    const narrowed = isRestricted(confirming);
+    setConfirming(null);
+    setEditing(false);
+    setPreview(null);
+    setNotice(
+      narrowed
+        ? "Discovery scope saved. It applies from the next scan."
+        : "Discovery scope removed. The next scan takes in everything the connector reports.",
+    );
+    scope.reload();
+  }, [confirming, saveAction, scope, source.id]);
+
+  const narrowing = confirming ? isRestricted(confirming) : false;
+  const selection = scope.data?.selection;
+
+  return (
+    <div className="srcadmin__block">
+      <div className="srcadmin__blockhead">
+        <h3 className="srcadmin__h3">Discovery scope</h3>
+        {scope.data ? (
+          <Pill tone={scope.data.restricted ? "info" : "mute"}>
+            {scope.data.restricted ? "narrowed" : "everything"}
+          </Pill>
+        ) : null}
+      </div>
+      <p className="srcadmin__note">
+        Which object kinds, schemas and names a scan takes in. Narrowing it stops maintaining what
+        it leaves out; it never retires it.
+      </p>
+
+      {scope.error ? (
+        <ErrorState
+          title="Discovery scope could not be read"
+          detail={scope.error}
+          onRetry={() => scope.reload()}
+        />
+      ) : scope.loading || !scope.data ? (
+        <LoadingPanel label="Reading the discovery scope…" />
+      ) : (
+        <>
+          <dl className="srcadmin__facts">
+            <div>
+              <dt>Object kinds</dt>
+              <dd>
+                {selection?.object_kinds && selection.object_kinds.length > 0
+                  ? selection.object_kinds.map(kindWords).join(", ")
+                  : "every kind the connector reports"}
+              </dd>
+            </div>
+            <div>
+              <dt>Schemas</dt>
+              <dd>
+                {patternsOrAll(selection?.include_schemas, "all")}
+                {selection?.exclude_schemas?.length ? ` · except ${selection.exclude_schemas.join(", ")}` : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Objects</dt>
+              <dd>
+                {patternsOrAll(selection?.include_objects, "all")}
+                {selection?.exclude_objects?.length ? ` · except ${selection.exclude_objects.join(", ")}` : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Scope fingerprint</dt>
+              <dd>{scope.data.fingerprint ? scope.data.fingerprint.slice(0, 12) : "none (unrestricted)"}</dd>
+            </div>
+          </dl>
+          <CapabilityTable rows={scope.data.capabilities} source={scope.data.capability_source} />
+        </>
+      )}
+
+      {editing ? (
+        <div className="srcadmin__form" role="group" aria-label="Discovery scope">
+          <fieldset className="srcscope__kinds">
+            <legend className="field__label">Object kinds</legend>
+            {SCOPE_KINDS.map((kind) => (
+              <label key={kind} className="srcadmin__check">
+                <input
+                  type="checkbox"
+                  checked={form.kinds.includes(kind)}
+                  onChange={(e) =>
+                    update({
+                      kinds: e.target.checked
+                        ? [...form.kinds, kind]
+                        : form.kinds.filter((existing) => existing !== kind),
+                    })
+                  }
+                />
+                <span>{kindWords(kind)}</span>
+              </label>
+            ))}
+          </fieldset>
+          <p className="srcadmin__note">
+            Every kind ticked is no restriction at all, and also takes in kinds this list does not
+            name.
+          </p>
+          <div className="srcscope__patterns">
+            <Field label="Include schemas">
+              <textarea
+                rows={3}
+                placeholder="all schemas"
+                value={form.includeSchemas}
+                onChange={(e) => update({ includeSchemas: e.target.value })}
+              />
+            </Field>
+            <Field label="Exclude schemas">
+              <textarea
+                rows={3}
+                placeholder="none"
+                value={form.excludeSchemas}
+                onChange={(e) => update({ excludeSchemas: e.target.value })}
+              />
+            </Field>
+            <Field label="Include objects (schema.object)">
+              <textarea
+                rows={3}
+                placeholder="all, e.g. sales.fact_*"
+                value={form.includeObjects}
+                onChange={(e) => update({ includeObjects: e.target.value })}
+              />
+            </Field>
+            <Field label="Exclude objects (schema.object)">
+              <textarea
+                rows={3}
+                placeholder="none, e.g. *.tmp_*"
+                value={form.excludeObjects}
+                onChange={(e) => update({ excludeObjects: e.target.value })}
+              />
+            </Field>
+          </div>
+          <p className="srcadmin__note">
+            One pattern per line. <code>*</code> matches any run of characters and <code>?</code>{" "}
+            one character; matching ignores case. Excludes win over includes.
+          </p>
+          {formError ? (
+            <p className="srcadmin__err" role="alert">
+              {formError}
+            </p>
+          ) : null}
+          <div className="srcadmin__actions">
+            <Button disabled={previewAction.submitting} onClick={() => void runPreview()}>
+              Preview
+            </Button>
+            <Button variant="primary" disabled={saveAction.submitting} onClick={askToSave}>
+              Save discovery scope
+            </Button>
+            <Button
+              disabled={saveAction.submitting}
+              onClick={() => {
+                setEditing(false);
+                setFormError(null);
+                setPreview(null);
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+          {previewAction.error ? (
+            <p className="srcadmin__err" role="alert">
+              {previewAction.error}
+            </p>
+          ) : null}
+          {preview ? <PreviewTable preview={preview} /> : null}
+        </div>
+      ) : (
+        <div className="srcadmin__actions">
+          <Button disabled={!mayEdit || scope.loading || !scope.data} onClick={openEditor}>
+            Edit discovery scope
+          </Button>
+          {mayEdit ? null : (
+            <span className="srcadmin__denied">
+              Changing the discovery scope requires Data Admin, Metadata Admin or Platform Admin.
+            </span>
+          )}
+        </div>
+      )}
+
+      {notice ? (
+        <p className="srcadmin__notice" role="status">
+          {notice}
+        </p>
+      ) : null}
+
+      {confirming ? (
+        <ConfirmDialog
+          title={narrowing ? "Save this discovery scope" : "Remove the discovery scope"}
+          description={
+            narrowing
+              ? `Applies from the next scan of ${source.name}. Objects the scope leaves out stop being maintained, but nothing earlier scans found is retired: a full scan only reconciles what the scope covers.`
+              : `The next scan of ${source.name} takes in every kind, schema and object its connector reports.`
+          }
+          confirmLabel={narrowing ? "Save scope" : "Remove scope"}
+          destructive
+          busy={saveAction.submitting}
+          error={saveAction.error}
+          onCancel={() => {
+            setConfirming(null);
+            saveAction.reset();
+          }}
+          onConfirm={() => void save()}
+        />
+      ) : null}
+    </div>
+  );
+}

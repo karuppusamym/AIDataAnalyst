@@ -6,6 +6,7 @@ import { listGlossaryTerms, type GlossaryTermRead } from "../lib/_api_append";
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker, datasourceName } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
+import { OntologyManager } from "../components/OntologyManager";
 import { AsyncState, Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./BusinessMeaningScreen.css";
@@ -253,7 +254,18 @@ function GlossaryTab({
   const [terms, setTerms] = useState<GlossaryTermRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [q, setQ] = useState("");
+  /* The filter lives in the URL (`?q=`), not in local state, so a link *to a
+     term* arrives filtered to it. A catalog glossary chip links here; with a
+     local-only filter it opened the full glossary and left the reader to find
+     the term again, which is most of the way to not having linked at all.
+     `q` is already a declared field of the `meaning` route, and the annotations
+     tab reads the same one. */
+  const [params, setParams] = useUrlState();
+  const q = params.get("q") ?? "";
+  const setQ = useCallback(
+    (value: string) => setParams({ q: value || null }),
+    [setParams],
+  );
   const [creating, setCreating] = useState(false);
   const [linkingTerm, setLinkingTerm] = useState<GlossaryTermRead | null>(null);
 
@@ -526,6 +538,30 @@ export function BusinessMeaningScreen() {
   const [error, setError] = useState<string | null>(null);
   const [draftQ, setDraftQ] = useState(q);
 
+  /* R11-S13 (M4): the governed ontology is authored from here.
+   *
+   * `OntologyManager` had exactly one entry point in the whole app: a button
+   * in the Unified lineage header. Authoring the concepts, relations and
+   * catalog mappings that say what the business MEANS was therefore reachable
+   * only from a graph screen -- a steward looking for it would look here, on
+   * the screen whose entire subject is business meaning, and not find it.
+   *
+   * A DIALOG, NOT A FOURTH TAB. The `?view=` axis on this screen selects which
+   * READ is in front (annotations, the business map, the glossary). The
+   * ontology manager is a write surface with its own draft/submit/review
+   * lifecycle and its own version history; putting it on that axis would make
+   * "which view am I reading" and "am I editing" the same control, and would
+   * put an unsaved JSON draft behind a tab switch. The dialog is also what
+   * keeps this a MERGE rather than a relocation: the component is mounted
+   * unchanged, `key`ed on the organization exactly as the lineage screen keys
+   * it, so switching tenants cannot leave another org's draft on screen.
+   *
+   * The lineage screen KEEPS its button. The review asks for a contextual
+   * shortcut from the graph, and it is the right one: a mapping is from a
+   * concept to a catalog object, which is what the graph in front of you is
+   * made of. Two entry points, one component, one set of endpoints. */
+  const [ontologyOpen, setOntologyOpen] = useState(false);
+
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
 
@@ -536,17 +572,18 @@ export function BusinessMeaningScreen() {
   // return an org-wide answer nobody asked for.
   const loadFirstPage = useCallback(async () => {
     inflight.current?.abort();
+    const seq = ++reqSeq.current;
+    setLoadingMore(false);
+    setItems([]);
+    setOffset(0);
+    setTotal(null);
     if (!dsId) {
-      setItems([]);
-      setOffset(0);
-      setTotal(null);
       setError(null);
       setLoading(false);
       return;
     }
     const ac = new AbortController();
     inflight.current = ac;
-    const seq = ++reqSeq.current;
 
     setLoading(true);
     setError(null);
@@ -555,16 +592,16 @@ export function BusinessMeaningScreen() {
         { datasourceId: dsId, limit: PAGE_LIMIT, offset: 0 },
         ac.signal,
       );
-      if (seq !== reqSeq.current) return;
+      if (ac.signal.aborted || seq !== reqSeq.current) return;
       setItems(page.items);
       setOffset(page.items.length);
       setTotal(page.total);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
-      if (seq !== reqSeq.current) return;
+      if (ac.signal.aborted || seq !== reqSeq.current) return;
       setError(e instanceof ApiError ? e.detail : (e as Error).message);
     } finally {
-      if (seq === reqSeq.current) setLoading(false);
+      if (!ac.signal.aborted && seq === reqSeq.current) setLoading(false);
     }
   }, [dsId]);
 
@@ -576,16 +613,22 @@ export function BusinessMeaningScreen() {
   const loadMore = useCallback(async () => {
     if (!dsId || loadingMore || loading) return;
     if (total !== null && offset >= total) return;
+    const ac = new AbortController();
+    inflight.current = ac;
+    const seq = reqSeq.current;
     setLoadingMore(true);
     try {
-      const page = await fetchBusinessAnnotations({ datasourceId: dsId, limit: PAGE_LIMIT, offset });
+      const page = await fetchBusinessAnnotations(
+        { datasourceId: dsId, limit: PAGE_LIMIT, offset }, ac.signal,
+      );
+      if (ac.signal.aborted || seq !== reqSeq.current) return;
       setItems((prev) => [...prev, ...page.items]);
       setOffset((prev) => prev + page.items.length);
       setTotal(page.total);
     } catch {
       /* a failed next page leaves what is already loaded intact */
     } finally {
-      setLoadingMore(false);
+      if (!ac.signal.aborted && seq === reqSeq.current) setLoadingMore(false);
     }
   }, [dsId, offset, total, loading, loadingMore]);
 
@@ -618,12 +661,20 @@ export function BusinessMeaningScreen() {
             and grain, resolved to the current AT-6 approved version, not a model's proposal.
           </p>
         </div>
-        {total !== null ? (
-          <div className="bm__stats">
-            <span><b className="tnum">{total}</b> annotated table{total === 1 ? "" : "s"}{selectedDsName ? ` in ${selectedDsName}` : ""}</span>
-          </div>
-        ) : null}
+        <div className="bm__headactions">
+          {total !== null ? (
+            <div className="bm__stats">
+              <span><b className="tnum">{total}</b> annotated table{total === 1 ? "" : "s"}{selectedDsName ? ` in ${selectedDsName}` : ""}</span>
+            </div>
+          ) : null}
+          {/* R11-S13 (M4): the ontology authoring entry point. See the note at
+              `ontologyOpen` for why this is a dialog and not a fourth tab. */}
+          <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
+        </div>
       </header>
+      {ontologyOpen ? (
+        <OntologyManager key={`ontology:${ORG}`} organizationId={ORG} onClose={() => setOntologyOpen(false)} />
+      ) : null}
 
       <div className="bm__filters">
         <Field label="Datasource">
@@ -651,7 +702,7 @@ export function BusinessMeaningScreen() {
         </Field>
       </div>
 
-      <BusinessGeneration key={dsId ?? ORG} org={ORG} datasourceId={dsId} externallyScoped />
+      <BusinessGeneration key={`generation:${dsId ?? ORG}`} org={ORG} datasourceId={dsId} externallyScoped />
       <div className="bm__tabs" role="tablist">
         <button
           role="tab"

@@ -65,6 +65,7 @@ from aida.catalog_read_model import (
     _latest_pending_drafts,
     _open_incident_table_ids,
     _quality_state,
+    _withdrawn_documentation_table_ids,
 )
 from aida.consumption_lineage import get_consumption_for_resource
 from aida.models import AiDecisionRecord, DataQualityIncident, MetadataTable
@@ -122,8 +123,19 @@ async def compose_asset_evidence(
     documentation = (await _latest_approved_documentation(session, table_ids)).get(table.id)
     pending_draft = (await _latest_pending_drafts(session, table_ids)).get(table.id)
     annotation = (await _business_annotations(session, table_ids)).get(table.id)
+    # An annotation on a table whose documentation was withdrawn is not
+    # evidence of what this platform says about the asset -- the resolver
+    # skips that rung, and so must the attribution below, or a connector
+    # comment would be cited as approved business annotation.
+    documentation_withdrawn = table.id in await _withdrawn_documentation_table_ids(
+        session, table_ids
+    )
     description, description_is_proposed = _description(
-        table, documentation=documentation, pending_draft=pending_draft, annotation=annotation
+        table,
+        documentation=documentation,
+        pending_draft=pending_draft,
+        annotation=annotation,
+        documentation_withdrawn=documentation_withdrawn,
     )
     if description:
         if documentation is not None:
@@ -146,7 +158,7 @@ async def compose_asset_evidence(
                     occurred_at=pending_draft.created_at if pending_draft else None,
                 )
             )
-        elif annotation is not None:
+        elif annotation is not None and not documentation_withdrawn:
             items.append(
                 EvidenceItemRead(
                     category="BUSINESS_MEANING",

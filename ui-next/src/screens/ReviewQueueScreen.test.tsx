@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { GovernanceReviewRead, MeRead, ReviewQueueRead } from "../lib/types";
 
 /* ---------------------------------------------------------------------------
@@ -430,6 +430,78 @@ const TERM_VERSION: ReviewQueueRead["proposals"][number] = {
   },
 };
 
+describe("ReviewQueueScreen when the queue cannot be loaded", () => {
+  it("keeps a stale detail readable but blocks decisions after a refresh fails", async () => {
+    history.replaceState(null, "", "/?review=rq_1");
+    fetchReviewQueue.mockResolvedValueOnce(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+    await screen.findByLabelText("Proposal detail");
+    fetchReviewQueue.mockRejectedValue(new Error("refresh unavailable"));
+    act(() => {
+      history.pushState(null, "", "/?review=rq_1&status=ALL");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await screen.findByText("The review queue could not be loaded");
+    expect(screen.getByText("Refresh the review queue successfully before deciding this proposal.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(decideGovernanceReview).not.toHaveBeenCalled();
+  });
+
+  /* The load-failure journey had no test at all, and it shipped a defect the
+     decision-path tests could not see: the three tiles read
+     `data?.byStatus[...] ?? 0`, so a first failure rendered "0 pending review"
+     directly beside "The review queue could not be loaded", and a later
+     failure rendered the previous load's counts with nothing marking them
+     stale. "Nothing is waiting for you" and "we could not find out" are
+     different answers and only one of them is safe to act on. */
+
+  it("does not report zero pending when it could not find out", async () => {
+    fetchReviewQueue.mockRejectedValue(new Error("upstream unavailable"));
+    const ReviewQueueScreen = await loadScreen();
+
+    render(<ReviewQueueScreen />);
+
+    await screen.findByText("The review queue could not be loaded");
+    expect(screen.getByText("upstream unavailable")).toBeInTheDocument();
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("—");
+    expect(screen.getByText("approved").previousSibling).toHaveTextContent("—");
+    expect(screen.getByText("rejected").previousSibling).toHaveTextContent("—");
+  });
+
+  it("does not keep showing the last good counts when a refresh fails", async () => {
+    fetchReviewQueue.mockResolvedValueOnce(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    const { rerender } = render(<ReviewQueueScreen />);
+    await waitFor(() =>
+      expect(screen.getByText("pending review").previousSibling).toHaveTextContent("1"),
+    );
+
+    fetchReviewQueue.mockRejectedValue(new Error("upstream unavailable"));
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "ALL" } });
+    rerender(<ReviewQueueScreen />);
+
+    await screen.findByText("The review queue could not be loaded");
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("—");
+  });
+
+  it("retries the load, and restores the counts when it succeeds", async () => {
+    fetchReviewQueue.mockRejectedValueOnce(new Error("upstream unavailable"));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+    await screen.findByText("The review queue could not be loaded");
+
+    fetchReviewQueue.mockResolvedValue(queueOf([PENDING_PROPOSAL]));
+    fireEvent.click(screen.getByRole("button", { name: /Retry|Try again/i }));
+
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("1");
+    expect(
+      screen.queryByText("The review queue could not be loaded"),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
   it("GLOSSARY_LINK_PROPOSAL row shows the term display_name in the title and confidence in the subtitle", async () => {
     fetchReviewQueue.mockResolvedValue(queueOf([LINK_PROPOSAL]));
@@ -451,6 +523,64 @@ describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
       screen.getByText(/finance\.mrr_daily/, { selector: ".prop__extra" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/confidence 88%/, { selector: ".prop__extra" })).toBeInTheDocument();
+  });
+
+  /* R11-FP08: routines gained an Atlas-authored description reviewed through
+     this same queue. Without ROUTINE_DESCRIPTION_DRAFT in OBJECT_TYPES the
+     drafts still arrived but no reviewer could filter to them, and the row
+     fell through to the bare object id. */
+  it("ROUTINE_DESCRIPTION_DRAFT row names the routine and says when the body was not captured", async () => {
+    const routineDraft: ReviewQueueRead["proposals"][number] = {
+      ...PENDING_PROPOSAL,
+      review_id: "rq_routine",
+      object_type: "ROUTINE_DESCRIPTION_DRAFT",
+      object_id: "d7b1f0c2-0000-4000-8000-000000000001",
+      confidence: 0.61,
+      evidence: [
+        // Claim format is `"<key>: <value>"`, exactly as `_proposed_text_item`
+        // and `_dict_evidence_items` emit it in `review_queue_read_model.py`.
+        {
+          category: "DESCRIPTION_DRAFT",
+          claim: "proposed_description: Settles the day's postings into the general ledger.",
+          source: "routine_description_draft:d7b1.drafted_text",
+        },
+        {
+          category: "DESCRIPTION_DRAFT",
+          claim: "signature: SETTLE_LEDGER(IN p_date DATE)",
+          source: "routine_description_draft:d7b1.evidence",
+        },
+        {
+          category: "DESCRIPTION_DRAFT",
+          claim: "body_state: WITHHELD",
+          source: "routine_description_draft:d7b1.evidence",
+        },
+      ],
+      diff: {
+        review_id: "rq_routine",
+        object_type: "ROUTINE_DESCRIPTION_DRAFT",
+        object_id: "d7b1f0c2-0000-4000-8000-000000000001",
+        diffable: false,
+        entries: [],
+      },
+    };
+    fetchReviewQueue.mockResolvedValue(queueOf([routineDraft]));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+
+    // The routine is named by its signature, not by the draft's uuid.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Describe routine SETTLE_LEDGER/, { selector: ".prop__title" }),
+      ).toBeInTheDocument(),
+    );
+    // A draft composed without the body is a weaker claim than one composed
+    // from it, and the score alone does not say which happened.
+    expect(screen.getByText(/body withheld/, { selector: ".prop__extra" })).toBeInTheDocument();
+    // The proposed prose is shown: a description draft has no field diff, so
+    // without it the row asks a reviewer to approve text it never displayed.
+    expect(
+      screen.getByText(/Settles the day's postings/, { selector: ".prop__extra" }),
+    ).toBeInTheDocument();
   });
 
   it("GLOSSARY_TERM_VERSION row shows the term name in the title and the definition diff below", async () => {

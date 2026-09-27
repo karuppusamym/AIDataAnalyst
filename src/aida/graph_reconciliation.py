@@ -61,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
+from aida.graph_store import resolve_graph_store_backend
 from aida.models import DataSource, NotificationRuleRecord
 from aida.notification_routing import (
     Incident,
@@ -466,6 +467,33 @@ async def reconcile_and_alert_datasource(
     return report
 
 
+async def neo4j_read_organizations(
+    organization_ids: Iterable[UUID], settings: Settings
+) -> set[UUID]:
+    """The subset of ``organization_ids`` whose graph reads resolve to Neo4j.
+
+    Reconciliation diffs Postgres against Neo4j, so it is only meaningful for
+    an organization that actually *reads* Neo4j.
+    `graph_store.resolve_graph_store_backend` applies both gates -- the
+    organization's own `graph_store_organization_setting` row and the
+    operator's process-wide `lineage_neo4j_read_enabled` flag (INV-9) -- so a
+    Postgres-backed deployment resolves to an empty set here, opens no driver,
+    and stops logging a Neo4j outage it does not depend on. Switching an
+    organization to `neo4j` brings it back into the sweep on its next pass,
+    with no redeploy.
+
+    Kept module-level (rather than inlined into the pass) for the same reason
+    `reconcile_and_alert_datasource` is: it is the seam the pass's tests
+    monkeypatch to drive backend selection without a live Postgres.
+    """
+    async with session_factory() as session:
+        return {
+            organization_id
+            for organization_id in set(organization_ids)
+            if await resolve_graph_store_backend(session, organization_id, settings) == "neo4j"
+        }
+
+
 async def run_graph_reconciliation_pass(
     settings: Settings,
     *,
@@ -510,6 +538,15 @@ async def run_graph_reconciliation_pass(
         for ds_id, org_id in candidates
         if graph_reconciliation_due(last_run_at.get(ds_id), effective_now, interval_minutes)
     ]
+    if not due:
+        return 0
+
+    # Only organizations that read Neo4j are worth diffing against it. Without
+    # this the sweep opened a driver on every pass whatever the configured
+    # backend, so a Postgres-only deployment logged a connection failure per
+    # datasource per interval -- noise that looked like a real outage.
+    neo4j_organizations = await neo4j_read_organizations({org_id for _, org_id in due}, settings)
+    due = [(ds_id, org_id) for ds_id, org_id in due if org_id in neo4j_organizations]
     if not due:
         return 0
 

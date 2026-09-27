@@ -91,8 +91,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
-from aida.models import AgentContract, AgentRun, AiAsset, AiAssetVersion
+from aida.models import AgentContract, AgentRun, AiAsset, AiAssetVersion, AuditEvent
 from aida.schemas import ApiModel
+from aida.task_agent_registry import task_agent_for_principal
 from aida.tool_first_rate import DEFAULT_WINDOW_DAYS, compute_tool_first_rate
 
 #: Steward-facing recent-results window default -- a roster entry is a
@@ -138,7 +139,9 @@ _REVIEWER_AUTO_APPLY_EVIDENCE = (
     "with abstention when a proposal carries none; a re-derivation of that "
     "evidence at decision time rather than at pre-review time; maker != "
     "checker; a 5%-floor audit sample of every approval; and a per-"
-    "organization suspension re-read before each decision."
+    "organization suspension re-read before each decision, which stops each "
+    "concurrent worker within one further item and refuses to run at all at "
+    "an isolation level where that re-read could not see the suspension."
 )
 
 #: Scope of the run evidence attached to a roster entry.
@@ -237,7 +240,9 @@ class AgentRunOutcomeRead(ApiModel):
     row's exit condition.
     """
 
-    run_id: UUID
+    #: `None` for a refused task-agent run (ADR-0029): it never started, so it
+    #: has no run of its own, and the row carries why it was stopped instead.
+    run_id: UUID | None
     status: str
     strategy: str | None
     confidence: float | None
@@ -481,6 +486,98 @@ async def _contract_principals(
     return {version_id: principal for version_id, principal in rows}
 
 
+def _task_agent_note(run_action: str) -> str:
+    """ADR-0029: a task agent runs, but writes no `AgentRun`. Its recent results
+    come from the audit row each run leaves, completed or refused, and the
+    method figures, which describe planned runs, stay empty by construction --
+    not because it did nothing. Saying so is the AR-07 rule applied the other
+    way: a number that looks like evidence of inactivity must not be left to
+    read as one."""
+    return (
+        "A task agent (ADR-0029). It writes no AgentRun rows: each run is a "
+        f"{run_action} audit event, listed here as a recent result -- a refused "
+        "one with the reason it was stopped -- and each proposal a ledger task. "
+        "Its method is deterministic, so the strategy and tool-first figures do "
+        "not apply."
+    )
+
+
+async def _task_agent_recent_results(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    ai_asset_version_id: UUID,
+    run_action: str,
+    method: str,
+    window_days: int,
+    now: datetime,
+    limit: int,
+) -> tuple[list[AgentRunOutcomeRead], int]:
+    """A task agent's runs, completed and refused, from the audit row each one
+    leaves.
+
+    Scoped the AR-07 way: the row's resource is this version, and nothing is
+    inferred from a name. A refused run never started, so it has no run id. It
+    is listed with the reason its refusal recorded -- the kill switch, an
+    autonomy tier withdrawn, a version no longer approved -- which is what a
+    supervisor looking at an agent that is not working needs to see. (A full
+    review backlog is not a refusal: it stops a run, which still completes.)
+    Only a
+    refusal after authority resolved names a version, so one refused before
+    that, with no approved contract at all, belongs to no roster entry.
+    """
+    since = now - timedelta(days=window_days)
+    filters = (
+        AuditEvent.organization_id == organization_id,
+        AuditEvent.action == run_action,
+        AuditEvent.resource_type == "agent_contract",
+        AuditEvent.resource_id == str(ai_asset_version_id),
+        AuditEvent.outcome.in_(("SUCCESS", "DENIED")),
+        AuditEvent.occurred_at >= since,
+    )
+    total = await session.scalar(select(func.count()).select_from(AuditEvent).where(*filters))
+    events = (
+        await session.scalars(
+            select(AuditEvent)
+            .where(*filters)
+            .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+            .limit(limit)
+        )
+    ).all()
+    results: list[AgentRunOutcomeRead] = []
+    for event in events:
+        details = event.details or {}
+        if event.outcome == "DENIED":
+            results.append(
+                AgentRunOutcomeRead(
+                    run_id=None,
+                    status="REFUSED",
+                    strategy=None,
+                    confidence=None,
+                    generation_source=method,
+                    created_at=event.occurred_at,
+                    failure_reason=str(details.get("reason") or "unspecified"),
+                )
+            )
+            continue
+        try:
+            run_id = UUID(str(details.get("run_id")))
+        except ValueError:
+            continue
+        results.append(
+            AgentRunOutcomeRead(
+                run_id=run_id,
+                status="COMPLETED",
+                strategy=None,
+                confidence=None,
+                generation_source=method,
+                created_at=event.occurred_at,
+                failure_reason=None,
+            )
+        )
+    return results, int(total or 0)
+
+
 async def compose_agent_roster(
     session: AsyncSession,
     *,
@@ -565,14 +662,30 @@ async def compose_agent_roster(
             now=moment,
             sample_limit=method_sample_limit,
         )
-        recent_results, recent_results_total = await _recent_results(
-            session,
-            organization_id=organization_id,
-            ai_asset_version_id=version.id,
-            window_days=window_days,
-            now=moment,
-            limit=recent_results_limit,
-        )
+        task_agent = task_agent_for_principal(resolved_settings, principals.get(version.id))
+        if task_agent is not None:
+            method = method.model_copy(
+                update={"note": _task_agent_note(task_agent.spec.run_action)}
+            )
+            recent_results, recent_results_total = await _task_agent_recent_results(
+                session,
+                organization_id=organization_id,
+                ai_asset_version_id=version.id,
+                run_action=task_agent.spec.run_action,
+                method=task_agent.spec.method,
+                window_days=window_days,
+                now=moment,
+                limit=recent_results_limit,
+            )
+        else:
+            recent_results, recent_results_total = await _recent_results(
+                session,
+                organization_id=organization_id,
+                ai_asset_version_id=version.id,
+                window_days=window_days,
+                now=moment,
+                limit=recent_results_limit,
+            )
         agents.append(
             AgentRosterEntryRead(
                 purpose=_purpose_read(asset, version),

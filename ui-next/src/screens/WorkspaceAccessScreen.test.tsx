@@ -9,10 +9,9 @@ import type {
   SourceBindingDecision,
   SourceBindingRead,
   WorkspaceMembershipCreate,
-  WorkspaceMembershipRead,
   WorkspaceRead,
 } from "../lib/types";
-import type { PageOf } from "../lib/ui-types";
+import type { PageOf, WorkspaceMembershipRead } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
 
 /* ---------------------------------------------------------------------------
@@ -22,7 +21,7 @@ import { ApiError } from "../lib/api";
    `POST /v1/bi-connections/{id}/artifact-imports` (`bi_api.py`). API boundary
    mocked, matching `AdministrationScreen.test.tsx`'s established pattern --
    real payload shapes, asserting exact endpoint args, not superficial
-   snapshots. `fetchOrgWorkspaces`/`fetchOrgProjects`/`fetchOrgDatasources`/
+   snapshots. `fetchOrgWorkspaces`/`fetchOrgProjects`/`listOrgDatasources`/
    `fetchWorkspaceSourceBindings` are reused, already-merged reads; only the
    six functions this screen adds are asserted against call args below.
 --------------------------------------------------------------------------- */
@@ -31,7 +30,7 @@ const ORG = "00000000-0000-0000-0000-000000000001";
 
 const fetchOrgWorkspaces = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<WorkspaceRead>>>();
 const fetchOrgProjects = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<ProjectRead>>>();
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchWorkspaceSourceBindings = vi.fn<(workspaceId: string, signal?: AbortSignal) => Promise<PageOf<SourceBindingRead>>>();
 const fetchWorkspaceMembers = vi.fn<(workspaceId: string, signal?: AbortSignal) => Promise<PageOf<WorkspaceMembershipRead>>>();
 const addWorkspaceMember =
@@ -51,7 +50,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     ...actual,
     fetchOrgWorkspaces: (organizationId: string, signal?: AbortSignal) => fetchOrgWorkspaces(organizationId, signal),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchWorkspaceSourceBindings: (workspaceId: string, signal?: AbortSignal) =>
       fetchWorkspaceSourceBindings(workspaceId, signal),
     fetchWorkspaceMembers: (workspaceId: string, signal?: AbortSignal) => fetchWorkspaceMembers(workspaceId, signal),
@@ -69,7 +68,7 @@ vi.mock("../lib/api", async (importOriginal) => {
 });
 
 const WORKSPACE: WorkspaceRead = {
-  id: "ws_governed_analytics", organization_id: ORG, isolation_boundary_id: null,
+  id: "ws_governed_analytics", organization_id: ORG,
   name: "Governed analytics", slug: "governed-analytics", purpose: "Curated analysis",
   status: "ACTIVE", monthly_cost_ceiling: null,
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
@@ -112,7 +111,7 @@ const BI_CONNECTION: BiConnectionRead = {
 function mockBaseSummary() {
   fetchOrgWorkspaces.mockResolvedValue({ items: [WORKSPACE], limit: 200, offset: 0, total: 1 });
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchWorkspaceMembers.mockResolvedValue({ items: [MEMBER], limit: 1, offset: 0, total: 1 });
   fetchWorkspaceSourceBindings.mockResolvedValue({ items: [PENDING_BINDING], limit: 1, offset: 0, total: 1 });
   fetchProjectBiConnections.mockResolvedValue({ items: [BI_CONNECTION], limit: 100, offset: 0, total: 1 });
@@ -126,7 +125,7 @@ async function loadScreen() {
 beforeEach(() => {
   fetchOrgWorkspaces.mockReset();
   fetchOrgProjects.mockReset();
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchWorkspaceSourceBindings.mockReset();
   fetchWorkspaceMembers.mockReset();
   addWorkspaceMember.mockReset();
@@ -155,15 +154,16 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
 
   it("submits Add member with the exact WorkspaceMembershipCreate payload", async () => {
     mockBaseSummary();
+    // R11-AUD02: the live route answers with a pending proposal, not a grant.
     const created: WorkspaceMembershipRead = {
-      ...MEMBER, id: "member_new", principal_id: "jordan.reyes", role: "steward",
+      ...MEMBER, id: "member_new", principal_id: "jordan.reyes", role: "steward", status: "PENDING_APPROVAL",
     };
     addWorkspaceMember.mockResolvedValue(created);
     const WorkspaceAccessScreen = await loadScreen();
     render(<WorkspaceAccessScreen />);
     await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
 
-    const form = screen.getByRole("form", { name: "Add workspace member" });
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
     fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "jordan.reyes" } });
     fireEvent.change(within(form).getByLabelText("Role"), { target: { value: "steward" } });
     fireEvent.submit(form);
@@ -175,7 +175,88 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
         undefined,
       ),
     );
-    expect(await screen.findByText(/Added "jordan.reyes"/)).toBeInTheDocument();
+    // Honest about the state: proposed, on the Review queue, awaiting someone other than the proposer.
+    const proposed = await screen.findByText(/Proposed "jordan.reyes" as steward/);
+    expect(proposed).toHaveTextContent("It is on the Review queue now");
+    expect(proposed).toHaveTextContent("someone other than you has to approve it before they have any access");
+    expect(screen.queryByText(/Added "jordan.reyes"/)).not.toBeInTheDocument();
+    // The new row is listed as pending, in the same table as the member who already has access.
+    const pendingRow = screen.getByText("jordan.reyes", { selector: "td" }).closest("tr");
+    expect(pendingRow).not.toBeNull();
+    expect(within(pendingRow as HTMLElement).getByText("PENDING_APPROVAL")).toBeInTheDocument();
+    const activeRow = screen.getByText("priya.iyer", { selector: "td" }).closest("tr");
+    expect(within(activeRow as HTMLElement).getByText("ACTIVE")).toBeInTheDocument();
+  });
+
+  it("explains, before anything is submitted, that a member has no access until a second person approves", async () => {
+    mockBaseSummary();
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    expect(form).toHaveTextContent("Adding a member sends a proposal to the Review queue");
+    expect(form).toHaveTextContent("no access until someone other than you approves it there");
+  });
+
+  it("still reports a plain add when a backend answers the membership as already ACTIVE", async () => {
+    // A backend from before R11-AUD02 grants in one step; the message must not claim a review
+    // that does not exist.
+    mockBaseSummary();
+    addWorkspaceMember.mockResolvedValue({
+      ...MEMBER, id: "member_old", principal_id: "morgan.lee", role: "analyst", status: "ACTIVE",
+    });
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "morgan.lee" } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByText(/Added "morgan.lee" as analyst/)).toBeInTheDocument();
+    expect(screen.queryByText(/Review queue now/)).not.toBeInTheDocument();
+  });
+
+  it("surfaces the 409 when the principal is already a member or already proposed", async () => {
+    mockBaseSummary();
+    addWorkspaceMember.mockRejectedValue(new ApiError(409, "principal already has a membership awaiting approval"));
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "jordan.reyes" } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByText("principal already has a membership awaiting approval")).toBeInTheDocument();
+    expect(screen.queryByText(/Proposed "jordan.reyes"/)).not.toBeInTheDocument();
+  });
+
+  it("offers the auditor role, which exports audit records without reading data (R11-B9)", async () => {
+    mockBaseSummary();
+    const created: WorkspaceMembershipRead = {
+      ...MEMBER, id: "member_auditor", principal_id: "casey.lin", role: "auditor",
+    };
+    addWorkspaceMember.mockResolvedValue(created);
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "casey.lin" } });
+    // A select ignores a value it has no option for, so this submits "auditor"
+    // only if the form actually offers it.
+    fireEvent.change(within(form).getByLabelText("Role"), { target: { value: "auditor" } });
+    fireEvent.submit(form);
+
+    await waitFor(() =>
+      expect(addWorkspaceMember).toHaveBeenCalledWith(
+        "ws_governed_analytics",
+        { principal_id: "casey.lin", principal_kind: "HUMAN", role: "auditor", expires_at: null },
+        undefined,
+      ),
+    );
   });
 
   it("approves a pending binding with a rationale, calling the exact SourceBindingDecision payload", async () => {
@@ -224,7 +305,7 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
     render(<WorkspaceAccessScreen />);
     await waitFor(() => expect(fetchProjectBiConnections).toHaveBeenCalled());
 
-    const form = screen.getByRole("form", { name: "Register BI connection" });
+    const form = await screen.findByRole("form", { name: "Register BI connection" });
     fireEvent.change(within(form).getByLabelText("Project source"), { target: { value: "ds_snowflake_prod" } });
     fireEvent.change(within(form).getByPlaceholderText("finance-tableau-prod"), { target: { value: "retail-tableau" } });
     fireEvent.change(within(form).getByPlaceholderText("Finance Tableau (Production)"), {
@@ -262,7 +343,9 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
     await waitFor(() => expect(screen.getByText("Finance Tableau (Production)")).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Import artifact" }));
-    const importForm = screen.getByRole("form", { name: "Import BI artifact for connection bi_conn_1" });
+    const importForm = await screen.findByRole("form", {
+      name: "Import BI artifact for connection bi_conn_1",
+    });
 
     fireEvent.change(within(importForm).getByLabelText("Artifact JSON"), { target: { value: "{not json" } });
     fireEvent.submit(importForm);

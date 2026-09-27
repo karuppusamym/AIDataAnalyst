@@ -1,0 +1,7 @@
+/* The table results under the Ctrl+K palette's page list (R11-AUD08). Rows reuse
+   the palette's own `.palette__item` (`App.css`); only the group chrome is new. */
+
+.palette__group{display:flex;flex-direction:column;gap:2px;margin-top:8px;padding-top:6px;border-top:1px solid var(--line-soft)}
+.palette__grouphead{padding:4px 8px;font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.palette__note{padding:8px;font-size:12.5px;color:var(--ink-3)}
+.palette__hint{margin:8px 0 0;padding:8px;font-size:12px;color:var(--ink-3)}

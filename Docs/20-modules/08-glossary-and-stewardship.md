@@ -26,6 +26,8 @@ S1, S2 (conflicts), S3 (bulk ownership), S5 (coverage), R1, R3, and B2 (is this 
 - Deterministic, evidence-scored table description drafting, reviewed through the common governance queue.
 - A responsive Stewardship Control Center integrated with the Business Meaning and asset-intelligence workbenches.
 
+> **Implementation status (2026-09-21).** The responsibilities above are API and service behaviour; the UI covers most of them. In ui-next, Business meaning creates, submits and links glossary terms (`ui-next/src/screens/BusinessMeaningScreen.tsx`); the Documentation workspace generates, lists and submits description drafts; the Stewardship workspace (`#/steward/stewardship`) runs the catalog bulk actions (tag, classify, own, certify), the unowned-asset backlog and, since R11-AUD08, a Coverage view; Glossary review (`#/steward/glossary-review`) lists glossary conflicts and proposes a resolution, and generates and submits term-link proposals; and Ownership (`#/steward/ownership`) lists assignments, creates and applies ownership rules, and files a leaver reassignment. A write that needs a second person (a conflict resolution, a link proposal, a rule application, a leaver reassignment) opens a review and changes nothing until a different reviewer approves it; approving a conflict resolution marks the conflict resolved and edits neither term. Still without a ui-next caller: the route that creates a reviewed bulk operation directly (`POST .../stewardship/bulk-operations`; the Ownership screen only lists the operations), glossary categories (`GET` / `POST .../glossary-categories`), editing or retiring an ownership rule (no route exists), and coverage at domain or line-of-business scope. These screens were tested with mocked transport and in the demo build; the dev database holds no rows for them, so none has been run against the running API with data. No screen is named Stewardship Control Center; the Stewardship workspace is the nearest. Tracker row R11-C12 defers the semantic conflict UX.
+
 ## 4. Not responsibilities
 
 | Not this module | Where it lives |
@@ -91,19 +93,22 @@ All bulk operations are capped at 500 subjects and require independent review. R
 
 The API computes a simple percentage for each dimension and their arithmetic mean. It supports organization-wide, data-source, domain, and line-of-business scopes, validates every scope against the tenant, can persist time-stamped snapshots, and returns up to 500 unowned table IDs for action. Field-completion percentage is deliberately excluded because it measures typing rather than trust.
 
+> **Implementation status (2026-09-21).** The coverage scorecard has a screen: the Stewardship workspace's Coverage view (`ui-next/src/screens/StewardshipCoverage.tsx`) shows the API's six dimensions and overall score for the organization or one datasource, with a snapshot history table and, from two snapshots, a trend line. Taking a snapshot needs DataSteward, MetadataAdmin, PlatformAdmin or SemanticAdmin and a confirmation (a snapshot is stored and audited and cannot be removed there). Domain and line-of-business scopes and the raw unowned-table list are not surfaced. The Home screen's documented and trusted percentages are computed from a sample of catalog rows, not from this score.
+
 ## 9. Public interface
 
 The `/v1/organizations/{organization_id}` API includes:
 
-- `/glossary/categories`, `/glossary/terms`, term versions, reviewed deprecation, and asset links.
+- `/glossary-categories`, `/glossary-terms`, term versions, reviewed deprecation, and asset links.
 - `/ownership-rules`, rule application, and `/ownership-assignments`.
 - `/stewardship/bulk-operations` for reviewed assign/link/certify/deprecate changes.
-- `/glossary/conflicts`, conflict detection, and reviewed resolution.
-- `/glossary/link-proposals` for bounded exact-label inference and review.
+- `/glossary-conflicts`, conflict detection, and reviewed resolution.
+- `/glossary-link-proposals` for bounded exact-label inference and review.
 - `/stewardship/coverage`, snapshots, and snapshot history.
-- `/asset-description-drafts/generate`, the confidence-ordered `/asset-description-drafts` list, and `/asset-description-drafts/{id}/submit` for evidence-scored description drafting.
+- `/stewardship/leaver-reassignment` for reviewed reassignment of a leaving owner's assignments.
+- `/asset-description-drafts/generate`, the confidence-ordered `/asset-description-drafts` list, and `/v1/asset-description-drafts/{draft_id}/submit` for evidence-scored description drafting.
 
-The common `/v1/governance-reviews/{review_id}/decision` endpoint applies or rejects every governed change.
+The common `/v1/governance/reviews/{review_id}/decision` endpoint applies or rejects every governed change.
 
 ## 10. Events
 
@@ -117,6 +122,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 - Conflict auto-detection is bounded to 5,000 active terms and 100 conflicts per request.
 - Coverage and operation subjects are organization checked; cross-tenant IDs fail closed.
 - Makers cannot approve their own proposed changes.
+- The steward agent (ADR-0029) proposes only as its own workload identity, only under an approved agent version's contract, and only T0/T1 object types. It is refused when its kill switch is engaged, and a run that loses that authority mid-way is rolled back whole. It never decides a review.
 - Description drafting reads schema, lineage, dbt, annotation, and glossary-link metadata only — no source row values, and no external model or LLM call. A draft below the minimum evidence score can never be submitted for review, and every submitted draft (regardless of score) still requires an independent `decide_governance_review` approval before its text is published.
 
 ## 12. Current state and remaining work
@@ -125,12 +131,13 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 |---|---|---|
 | Term lifecycle | Implemented vertical slice | Category edit/archive; scheduled lifecycle policy |
 | Term-asset linkage | Manual, reviewed bulk, and reviewed exact inferred links | Fuzzy/model-assisted ranking and bank corpus calibration |
-| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk | Inheritance and dedicated leaver/vacate workflow |
+| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk, reviewed leaver reassignment (GL-7; the Ownership screen covers rules and leavers since R11-AUD08) | Inheritance; a screen that creates reviewed bulk operations directly |
 | Conflicts | Manual and synonym detection with reviewed retained resolution | Definition-source precedence learning and richer impact preview |
 | Certification | Reviewed bulk table certification with expiry | Automatic expiry state/event worker; additional asset types |
 | Coverage | Six dimensions, four scopes, snapshots/history, unowned IDs | Scheduled trend computation, routing/escalation, bank-scale benchmarks |
 | Description drafting | Deterministic evidence-scored drafts, minimum-evidence submission gate, reviewed publish/reject with retained negative knowledge | Column/table-type-specific templates, batch scan trigger, bank corpus calibration of the scoring weights |
-| User experience | Responsive Stewardship Control Center and asset accountability actions | Interactive WCAG/usability certification and very-large-selection patterns |
+| Steward agent (ADR-0029) | A contracted `agent:steward` identity works the AT-5 worklist in its priority order and proposes GL-9 table descriptions, column descriptions and GL-8 links as its own review requests; tier-gated (T0 previews), killable mid-run, bounded, ledgered, with a per-type acceptance rate; the ingest side-car drafts under the same contract where the agent is registered; scheduled runs available and off by default | Measurement on a real estate |
+| User experience | Stewardship workspace and asset accountability actions (see the status note in section 3 for what has no screen) | Interactive WCAG/usability certification and very-large-selection patterns |
 
 ## 13. Open work
 
@@ -142,8 +149,9 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 | GL-4 | Scoped coverage scoring, dashboard, and history | DONE | P0 |
 | GL-5 | Reviewed bulk table certification with expiry | DONE | P1 |
 | GL-6 | Unowned-asset backlog with routing | DONE - bounded backlog, automated owner routing, and two-tier escalation | P1 |
-| GL-7 | Dedicated leaver reassignment and ownership vacate workflow | TODO | P2 |
+| GL-7 | Dedicated leaver reassignment and ownership vacate workflow | DONE on the API (2026-08-31); the Ownership screen files the request (R11-AUD08, 2026-09-21) | P2 |
 | GL-8 | Review-confirmed term-link inference from approved annotations | DONE | P1 |
 | GL-9 | Evidence-scored table description drafting, routed through review | DONE | P1 |
+| AG-12 | Steward agent: GL-8/GL-9 proposals under a contracted agent identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | DONE - on demand, or scheduled once its interval is set (off by default) | P1 |
 
-Atlan's "Context Agents" auto-draft table/column descriptions and auto-*apply* high-confidence output with no human review. GL-9 takes the underlying idea — draft from real evidence, score the draft — and rejects the no-review auto-apply, which is wrong for a governed/bank platform: `AssetDescriptionDraft` composes a description deterministically from evidence already in the catalog (column and constraint counts, `OpenLineageTableEdge` lineage, a matched `DbtResource` description, an approved `MetadataBusinessAnnotation`, and bound `AssetTermLink` glossary terms — no external model call), scores it on four explainable dimensions (accuracy, clarity, style, completeness), and routes it through the same `governance_review` queue as every other governed object type. The score sets review priority — `GET .../asset-description-drafts` sorts by `overall_score` descending — and gates whether a draft may even be submitted (`MINIMUM_EVIDENCE_FOR_REVIEW`); it never skips or substitutes for `decide_governance_review`, and self-approval is denied by that endpoint's shared maker-checker guard exactly as for every other object type. Approval publishes the drafted text as a new `AssetDocumentationVersion` (superseding the prior approved version); rejection retains the draft as `REJECTED` — negative knowledge, per §6 — so an identical low-value draft is not silently regenerated on the next run.
+Atlan's "Context Agents" auto-draft table/column descriptions and auto-*apply* high-confidence output with no human review. GL-9 takes the underlying idea — draft from real evidence, score the draft — and rejects the no-review auto-apply, which is wrong for a governed/bank platform: `AssetDescriptionDraft` composes a description deterministically from evidence already in the catalog (column and constraint counts, same-source `OpenLineageTableEdge` lineage and, since 2026-09-11, approved view, procedure and routine lineage (ADR-0026) — never an edge still waiting for review — a matched `DbtResource` description, an approved `MetadataBusinessAnnotation`, and bound `AssetTermLink` glossary terms — no external model call), scores it on four explainable dimensions (accuracy, clarity, style, completeness), and routes it through the same `governance_review` queue as every other governed object type. The score sets review priority — `GET .../asset-description-drafts` sorts by `overall_score` descending — and gates whether a draft may even be submitted (`MINIMUM_EVIDENCE_FOR_REVIEW`); it never skips or substitutes for `decide_governance_review`, and self-approval is denied by that endpoint's shared maker-checker guard exactly as for every other object type. Approval publishes the drafted text as a new `AssetDocumentationVersion` (superseding the prior approved version); rejection retains the draft as `REJECTED` — negative knowledge, per §6 — so an identical low-value draft is not silently regenerated on the next run.

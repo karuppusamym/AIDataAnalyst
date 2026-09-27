@@ -1,6 +1,3 @@
-import hashlib
-import hmac
-import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -16,8 +13,8 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.edition_entitlements import evaluate_entitlement
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit, record_outbox
-from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import (
     AgentRun,
     DataSource,
@@ -37,9 +34,6 @@ from aida.multi_table_blueprint import (
     build_multi_table_blueprint,
     resolve_blueprint_tables_and_edges,
 )
-from aida.quality_coupling import check_tool_gate, fetch_open_incidents, resolve_table_ids
-from aida.query_execution_view import query_execution_response
-from aida.query_gateway import QueryExecutionGateway, QueryRejected
 from aida.schemas import (
     ApiModel,
     GovernanceReviewRead,
@@ -60,15 +54,19 @@ from aida.schemas import (
     ToolParameterDefinition,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
-from aida.sql_guard import SqlGuard
 from aida.tool_certification import (
     CERTIFICATION_SUITE_VERSION,
     certification_is_active,
     corpus_fingerprint,
     run_certification_corpus,
 )
-from aida.tool_impact import DeprecationImpact, compute_deprecation_impact
-from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
+from aida.tool_drafts import ToolDraftRefused, stage_tool_version_draft
+
+# R11-GQL01: the execution path itself lives in `aida.tool_execution`, so the GraphQL facade
+# can reach it without importing this router. Re-exported for the importers this module had;
+# `__all__` says so explicitly, because implicit re-export is off.
+from aida.tool_execution import _enforce_agent_contract, execute_tool_version
+from aida.tool_impact import DeprecationImpact, compute_deprecation_impact, impact_summary
 from aida.tool_usage import DEFAULT_USAGE_LOOKBACK_DAYS
 from aida.view_tool_blueprint import (
     ViewNotEligibleError,
@@ -76,6 +74,8 @@ from aida.view_tool_blueprint import (
     build_view_tool_blueprint,
     resolve_view_tool_source,
 )
+
+__all__ = ["_enforce_agent_contract", "execute_tool_version"]
 
 router = APIRouter(prefix="/v1", tags=["governed-tools"])
 
@@ -120,6 +120,8 @@ def _tool_read(
         approved_at=version.approved_at,
         created_at=version.created_at,
         updated_at=version.updated_at,
+        source_routine_id=version.source_routine_id,
+        source_view_table_id=version.source_view_table_id,
         usage_count=usage_count,
     )
 
@@ -168,19 +170,8 @@ def _impact_read(
 
 
 def _impact_summary(impact: DeprecationImpact) -> dict[str, int | bool]:
-    """Compact, audit/outbox-safe summary of a `DeprecationImpact` -- counts
-    only, no node/table identifiers, so the immutable evidence trail stays
-    proportionate to an audit detail payload rather than duplicating the
-    full preview response."""
-    return {
-        "downstream_node_count": len(impact.downstream_nodes),
-        "downstream_truncated": impact.downstream_truncated,
-        "dependent_tool_version_count": len(impact.dependent_tool_versions),
-        "dependent_context_product_count": len(impact.dependent_context_products),
-        "active_consumer_count": impact.active_consumer_count,
-        "recent_execution_count": impact.recent_execution_count,
-        "total_blast_radius": impact.total_blast_radius,
-    }
+    """See `aida.tool_impact.impact_summary`."""
+    return impact_summary(impact)
 
 
 async def _persist_tool_version_draft(
@@ -191,6 +182,8 @@ async def _persist_tool_version_draft(
     context: SecurityContext,
     session: AsyncSession,
     settings: Settings,
+    source_routine: MetadataRoutine | None = None,
+    source_view: MetadataViewDefinition | None = None,
 ) -> GovernedToolVersionRead:
     """The shared draft-creation tail: validate `body.sql_template` the same
     way regardless of whether it was hand-authored (`create_tool_version`)
@@ -198,110 +191,24 @@ async def _persist_tool_version_draft(
     `GovernedToolVersion` in ``DRAFT`` status. Publication is unaffected by
     which path created the draft -- both go through the same
     `submit_tool_for_review` maker-checker flow afterwards.
-    """
-    definitions = body.parameters
-    declared = {definition.name for definition in definitions}
-    try:
-        placeholders = template_placeholders(body.sql_template, dialect=datasource.dialect)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail="tool SQL template cannot be parsed") from exc
-    if placeholders != declared:
-        raise HTTPException(
-            status_code=422,
-            detail="SQL placeholders must exactly match parameter definitions",
-        )
-    guard = SqlGuard(
-        default_row_limit=settings.default_query_row_limit,
-        hard_row_limit=settings.hard_query_row_limit,
-    )
-    validation = guard.validate(body.sql_template, dialect=datasource.dialect)
-    if not validation.valid or not validation.normalized_sql:
-        raise HTTPException(
-            status_code=422,
-            detail=f"invalid governed tool SQL: {', '.join(validation.violations)}",
-        )
-    gateway = QueryExecutionGateway(settings)
-    allowed_tables = await gateway.allowed_tables(session, datasource)
-    unauthorized = sorted(
-        table for table in validation.referenced_tables if table.lower() not in allowed_tables
-    )
-    if unauthorized:
-        raise HTTPException(
-            status_code=422,
-            detail=f"unknown or unauthorized tool tables: {', '.join(unauthorized)}",
-        )
 
-    tool = await session.scalar(
-        select(GovernedTool).where(
-            GovernedTool.project_id == project.id,
-            GovernedTool.slug == body.slug,
+    R11-FP14: the validation and the staged rows are
+    `tool_drafts.stage_tool_version_draft`, shared with the tool agent; this
+    route keeps only the HTTP half -- the 422 for a refusal and the commit.
+    """
+    try:
+        tool, version = await stage_tool_version_draft(
+            session,
+            project,
+            datasource,
+            body,
+            audit_context=context,
+            settings=settings,
+            source_routine=source_routine,
+            source_view=source_view,
         )
-    )
-    if tool is None:
-        tool = GovernedTool(
-            organization_id=project.organization_id,
-            project_id=project.id,
-            slug=body.slug,
-        )
-        session.add(tool)
-        await session.flush()
-    latest = await session.scalar(
-        select(func.max(GovernedToolVersion.version)).where(GovernedToolVersion.tool_id == tool.id)
-    )
-    fingerprint_payload = {
-        "name": body.name,
-        "description": body.description,
-        "datasource_id": str(body.datasource_id),
-        "semantic_model_version_id": (
-            str(body.semantic_model_version_id) if body.semantic_model_version_id else None
-        ),
-        "sql_template": validation.normalized_sql,
-        "referenced_tables": sorted(validation.referenced_tables),
-        "parameters": [definition.model_dump(mode="json") for definition in definitions],
-        "allowed_roles": sorted(body.allowed_roles),
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    version = GovernedToolVersion(
-        organization_id=project.organization_id,
-        tool_id=tool.id,
-        version=(latest or 0) + 1,
-        name=body.name,
-        description=body.description,
-        datasource_id=datasource.id,
-        semantic_model_version_id=body.semantic_model_version_id,
-        sql_template=validation.normalized_sql,
-        referenced_tables=sorted(validation.referenced_tables),
-        parameter_schema=[definition.model_dump(mode="json") for definition in definitions],
-        allowed_roles=sorted(body.allowed_roles),
-        fingerprint=fingerprint,
-        created_by=context.principal_id,
-    )
-    session.add(version)
-    await session.flush()
-    record_audit(
-        session,
-        replace(context, organization_id=project.organization_id),
-        action="tool.version.create",
-        resource_type="governed_tool_version",
-        resource_id=str(version.id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
-        details={"tool_slug": tool.slug, "version": version.version},
-    )
-    record_outbox(
-        session,
-        organization_id=project.organization_id,
-        aggregate_type="governed_tool_version",
-        aggregate_id=str(version.id),
-        event_type="tool.version.draft_created.v1",
-        payload={
-            "tool_version_id": str(version.id),
-            "tool_id": str(tool.id),
-            "project_id": str(project.id),
-        },
-    )
+    except ToolDraftRefused as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -576,6 +483,13 @@ async def create_view_tool_blueprint(
     except ViewToolBlueprintError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # R11-FP16: bind the draft to the view definition its SQL was generated from.
+    view_definition = await session.scalar(
+        select(MetadataViewDefinition).where(
+            MetadataViewDefinition.table_id == view_source.table_id
+        )
+    )
+
     create_body = GovernedToolVersionCreate(
         slug=body.slug,
         name=body.name,
@@ -587,7 +501,13 @@ async def create_view_tool_blueprint(
         allowed_roles=body.allowed_roles,
     )
     return await _persist_tool_version_draft(
-        project, datasource, create_body, context=context, session=session, settings=settings
+        project,
+        datasource,
+        create_body,
+        context=context,
+        session=session,
+        settings=settings,
+        source_view=view_definition,
     )
 
 
@@ -964,169 +884,6 @@ async def execute_tool(
     settings: Settings = Depends(get_settings),
 ) -> ToolExecutionResponse:
     return await execute_tool_version(version_id, body, context, session, settings)
-
-
-async def execute_tool_version(
-    version_id: UUID,
-    body: ToolExecutionRequest,
-    context: SecurityContext,
-    session: AsyncSession,
-    settings: Settings,
-) -> ToolExecutionResponse:
-    """Shared governed execution path for HTTP callers and persisted tool plans."""
-    if context.roles.isdisjoint({"PlatformAdmin", "Analyst", "AgentDeveloper", "ToolConsumer"}):
-        raise HTTPException(status_code=403, detail="tool execution role is required")
-    version = await session.get(GovernedToolVersion, version_id)
-    if version is None:
-        raise HTTPException(status_code=404, detail="tool version not found")
-    enforce_organization(context, version.organization_id)
-    if version.status != "PUBLISHED":
-        raise HTTPException(status_code=409, detail="only a published tool can execute")
-    if "PlatformAdmin" not in context.roles and context.roles.isdisjoint(version.allowed_roles):
-        raise HTTPException(status_code=403, detail="tool role binding denied execution")
-    tool = await session.get(GovernedTool, version.tool_id)
-    datasource = await session.get(DataSource, version.datasource_id)
-    if tool is None or datasource is None:
-        raise HTTPException(status_code=409, detail="tool dependency is unavailable")
-    try:
-        ensure_datasource_enabled(datasource)
-    except RunAdmissionRejected as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    # TL-3: gate execution on open quality incidents against the tool's own
-    # declared dependencies (`version.referenced_tables`, authorised at
-    # tool-version creation time) -- resolved to this datasource's tables and
-    # checked before a single row of SQL is rendered or sent to the warehouse.
-    execution_context = replace(context, organization_id=version.organization_id)
-    dependency_table_ids = await resolve_table_ids(
-        session, datasource=datasource, table_names=version.referenced_tables
-    )
-    dependency_incidents = await fetch_open_incidents(
-        session, datasource=datasource, table_ids=list(dependency_table_ids.values())
-    )
-    quality_gate = check_tool_gate(
-        tool_id=str(tool.id),
-        dependency_asset_ids=[str(table_id) for table_id in dependency_table_ids.values()],
-        incidents=dependency_incidents,
-    )
-    if quality_gate.action == "BLOCK":
-        record_audit(
-            session,
-            execution_context,
-            action="tool.execute",
-            resource_type="governed_tool_version",
-            resource_id=str(version.id),
-            outcome="DENIED",
-            correlation_id=get_correlation_id(),
-            details={
-                "reason": "QUALITY_INCIDENT_BLOCK",
-                "message": quality_gate.message,
-                "affected_assets": quality_gate.affected_assets,
-            },
-        )
-        await session.commit()
-        raise HTTPException(status_code=409, detail=quality_gate.message)
-
-    try:
-        rendered = render_tool_sql(
-            version.sql_template,
-            dialect=datasource.dialect,
-            definitions=[
-                ToolParameterDefinition.model_validate(value) for value in version.parameter_schema
-            ],
-            values=body.parameters,
-        )
-    except ToolParameterError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    parameter_fingerprint = hmac.new(
-        settings.audit_hmac_key.encode("utf-8"),
-        json.dumps(
-            rendered.normalized_parameters,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    tool_execution = ToolExecution(
-        organization_id=version.organization_id,
-        tool_version_id=version.id,
-        principal_id=context.principal_id,
-        parameter_fingerprint=parameter_fingerprint,
-    )
-    session.add(tool_execution)
-    await session.flush()
-    semantic_version = (
-        f"semantic-model:{version.semantic_model_version_id}"
-        if version.semantic_model_version_id
-        else None
-    )
-    gateway = QueryExecutionGateway(settings)
-    try:
-        result = await gateway.execute(
-            session,
-            datasource=datasource,
-            context=execution_context,
-            correlation_id=get_correlation_id(),
-            sql=rendered.sql,
-            requested_limit=body.max_rows,
-            semantic_version=semantic_version,
-        )
-    except QueryRejected as exc:
-        tool_execution.status = "REJECTED"
-        tool_execution.query_execution_id = exc.execution_id
-        tool_execution.error_message = str(exc)[:1000]
-        await session.commit()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        tool_execution.status = "FAILED"
-        tool_execution.error_message = "tool query execution failed"
-        await session.commit()
-        raise HTTPException(status_code=502, detail="tool execution failed") from exc
-    tool_execution.status = "COMPLETED"
-    tool_execution.query_execution_id = result.execution.id
-    record_audit(
-        session,
-        execution_context,
-        action="tool.execute",
-        resource_type="tool_execution",
-        resource_id=str(tool_execution.id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
-        details={
-            "tool_version_id": str(version.id),
-            "query_execution_id": str(result.execution.id),
-            "quality_gate_action": quality_gate.action,
-        },
-    )
-    record_outbox(
-        session,
-        organization_id=version.organization_id,
-        aggregate_type="tool_execution",
-        aggregate_id=str(tool_execution.id),
-        event_type="tool.execution.completed.v1",
-        payload={
-            "tool_execution_id": str(tool_execution.id),
-            "tool_version_id": str(version.id),
-            "query_execution_id": str(result.execution.id),
-        },
-    )
-    await session.commit()
-    return ToolExecutionResponse(
-        tool_execution_id=tool_execution.id,
-        tool_version_id=version.id,
-        tool_slug=tool.slug,
-        tool_version=version.version,
-        execution=query_execution_response(result),
-        quality_gate=(
-            {
-                "action": quality_gate.action,
-                "affected_assets": quality_gate.affected_assets,
-                "message": quality_gate.message,
-            }
-            if quality_gate.action != "ALLOW"
-            else None
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------

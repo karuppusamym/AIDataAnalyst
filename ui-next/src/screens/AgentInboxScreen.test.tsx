@@ -97,12 +97,27 @@ describe("AgentInboxScreen (UX-21)", () => {
   });
 
   it("shows consumption against the cap, marked as an estimate", async () => {
-    // No provider adapter reports usage, so the number beside the cap is the
-    // gateway's own estimate. The UI must not present it as measured.
+    // With no charged window, the number beside the cap is the gateway's own
+    // estimate. The UI must not present it as billed.
     render(<AgentInboxScreen persona="STEWARD" />);
     await waitFor(() =>
       expect(screen.getByText(/≈43% of today's cap/)).toBeInTheDocument(),
     );
+  });
+
+  it("draws what today's window was charged against the cap, without the ≈", async () => {
+    // The window is what the cap is enforced against, reconciled to billed
+    // tokens where the provider reported them, so it replaces the estimate.
+    const inbox = makeFixtureAgentInbox(ORG, "STEWARD");
+    const [steward, ...others] = inbox.agents;
+    fetchAgentInbox.mockResolvedValue({
+      ...inbox,
+      agents: [{ ...steward!, budget: { ...steward!.budget, daily_tokens_charged: 250_000 } }, ...others],
+    });
+    render(<AgentInboxScreen persona="STEWARD" />);
+
+    await waitFor(() => expect(screen.getByText("50% of today's cap")).toBeInTheDocument());
+    expect(screen.queryByText(/≈43%/)).toBeNull();
   });
 
   it("distinguishes 'no model call today' from zero consumption", async () => {

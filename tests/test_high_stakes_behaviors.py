@@ -101,9 +101,13 @@ class DeprecationSession:
     def __init__(self, inventories: list[set[UUID]]) -> None:
         self.inventories = inventories
         self.statements: list[object] = []
+        self.added: list[object] = []
 
     async def scalars(self, _statement: object) -> set[UUID]:
         return self.inventories.pop(0)
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
 
     async def execute(self, statement: object) -> object:
         self.statements.append(statement)
@@ -123,6 +127,10 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
     # currently ACTIVE (the CT-4 rename-detection "just tombstoned" input) --
     # this synthetic scan's missing table, `missing_ids[1]`, is exactly that set.
     inventories.append({missing_ids[1]})
+    # R11-FP15: a 9th asks which tables the about-to-be-tombstoned ACTIVE columns belong to --
+    # a table that stays but loses a column changed shape.
+    reshaped_table = uuid4()
+    inventories.append({reshaped_table})
     session = DeprecationSession(inventories)
     datasource = DataSource(
         id=uuid4(),
@@ -156,6 +164,14 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
     )
 
     assert deprecated.total == 7
+    # ...and both are signalled in the same transaction as the updates.
+    assert {
+        (signal.subject_kind, signal.subject_id, signal.signal_type)  # type: ignore[attr-defined]
+        for signal in session.added
+    } == {
+        ("TABLE", missing_ids[1], "DEPRECATED"),
+        ("TABLE", reshaped_table, "STRUCTURE_CHANGED"),
+    }
     assert deprecated.deprecated_table_ids == {missing_ids[1]}
     assert len(session.statements) == 7
     targeted: dict[str, set[UUID]] = {}

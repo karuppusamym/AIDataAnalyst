@@ -28,7 +28,7 @@ describe("CrossLinks", () => {
 
     // The shell routes on the hash; every migrated screen reads its selection
     // through `useUrlState`, which reads `location.search`.
-    expect(location.hash).toBe("#/lineage");
+    expect(location.hash).toBe("#/analyst/lineage");
     const params = new URLSearchParams(location.search);
     expect(params.get("ds")).toBe("ds_1");
     expect(params.get("node")).toBe("t_1");
@@ -60,6 +60,36 @@ describe("CrossLinks", () => {
     expect(params.get("asset")).toBe("t_2");
     expect(params.get("incident")).toBeNull();
     expect(params.get("ds")).toBe("ds_old");
+  });
+
+  it("opens a merged-away screen on the screen that absorbed it, selection intact", () => {
+    /* R11-S13 (M1). `EvidencePane`'s "Impact" cross-link names
+       `unified-lineage`, which M1 merged into `lineage`. `links[].screen` is a
+       `string` on purpose -- this component is not a router -- so the compiler
+       cannot catch that, and the runtime check used to be `isScreenId`, which
+       answers "is this LIVE" and sent the click to Overview. This is that
+       link, verbatim. */
+    render(
+      <CrossLinks
+        links={[
+          {
+            screen: "unified-lineage",
+            label: "Impact",
+            params: { ds: "ds_1", node: "t_1" },
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Impact/ }));
+
+    expect(location.hash).toBe("#/analyst/lineage");
+    const params = new URLSearchParams(location.search);
+    // The view the retired route showed …
+    expect(params.get("view")).toBe("graph");
+    // … and the row the person was already looking at.
+    expect(params.get("ds")).toBe("ds_1");
+    expect(params.get("node")).toBe("t_1");
   });
 
   it("renders nothing at all when there is nothing to link to", () => {

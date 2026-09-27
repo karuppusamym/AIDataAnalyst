@@ -12,11 +12,35 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
+from aida.cost_metrics import observe_model_call, record_model_spend
 from aida.models import KillSwitchState
+from aida.outbound_clients import shared_http_client
 from aida.secrets import SecretResolutionError, SecretResolver
+from aida.usage_quotas import QuotaRefused, UsageDimension, consume_quota, settle_quota
 
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
-SUPPORTED_MODEL_PROVIDERS = frozenset({"OPENAI", "GOOGLE_GEMINI"})
+SUPPORTED_MODEL_PROVIDERS = frozenset(
+    {
+        "OPENAI",
+        "GOOGLE_GEMINI",
+        # R11-MP01: Anthropic's Messages API, and one OpenAI-compatible
+        # chat-completions adapter serving OpenRouter plus the two private types.
+        "ANTHROPIC",
+        "OPENROUTER",
+        "OPENAI_COMPATIBLE_PRIVATE",
+        "ON_PREM",
+        # R11-MP01, 2026-09-25: a bank's own Azure OpenAI resource.
+        "AZURE_OPENAI",
+    }
+)
+#: Provider types with no public default endpoint: a route of one of these types
+#: is callable only once `settings.model_endpoint_urls` maps its `endpoint_alias`
+#: to the bank's own URL. Falling back to some public URL would send the
+#: prompt somewhere the route's approval never named.
+PRIVATE_ENDPOINT_PROVIDERS = frozenset({"OPENAI_COMPATIBLE_PRIVATE", "ON_PREM", "AZURE_OPENAI"})
+#: Anthropic API version header. Pinned: the Messages API contract this adapter
+#: parses is the one this version defines.
+ANTHROPIC_API_VERSION = "2023-06-01"
 
 # Sentinel `route_key` for an organization-wide kill switch row in `KillSwitchState`
 # (MG-2), as opposed to a row scoped to one specific route_key.
@@ -40,9 +64,18 @@ class ModelGatewayError(RuntimeError):
     "provider throttled, try again" instead of "no model route configured".
     """
 
-    def __init__(self, message: str, *, provider_status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_status_code: int | None = None,
+        provider_error: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.provider_status_code = provider_status_code
+        # The provider's own reason ("model not found", "invalid schema"), cleaned
+        # by `provider_error_summary`. None when the body carried no usable reason.
+        self.provider_error = provider_error
 
 
 class ModelRouteNotApproved(ModelGatewayError):
@@ -53,6 +86,20 @@ class ModelOutputInvalid(ModelGatewayError):
     pass
 
 
+class ModelQuotaExhausted(ModelGatewayError):
+    """R11-MP14: a declared model-token quota refused this call before it was made.
+
+    A subclass, and with no provider status, on purpose: it is not a route
+    failure, so it neither falls back to another route (the quota is the
+    tenant's or the source's, not the route's) nor counts toward a route's
+    circuit breaker. `reason_code` names the window that refused.
+    """
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(f"model token quota is exhausted ({reason_code})")
+        self.reason_code = reason_code
+
+
 class KillSwitchEngaged(ModelGatewayError):
     """Raised by `ProviderNeutralModelGateway.structured_completion` when an
     organization-wide or route-scoped kill switch (MG-2) is engaged. Checked first,
@@ -61,9 +108,11 @@ class KillSwitchEngaged(ModelGatewayError):
 
 
 #: Bytes of serialized JSON the platform counts as one token. A heuristic,
-#: not a tokenizer: no provider adapter in this codebase reports real usage,
-#: and a number derived from one vendor's tokenizer would be no more accurate
-#: for the others. Named and exported so contract-budget enforcement
+#: not a tokenizer, and a number derived from one vendor's tokenizer would be
+#: no more accurate for the others. It is what the gateway checks a request
+#: against *before* the call, when nothing has been billed yet; what the
+#: provider reports it billed afterwards is carried separately
+#: (`ProviderUsage`). Named and exported so contract-budget enforcement
 #: (`aida.agent_budget`) bounds the *same* quantity this gateway measures,
 #: rather than a second estimate that could drift from it.
 BYTES_PER_ESTIMATED_TOKEN = 4
@@ -80,9 +129,7 @@ def estimate_payload_tokens(payload: dict[str, Any]) -> int:
     """Estimated input tokens for a request payload, serialized exactly as
     `structured_completion` serializes it -- same `sort_keys`/`separators`, so
     the pre-flight estimate and the recorded one cannot disagree."""
-    return estimate_serialized_tokens(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    )
+    return estimate_serialized_tokens(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +144,34 @@ class ApprovedModelRoute:
     timeout_seconds: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    """Tokens a provider reports it billed for one call.
+
+    `input_tokens` is every billed input token, cached or not.
+    `cached_input_tokens` is the part of it served from the provider's prompt
+    cache (billed at a discount), when the provider says so. `reported_cost_usd`
+    is the charge in US dollars where the provider itself states one (OpenRouter
+    does); it is never computed here.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int | None = None
+    reported_cost_usd: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCompletion:
+    """A provider adapter's answer: the structured output and, when the
+    provider reports it, what the call was billed. An adapter may instead return
+    the bare output dict, as test and fixture providers do; the gateway treats
+    that as a call that reported no usage."""
+
+    output: dict[str, Any]
+    usage: ProviderUsage | None = None
+
+
 class StructuredModelProvider(Protocol):
     async def __call__(
         self,
@@ -108,7 +183,134 @@ class StructuredModelProvider(Protocol):
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any] | ProviderCompletion: ...
+
+
+def _token_count(value: Any) -> int | None:
+    """A provider-reported count, or None for anything that is not one."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def openai_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usage` from an OpenAI Responses API answer. Its `output_tokens`
+    already includes reasoning tokens, which are billed as output."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("input_tokens"))
+    output_tokens = _token_count(usage.get("output_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    return ProviderUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def gemini_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usageMetadata` from a Gemini generateContent answer. Thinking tokens
+    are billed as output but reported apart from `candidatesTokenCount`, so
+    they are added to it."""
+    usage = response.get("usageMetadata")
+    if not isinstance(usage, dict):
+        return None
+    prompt = _token_count(usage.get("promptTokenCount"))
+    candidates = _token_count(usage.get("candidatesTokenCount"))
+    if prompt is None or candidates is None:
+        return None
+    thoughts = _token_count(usage.get("thoughtsTokenCount")) or 0
+    return ProviderUsage(input_tokens=prompt, output_tokens=candidates + thoughts)
+
+
+def anthropic_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usage` from an Anthropic Messages answer. Its `input_tokens` excludes the
+    tokens written to and read from the prompt cache, which are billed too, so
+    all three are added; the cache reads are also reported as cached."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("input_tokens"))
+    output_tokens = _token_count(usage.get("output_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    cache_write = _token_count(usage.get("cache_creation_input_tokens")) or 0
+    cache_read = _token_count(usage.get("cache_read_input_tokens"))
+    return ProviderUsage(
+        input_tokens=input_tokens + cache_write + (cache_read or 0),
+        output_tokens=output_tokens,
+        cached_input_tokens=cache_read,
+    )
+
+
+def _reported_cost(value: Any) -> float | None:
+    """A provider-stated dollar charge, or None for anything that is not one."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if value >= 0 else None
+
+
+def chat_completions_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usage` from an OpenAI-compatible chat-completions answer. OpenRouter adds
+    `cost` (US dollars, what it charged) when the request asks for usage
+    accounting; a private server usually reports only the two token counts."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("prompt_tokens"))
+    output_tokens = _token_count(usage.get("completion_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    details = usage.get("prompt_tokens_details")
+    cached = _token_count(details.get("cached_tokens")) if isinstance(details, dict) else None
+    return ProviderUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached,
+        reported_cost_usd=_reported_cost(usage.get("cost")),
+    )
+
+
+#: Longest provider reason a `ModelGatewayError` carries: enough for "Invalid
+#: schema for response_format ...", short of echoing a request back.
+PROVIDER_ERROR_MAX_CHARS = 300
+# OpenAI keys start "sk-" (its 401 names a masked one); Gemini keys "AIza".
+_KEY_PREFIXES = ("sk-", "AIza")
+
+
+def provider_error_summary(response: httpx.Response) -> str | None:
+    """The provider's own reason for a failed call, safe to show and to store.
+
+    OpenAI and Gemini both answer errors with ``{"error": {"message": ...}}``;
+    OpenAI adds ``code``/``type`` and Gemini ``code``/``status``. Only those
+    fields are read, never the rest of the body. Whitespace is collapsed, any
+    word shaped like an API key is replaced, and the result is capped at
+    ``PROVIDER_ERROR_MAX_CHARS``. A body that is not JSON, or has no message,
+    gives None, and the status code is all the caller learns.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, list) and body and isinstance(body[0], dict):
+        body = body[0]
+    error = body.get("error") if isinstance(body, dict) else None
+    labels: list[str] = []
+    if isinstance(error, dict):
+        message = error.get("message")
+        labels = [str(error[key]) for key in ("code", "type", "status") if error.get(key)]
+    else:
+        message = error
+    if not isinstance(message, str) or not message.strip():
+        return None
+    words = [
+        "[redacted]" if word.lstrip("'\"(").startswith(_KEY_PREFIXES) else word
+        for word in message.split()
+    ]
+    summary = " ".join(words)
+    if labels:
+        summary = f"{'/'.join(dict.fromkeys(labels))}: {summary}"
+    if len(summary) > PROVIDER_ERROR_MAX_CHARS:
+        summary = summary[: PROVIDER_ERROR_MAX_CHARS - 1].rstrip() + "…"
+    return summary
 
 
 async def post_with_retry(
@@ -138,9 +340,12 @@ async def post_with_retry(
             return value
         retryable = response.status_code in {408, 409, 429, 500, 502, 503, 504}
         if not retryable or attempt + 1 == attempts:
+            reason = provider_error_summary(response)
             raise ModelGatewayError(
-                f"model provider request failed with HTTP {response.status_code}",
+                f"model provider request failed with HTTP {response.status_code}"
+                + (f": {reason}" if reason else ""),
                 provider_status_code=response.status_code,
+                provider_error=reason,
             )
         retry_after = response.headers.get("retry-after")
         try:
@@ -211,7 +416,7 @@ class OpenAIResponsesProvider:
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> ProviderCompletion:
         body = {
             "model": route.model_id,
             "instructions": system_instruction,
@@ -227,22 +432,17 @@ class OpenAIResponsesProvider:
             },
         }
         base_url = _resolve_endpoint_base_url(route, self.settings, self.settings.openai_base_url)
-        owned_client = self.client is None
-        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
-        try:
-            response = await post_with_retry(
-                client=client,
-                url=f"{base_url.rstrip('/')}/responses",
-                headers={
-                    "Authorization": f"Bearer {credential}",
-                    "Content-Type": "application/json",
-                },
-                body=body,
-                attempts=self.settings.model_provider_max_attempts,
-            )
-        finally:
-            if owned_client:
-                await client.aclose()
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/responses",
+            headers={
+                "Authorization": f"Bearer {credential}",
+                "Content-Type": "application/json",
+            },
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
         for output in response.get("output", []):
             if not isinstance(output, dict):
                 continue
@@ -253,7 +453,7 @@ class OpenAIResponsesProvider:
                     except json.JSONDecodeError as exc:
                         raise ModelOutputInvalid("OpenAI structured output was not JSON") from exc
                     if isinstance(parsed, dict):
-                        return parsed
+                        return ProviderCompletion(parsed, openai_usage(response))
         raise ModelOutputInvalid("OpenAI response did not contain structured output")
 
 
@@ -274,7 +474,7 @@ class GeminiGenerateContentProvider:
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> ProviderCompletion:
         del schema_name
         body = {
             "system_instruction": {"parts": [{"text": system_instruction}]},
@@ -292,19 +492,14 @@ class GeminiGenerateContentProvider:
         }
         model_id = quote(route.model_id.removeprefix("models/"), safe="-_.")
         base_url = _resolve_endpoint_base_url(route, self.settings, self.settings.gemini_base_url)
-        owned_client = self.client is None
-        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
-        try:
-            response = await post_with_retry(
-                client=client,
-                url=f"{base_url.rstrip('/')}/models/{model_id}:generateContent",
-                headers={"x-goog-api-key": credential, "Content-Type": "application/json"},
-                body=body,
-                attempts=self.settings.model_provider_max_attempts,
-            )
-        finally:
-            if owned_client:
-                await client.aclose()
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/models/{model_id}:generateContent",
+            headers={"x-goog-api-key": credential, "Content-Type": "application/json"},
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
         try:
             text = response["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(text)
@@ -312,7 +507,235 @@ class GeminiGenerateContentProvider:
             raise ModelOutputInvalid("Gemini response did not contain structured output") from exc
         if not isinstance(parsed, dict):
             raise ModelOutputInvalid("Gemini structured output has an invalid shape")
-        return parsed
+        return ProviderCompletion(parsed, gemini_usage(response))
+
+
+def _tool_name(schema_name: str) -> str:
+    """A tool name Anthropic accepts (`^[a-zA-Z0-9_-]{1,64}$`) from a schema name."""
+    cleaned = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in schema_name)
+    return (cleaned or "structured_output")[:64]
+
+
+class AnthropicMessagesProvider:
+    """Anthropic Messages API adapter (R11-MP01).
+
+    Structured output is a forced tool call: the output schema is the one tool's
+    `input_schema` and `tool_choice` names it, so the answer arrives as the
+    tool's parsed `input` rather than as free text to be parsed. The system
+    instruction is marked for prompt caching; Anthropic caches the tool
+    definition and system prefix together, and a repeat call inside the cache
+    window bills that prefix at the cached rate, reported as
+    `cached_input_tokens`. A prefix shorter than the model's caching minimum is
+    simply not cached -- the marker costs nothing then.
+    """
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        self.settings = settings
+        self.client = client
+
+    async def __call__(
+        self,
+        *,
+        route: ApprovedModelRoute,
+        credential: str,
+        system_instruction: str,
+        payload: dict[str, Any],
+        output_schema: dict[str, Any],
+        schema_name: str,
+        max_output_tokens: int,
+    ) -> ProviderCompletion:
+        tool_name = _tool_name(schema_name)
+        body = {
+            "model": route.model_id,
+            "max_tokens": max_output_tokens,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_instruction,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                }
+            ],
+            "tools": [
+                {
+                    "name": tool_name,
+                    "description": "Return the answer in exactly this structure.",
+                    "input_schema": output_schema,
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": tool_name},
+        }
+        base_url = _resolve_endpoint_base_url(
+            route, self.settings, self.settings.anthropic_base_url
+        )
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/messages",
+            headers={
+                "x-api-key": credential,
+                "anthropic-version": ANTHROPIC_API_VERSION,
+                "Content-Type": "application/json",
+            },
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
+        if response.get("stop_reason") == "max_tokens":
+            raise ModelOutputInvalid("Anthropic output was cut off at the output token cap")
+        for block in response.get("content", []):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == tool_name
+                and isinstance(block.get("input"), dict)
+            ):
+                return ProviderCompletion(block["input"], anthropic_usage(response))
+        raise ModelOutputInvalid("Anthropic response did not contain structured output")
+
+
+def openrouter_provider_preferences(
+    route: ApprovedModelRoute, settings: Settings
+) -> dict[str, Any]:
+    """OpenRouter's `provider` routing object for this route.
+
+    Always refuses upstreams that retain or train on prompts
+    (`data_collection: deny`) and upstreams that would ignore the JSON schema
+    (`require_parameters`). Where the route's alias names upstream providers,
+    OpenRouter is held to them (`allow_fallbacks: false`), so the residency the
+    route was approved for is where the prompt goes. Raises
+    `ModelRouteNotApproved` for an unpinned alias while pinning is required.
+    """
+    preferences: dict[str, Any] = {"data_collection": "deny", "require_parameters": True}
+    order = settings.openrouter_provider_order.get(route.endpoint_alias)
+    if order:
+        preferences["order"] = list(order)
+        preferences["allow_fallbacks"] = False
+    elif settings.openrouter_require_pinned_provider:
+        raise ModelRouteNotApproved(
+            f"OpenRouter route alias {route.endpoint_alias!r} names no pinned upstream "
+            "provider (openrouter_provider_order)"
+        )
+    return preferences
+
+
+class OpenAICompatibleChatProvider:
+    """One chat-completions adapter for every OpenAI-compatible endpoint (R11-MP01).
+
+    Serves OpenRouter (public default URL, pinned upstreams, usage accounting
+    with a stated dollar cost) and the two private types, OPENAI_COMPATIBLE_PRIVATE
+    and ON_PREM (vLLM, TGI, Ollama, a bank gateway), which have no public
+    default: their alias must be mapped in `model_endpoint_urls`, or the call is
+    refused before anything is sent.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        provider_type: str = "OPENAI_COMPATIBLE_PRIVATE",
+    ) -> None:
+        self.settings = settings
+        self.client = client
+        self.provider_type = provider_type
+
+    def _chat_url(self, route: ApprovedModelRoute) -> str:
+        """The chat-completions URL. Azure OpenAI addresses a *deployment* -- the route's
+        `model_id` names it -- under the bank's own resource, with the pinned API version."""
+        base_url = self._base_url(route).rstrip("/")
+        if self.provider_type == "AZURE_OPENAI":
+            deployment = quote(route.model_id, safe="-_.")
+            version = quote(self.settings.azure_openai_api_version, safe="-_.")
+            return (
+                f"{base_url}/openai/deployments/{deployment}/chat/completions"
+                f"?api-version={version}"
+            )
+        return f"{base_url}/chat/completions"
+
+    def _headers(self, credential: str) -> dict[str, str]:
+        if self.provider_type == "AZURE_OPENAI":
+            return {"api-key": credential, "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {credential}", "Content-Type": "application/json"}
+
+    def _base_url(self, route: ApprovedModelRoute) -> str:
+        if self.provider_type == "OPENROUTER":
+            return _resolve_endpoint_base_url(
+                route, self.settings, self.settings.openrouter_base_url
+            )
+        mapped = self.settings.model_endpoint_urls.get(route.endpoint_alias)
+        if not mapped:
+            raise ModelRouteNotApproved(
+                f"private model route alias {route.endpoint_alias!r} has no endpoint URL "
+                "(model_endpoint_urls)"
+            )
+        return mapped
+
+    async def __call__(
+        self,
+        *,
+        route: ApprovedModelRoute,
+        credential: str,
+        system_instruction: str,
+        payload: dict[str, Any],
+        output_schema: dict[str, Any],
+        schema_name: str,
+        max_output_tokens: int,
+    ) -> ProviderCompletion:
+        url = self._chat_url(route)
+        body: dict[str, Any] = {
+            "model": route.model_id,
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                },
+            ],
+            "max_tokens": max_output_tokens,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name.lower(),
+                    "strict": True,
+                    "schema": _openai_strict_schema(output_schema),
+                },
+            },
+        }
+        if self.provider_type == "OPENROUTER":
+            body["provider"] = openrouter_provider_preferences(route, self.settings)
+            body["usage"] = {"include": True}
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=url,
+            headers=self._headers(credential),
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
+        try:
+            choice = response["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelOutputInvalid("chat completion did not contain a message") from exc
+        if not isinstance(choice, dict) or not isinstance(message, dict):
+            raise ModelOutputInvalid("chat completion has an invalid shape")
+        if choice.get("finish_reason") == "length":
+            raise ModelOutputInvalid("chat completion was cut off at the output token cap")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ModelOutputInvalid("chat completion did not contain structured output")
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ModelOutputInvalid("chat completion structured output was not JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ModelOutputInvalid("chat completion structured output has an invalid shape")
+        return ProviderCompletion(parsed, chat_completions_usage(response))
 
 
 def _resolve_endpoint_base_url(route: ApprovedModelRoute, settings: Settings, default: str) -> str:
@@ -332,13 +755,51 @@ def build_model_providers(settings: Settings) -> dict[str, StructuredModelProvid
     return {
         "OPENAI": OpenAIResponsesProvider(settings),
         "GOOGLE_GEMINI": GeminiGenerateContentProvider(settings),
+        "ANTHROPIC": AnthropicMessagesProvider(settings),
+        "OPENROUTER": OpenAICompatibleChatProvider(settings, provider_type="OPENROUTER"),
+        "OPENAI_COMPATIBLE_PRIVATE": OpenAICompatibleChatProvider(
+            settings, provider_type="OPENAI_COMPATIBLE_PRIVATE"
+        ),
+        "ON_PREM": OpenAICompatibleChatProvider(settings, provider_type="ON_PREM"),
+        "AZURE_OPENAI": OpenAICompatibleChatProvider(settings, provider_type="AZURE_OPENAI"),
     }
 
 
+def route_endpoint_problem(
+    *, provider_type: str, endpoint_alias: str, settings: Settings
+) -> str | None:
+    """Why this route's endpoint cannot be called as configured, or None.
+
+    The two conditions the adapters refuse at call time, answered ahead of it so
+    a route's activation status says ADAPTER_REGISTRATION_REQUIRED instead of
+    READY-then-refused: a private type whose alias maps to no URL, and an
+    OpenRouter alias with no pinned upstream while pinning is required.
+    """
+    if provider_type in PRIVATE_ENDPOINT_PROVIDERS and not settings.model_endpoint_urls.get(
+        endpoint_alias
+    ):
+        return "PRIVATE_ENDPOINT_NOT_MAPPED"
+    if (
+        provider_type == "OPENROUTER"
+        and settings.openrouter_require_pinned_provider
+        and not settings.openrouter_provider_order.get(endpoint_alias)
+    ):
+        return "OPENROUTER_UPSTREAM_NOT_PINNED"
+    return None
+
+
 def route_adapter_available(
-    *, provider_type: str, credential_reference: str | None, settings: Settings
+    *,
+    provider_type: str,
+    credential_reference: str | None,
+    settings: Settings,
+    endpoint_alias: str | None = None,
 ) -> bool:
     if provider_type not in SUPPORTED_MODEL_PROVIDERS or not credential_reference:
+        return False
+    if route_endpoint_problem(
+        provider_type=provider_type, endpoint_alias=endpoint_alias or "", settings=settings
+    ):
         return False
     try:
         _resolve_model_credential(credential_reference, settings, SecretResolver(settings))
@@ -379,6 +840,9 @@ def _resolve_model_credential(reference: str, settings: Settings, resolver: Secr
     local_keys = {
         "env://OPENAI_API_KEY": settings.openai_api_key,
         "env://GEMINI_API_KEY": settings.gemini_api_key,
+        "env://ANTHROPIC_API_KEY": settings.anthropic_api_key,
+        "env://OPENROUTER_API_KEY": settings.openrouter_api_key,
+        "env://AZURE_OPENAI_API_KEY": settings.azure_openai_api_key,
     }
     configured = local_keys.get(reference)
     if configured is not None:
@@ -401,13 +865,22 @@ class ModelCallEvidence:
     output_size_bytes: int
     schema_name: str
     #: Tokens *estimated* by the same 4-bytes-per-token heuristic this gateway
-    #: already enforces `model_max_input_tokens` against, not a provider-
-    #: reported count -- no adapter in `build_model_providers` returns usage.
-    #: They are reported because the cap is enforced against this number, so
-    #: consumption measured the same way is the only comparison that means
-    #: anything; every surface that renders them says "estimated".
+    #: enforces `model_max_input_tokens` against before the call. Kept even when
+    #: the provider reports usage: the cap is checked against this number, so it
+    #: stays the like-for-like comparison, and every surface that renders it
+    #: says "estimated".
     estimated_input_tokens: int = 0
     estimated_output_tokens: int = 0
+    #: What the provider reports it billed (`ProviderUsage`), or None when it
+    #: reported nothing: a fixture provider, or an answer without usage.
+    provider_input_tokens: int | None = None
+    provider_output_tokens: int | None = None
+    #: Of `provider_input_tokens`, how many the provider served from its prompt
+    #: cache, when it says so (Anthropic, OpenAI-compatible servers that report it).
+    provider_cached_input_tokens: int | None = None
+    #: The dollar charge the provider itself stated for this call (OpenRouter),
+    #: or None. Never computed from a price list: see `aida.cost_metrics`.
+    provider_reported_cost_usd: float | None = None
 
 
 class ProviderNeutralModelGateway:
@@ -432,7 +905,13 @@ class ProviderNeutralModelGateway:
         system_instruction: str,
         payload: dict[str, Any],
         output_schema: type[StructuredModel],
+        datasource_id: UUID | None = None,
     ) -> tuple[StructuredModel, ModelCallEvidence]:
+        # R11-MP14: `datasource_id` is the source this call is on behalf of, when
+        # there is one. It is what the per-source token quota and the per-source
+        # spend attribution are keyed by; a call with none is charged to the
+        # tenant only.
+        #
         # Checked first, ahead of every other activation condition (MG-2): a kill
         # switch engaged through the governed API is a live DB read on this call,
         # not cached config, so it blocks the very next generation request.
@@ -448,17 +927,12 @@ class ProviderNeutralModelGateway:
             raise KillSwitchEngaged(
                 f"kill switch engaged ({scope_desc}): {blocking.reason or 'no reason given'}"
             )
-        allowed_routes = {
-            key
-            for key in (self.settings.model_route, *self.settings.model_route_fallback_keys)
-            if key
-        }
+        # R11-MP03: the default route, each purpose's route, and the fallbacks.
+        allowed_routes = self.settings.selected_model_route_keys
         if not self.settings.model_generation_enabled or not allowed_routes:
             raise ModelRouteNotApproved("no policy-approved model route is configured")
         if route is None or route.route_key not in allowed_routes:
-            raise ModelRouteNotApproved(
-                "selected model route is not approved for this deployment"
-            )
+            raise ModelRouteNotApproved("selected model route is not approved for this deployment")
         provider = self.providers.get(route.provider_type)
         if provider is None:
             raise ModelRouteNotApproved("approved model route has no registered provider adapter")
@@ -474,6 +948,23 @@ class ProviderNeutralModelGateway:
         output_budget = min(self.settings.model_max_output_tokens, route.max_output_tokens)
         if estimated_tokens > input_budget:
             raise ModelGatewayError("model input exceeds the approved token budget")
+        # R11-MP14: the declared model-token quota, enforced atomically before
+        # anything is sent. The reservation is the most this call may cost -- the
+        # input estimate plus the output cap -- and is settled to the billed figure
+        # below. With no quota declared this writes nothing and returns False.
+        reservation = estimated_tokens + output_budget
+        try:
+            reserved = await consume_quota(
+                session,
+                self.settings,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                dimension=UsageDimension.MODEL_TOKENS,
+                amount=reservation,
+            )
+        except QuotaRefused as refused:
+            raise ModelQuotaExhausted(refused.reason_code) from refused
+        reserved_amount = reservation if reserved else 0
         try:
             raw = await asyncio.wait_for(
                 provider(
@@ -487,12 +978,28 @@ class ProviderNeutralModelGateway:
                 ),
                 timeout=min(self.settings.model_timeout_seconds, route.timeout_seconds),
             )
-            output = output_schema.model_validate(raw)
-        except TimeoutError as exc:
-            raise ModelGatewayError("model route timed out") from exc
-        except ValidationError as exc:
-            raise ModelOutputInvalid("model output failed its structured contract") from exc
+            completion = raw if isinstance(raw, ProviderCompletion) else ProviderCompletion(raw)
+            output = output_schema.model_validate(completion.output)
+        except BaseException as failure:
+            # The input was sent and may have been billed; the output allowance
+            # was never produced. Charge the input estimate, release the rest --
+            # the same settlement `agent_budget.settle_unresolved_run_budget` makes.
+            await settle_quota(
+                session,
+                self.settings,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                dimension=UsageDimension.MODEL_TOKENS,
+                reserved=reserved_amount,
+                actual=estimated_tokens,
+            )
+            if isinstance(failure, TimeoutError):
+                raise ModelGatewayError("model route timed out") from failure
+            if isinstance(failure, ValidationError):
+                raise ModelOutputInvalid("model output failed its structured contract") from failure
+            raise
         serialized_output = json.dumps(output.model_dump(mode="json"), sort_keys=True)
+        usage = completion.usage
         evidence = ModelCallEvidence(
             route=route.route_key,
             provider_type=route.provider_type,
@@ -505,13 +1012,36 @@ class ProviderNeutralModelGateway:
             schema_name=output_schema.__name__,
             estimated_input_tokens=estimated_tokens,
             estimated_output_tokens=estimate_serialized_tokens(serialized_output),
+            provider_input_tokens=usage.input_tokens if usage is not None else None,
+            provider_output_tokens=usage.output_tokens if usage is not None else None,
+            provider_cached_input_tokens=(usage.cached_input_tokens if usage is not None else None),
+            provider_reported_cost_usd=usage.reported_cost_usd if usage is not None else None,
+        )
+        # R11-FP17: one place, so every caller of this gateway is counted once and
+        # none of them has to remember to. Pure metric publication -- no session
+        # is touched and no row is written, so this adds no database work to the
+        # model path. Per-source attribution needs a datasource this gateway is
+        # never given (it receives an organization and a route), and lives in
+        # `cost_metrics.record_model_spend`, called by the callers that know it.
+        observe_model_call(evidence)
+        # R11-MP14: settle the reservation to what the provider billed (or the
+        # estimate where it reported nothing), and attribute the spend to the
+        # tenant and source for every caller -- Ask's spend was never recorded.
+        await record_model_spend(
+            session,
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            evidence=evidence,
+            settings=self.settings,
+            reserved=reserved_amount,
         )
         return output, evidence
 
 
 class DeterministicTestProvider:
-    def __init__(self, response: dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any], usage: ProviderUsage | None = None) -> None:
         self.response = response
+        self.usage = usage
 
     async def __call__(
         self,
@@ -523,7 +1053,9 @@ class DeterministicTestProvider:
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | ProviderCompletion:
         del route, credential, system_instruction, payload, output_schema, schema_name
         del max_output_tokens
-        return self.response
+        if self.usage is None:
+            return self.response
+        return ProviderCompletion(self.response, self.usage)

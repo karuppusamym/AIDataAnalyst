@@ -34,17 +34,6 @@ router = APIRouter(prefix="/v1", tags=["retrieval-ops"])
 
 INDEX_OPERATORS = ("PlatformAdmin", "Operations", "MetadataAdmin")
 INDEX_READERS = (*INDEX_OPERATORS, "Auditor", "DataSteward", "Analyst")
-WORKLIST_READERS = (
-    "PlatformAdmin",
-    "DataSteward",
-    "MetadataAdmin",
-    "Reviewer",
-    "Operations",
-    "Analyst",
-    "Auditor",
-)
-
-
 class VectorIndexStatusRead(ApiModel):
     organization_id: UUID
     usable: bool

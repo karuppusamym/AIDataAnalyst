@@ -16,12 +16,6 @@ from aida.models import (
     DataQualityObservation,
 )
 
-# AT-7(a)/AT-D1 -- a version that has been replaced by a newer PUBLISHED
-# version no longer disappears the instant the new one is approved. It spends
-# a support window as SUPPORTED (still readable by a version-pinned
-# consumer); discovery keeps surfacing only the current PUBLISHED version.
-# Statuses a version-pinned read can ever still serve content for.
-_LIVE_READ_STATUSES = frozenset({"PUBLISHED", "SUPPORTED"})
 # Statuses that represent "this version existed, and is now gone" -- distinct
 # from DRAFT/REVIEW_REQUIRED/REJECTED/DEPRECATION_REVIEW, which never served
 # content at all and stay indistinguishable from "never existed" (INV: MCP-3's

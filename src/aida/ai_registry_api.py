@@ -55,9 +55,9 @@ from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["ai-registry"])
 
-AI_AUTHORS = ("PlatformAdmin", "AgentDeveloper", "ModelRiskManager", "DataScientist")
+AI_AUTHORS = ("PlatformAdmin", "AgentDeveloper")
 AI_READERS = (*AI_AUTHORS, "Reviewer", "Auditor", "DataSteward", "Viewer")
-AI_ASSESSORS = ("PlatformAdmin", "Reviewer", "Auditor", "ModelRiskManager")
+AI_ASSESSORS = ("PlatformAdmin", "Reviewer", "Auditor")
 
 ASSESSMENT_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
@@ -556,7 +556,7 @@ async def update_ai_remediation(
         raise HTTPException(status_code=404, detail="AI remediation not found")
     enforce_organization(context, remediation.organization_id)
     if body.status == "ACCEPTED_RISK" and context.roles.isdisjoint(
-        {"PlatformAdmin", "Reviewer", "ModelRiskManager"}
+        {"PlatformAdmin", "Reviewer"}
     ):
         record_audit(
             session,

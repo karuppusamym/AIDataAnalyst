@@ -759,16 +759,3 @@ class TestRouteRegistration:
         assert "/v1/studio/change-sets/{change_set_id}/impact" in paths
         assert "/v1/studio/change-sets/{change_set_id}/detect-conflicts" in paths
         assert "/v1/studio/parameter-contracts/validate" in paths
-
-    def test_view_lineage_routes_present_in_openapi(self) -> None:
-        try:
-            from aida.main import app
-        except Exception as exc:
-            pytest.skip(f"cannot import aida.main: {exc}")
-
-        schema = app.openapi()
-        paths = schema.get("paths", {})
-        assert "/v1/datasources/{datasource_id}/view-lineage/parse" in paths
-        assert "/v1/datasources/{datasource_id}/procedure-lineage/parse" in paths
-        assert "/v1/datasources/{datasource_id}/view-lineage" in paths
-        assert "/v1/datasources/{datasource_id}/procedure-lineage" in paths

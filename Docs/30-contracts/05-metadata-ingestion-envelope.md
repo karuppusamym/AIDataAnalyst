@@ -3,7 +3,7 @@
 > Status: Authoritative, T1 external contract. Owner: Data Platform. Current version: `1.1`. **`1.0` remains accepted, unchanged, permanently.**
 > One envelope for every transport: native pull, authenticated push, source-side agent, and future broker intake (ADR-0012).
 
-> **Implementation status (2026-08-30).** `1.1` is implemented for the view, routine, object-comment and grant axes (`src/aida/schemas.py`, `src/aida/envelope_models.py`, `src/aida/ingestion.py`, migrations `a1c9f4b7e230` and `d5f8b21c4a03`). Index and partition inventory, listed against 1.1 in earlier drafts of §10, are **not** delivered and remain tracker `CN-8`. Native pull for the new axes is implemented in **all five** connectors, with one honest exception: BigQuery advertises `grants: false` because BigQuery has no SQL grants (INV-9). The push transport accepts 1.1 from any producer regardless of connector. The pull path persists the new axes as of 2026-08-30 — `src/aida/workflows/activities.py` imports `persist_envelope_extensions` (line 27) and calls it (line 587), so all three transports store them. *An earlier revision of this callout said the pull path was unwired; that was true when written and is no longer.* Detail and evidence: `Docs/review-2026-08/gap/07-envelope-v11.md` (contract, storage, PostgreSQL, SQL Server) and `Docs/review-2026-08/gap/08-envelope-v11-connectors.md` (Oracle, Snowflake, BigQuery).
+> **Implementation status (2026-09-20).** `1.1` is implemented for the view, routine, object-comment and grant axes (`src/aida/schemas.py`, `src/aida/envelope_models.py`, `src/aida/ingestion.py`, migrations `a1c9f4b7e230` and `d5f8b21c4a03`). Index and partition inventory, listed against 1.1 in earlier drafts of §10, is **not** an envelope axis: the push envelope has no field for either. It is delivered on the pull path only (tracker `CN-8`): the `metadata_index` and `metadata_partition` tables are filled from what an adapter's `discover()` returns, for the adapters that advertise `indexes` and `partitions` (PostgreSQL and Oracle as of 2026-09-20; see the [engine capability matrix](../90-reference/engine-capability-matrix.md)), and are read at `GET /v1/tables/{table_id}/indexes` and `GET /v1/tables/{table_id}/partitions`. Native pull for views, routines and object comments is implemented in **all six** connectors (PostgreSQL, SQL Server, Oracle, BigQuery, Snowflake and Databricks), with two honest exceptions for grants: BigQuery advertises `grants: false` because BigQuery has no SQL grants, and Databricks advertises `grants: false` because Unity Catalog's privilege model is not the SQL grant model (INV-9). The push transport accepts 1.1 from any producer regardless of connector. The pull path persists the new axes: the `discover_datasource` activity in `src/aida/workflows/activities.py` calls `persist_envelope_extensions` (`src/aida/ingestion.py`), so all three transports store them. *An earlier revision of this callout said the pull path was unwired; that was true when written and is no longer.* Detail and evidence: `Docs/review-2026-08/gap/07-envelope-v11.md` (contract, storage, PostgreSQL, SQL Server) and `Docs/review-2026-08/gap/08-envelope-v11-connectors.md` (Oracle, Snowflake, BigQuery).
 
 ## 1. Why one envelope
 
@@ -155,7 +155,9 @@ The axes exist because four questions could not be answered from a 1.0 snapshot:
 | `view_definition.truncated` | | No | `true` if the source returned a prefix. Default `false` |
 | `view_definition.unavailable_reason` | | Conditional | **Required when `definition_sql` is `null`; forbidden otherwise** |
 | `routines[]` | schema | No | Stored procedures and functions. ≤ 10,000 per schema, ≤ 50,000 per envelope |
-| `routines[].routine_type` | | Yes | `FUNCTION` \| `PROCEDURE` |
+| `routines[].routine_type` | | Yes | `FUNCTION` \| `PROCEDURE` \| `PACKAGE` (R11-FP03; a package is never presented as a callable function) |
+| `routines[].attributes.package_name` | | No | R11-FP03: the package a member subprogram belongs to. Part of the routine's identity, so a member and a standalone routine of the same name and signature are two routines. A member's `body_sql` is null with a reason: its source is the package's |
+| `routines[].attributes.native_subtype` | | No | R11-FP03: the engine's finer kind beside `routine_type`, for example SQL Server `SCALAR`, `INLINE_TABLE`, `MULTI_STATEMENT_TABLE` or BigQuery `SCALAR_FUNCTION` (at most 30 characters) |
 | `routines[].body_sql` | | No | The body, verbatim. `null` means **unavailable**, never empty |
 | `routines[].unavailable_reason` | | Conditional | **Required when `body_sql` is `null`; forbidden otherwise** |
 | `routines[].security_mode` | | No | `DEFINER` \| `INVOKER` |
@@ -163,7 +165,7 @@ The axes exist because four questions could not be answered from a 1.0 snapshot:
 | `routines[].attributes` | | No | Same bounds and same value-free screening as every other attribute bag (§7) |
 | `grants[]` | schema | No | Source-side privileges. ≤ 100,000 per schema |
 | `grants[].grantee_type` | | No | `USER` \| `ROLE` \| `GROUP` \| `PUBLIC`. Default `ROLE` |
-| `grants[].object_type` | | No | `TABLE` \| `VIEW` \| `PROCEDURE` \| `FUNCTION` \| `SCHEMA` \| `SEQUENCE`. Default `TABLE` |
+| `grants[].object_type` | | No | `TABLE` \| `VIEW` \| `PROCEDURE` \| `FUNCTION` \| `PACKAGE` \| `SCHEMA` \| `SEQUENCE`. Default `TABLE` |
 | `grants[].is_grantable` | | No | `WITH GRANT OPTION`. Default `false` |
 
 ### Unavailable is not empty
@@ -201,11 +203,11 @@ Declaring 1.0 while sending 1.1 content is rejected rather than silently strippe
 
 | Field | Required | Semantics |
 |---|:--:|---|
-| `envelope_version` | Yes | Contract version. Backward-compatible evolution only. |
+| `envelope_version` | No | Contract version, `1.0` \| `1.1`; defaults to `1.0` when omitted (see Version discipline). Backward-compatible evolution only. |
 | `idempotency_key` | Yes | Unique per datasource. Same key + same payload → original job. Same key + different payload → **409**. |
 | `producer` | Yes | Producer identity. Signed producer identity is planned. |
-| `transport` | Yes | `PULL` \| `PUSH` \| `AGENT` \| `STREAM` |
-| `snapshot_type` | Yes | `FULL` \| `INCREMENTAL` |
+| `transport` | No (target: Yes) | Accepted today: `PUSH` (the default) \| `STREAM`. `PULL` and `AGENT` are design values that the endpoint rejects |
+| `snapshot_type` | No (target: Yes) | `FULL` \| `INCREMENTAL`. **An omitted value means `INCREMENTAL`**, on the synchronous endpoint and on the batch manifest alike; `FULL` applies only when the producer sends it (see the note in §4) |
 | `emitted_at` | Yes | Producer-side timestamp (RFC 3339 UTC) |
 | `catalogs[]` | Yes | Nested inventory |
 | `attributes` | No | Scalar, bounded, ≤ 50 per object |
@@ -214,8 +216,10 @@ Declaring 1.0 while sending 1.1 content is rejected rather than silently strippe
 
 | Type | Behaviour |
 |---|---|
-| `INCREMENTAL` | Creates and updates objects present in the envelope. **Never retires omitted objects.** Safe default. |
-| `FULL` | Authoritative for the complete datasource scope. Soft-deprecates active objects omitted from the envelope. **Requires explicit confirmation** in the UI. |
+| `INCREMENTAL` | Creates and updates objects present in the envelope. **Never retires omitted objects.** The safe choice, and the default: an omitted `snapshot_type` means `INCREMENTAL`. |
+| `FULL` | Authoritative for the complete datasource scope. Soft-deprecates active objects omitted from the envelope. **Explicit only:** `FULL` is applied only when the producer sends it, and that explicit value is the whole of the confirmation. The server asks for no second step (see the note below). |
+
+> **Implementation status (2026-09-20).** `POST /v1/datasources/{datasource_id}/metadata-ingestions` (`MetadataIngestionCreate` in `src/atlas/modules/ingestion/schemas.py`) defaults an omitted `snapshot_type` to `INCREMENTAL`, the same default the batch manifest (`MetadataIngestionBatchCreate`) already had; it used to default to `FULL`, so a producer that left the field out sent an authoritative snapshot that soft-deprecated every active object it omitted (tracker `R11-AUD05`). A snapshot that retires what it omits is therefore applied only when the producer writes `"snapshot_type": "FULL"`, and that explicit value is the confirmation: the server has no confirmation field and no second step, and adds none. Only the default moved: the field is still optional, its two values are unchanged, and every request body that validated before still does; `transport` still defaults to `PUSH`. For the 1.1 axes `FULL` also needs the envelope to declare version `1.1`, as the next paragraph says. Two consequences a producer can observe. A producer that relied on the old default to retire omissions must now send `FULL`. And the payload fingerprint covers `snapshot_type`, so an idempotency key first used by a body that omitted it (and so ran as `FULL`) and replayed after this change fingerprints as `INCREMENTAL` and answers **409** rather than returning the original job: refused, not re-applied as a snapshot the producer never asked for. `tests/test_ingestion_snapshot_default.py` pins the default on both entry points, that an omitting request through the application retires nothing while an explicit `FULL` still does, and the replay behaviour.
 
 **A `FULL` 1.0 envelope is authoritative for the 1.0 inventory only.** It carries no statement about views, routines, descriptions or grants, so its silence is not omission and the 1.1 axes are left alone. Reconciliation of the 1.1 axes is gated on the declared version *and* on `FULL`, so a producer that rolls back to 1.0 for a release does not wipe the estate's view definitions. The same chunk accumulation rule below applies to the 1.1 axes, through the same mechanism.
 
@@ -239,7 +243,9 @@ Without this rule, a network failure halfway through a large `FULL` delivery wou
 | Synchronous envelope | 100 catalogs / 50,000 tables / 250,000 columns / 50,000 routines | Down only |
 | Batch | 1,000 chunks / 1,000,000 tables / 5,000,000 columns | Down only |
 | Attributes per object | 50, scalar, bounded | Down only |
-| Request size (local proxy) | 40 MiB | — |
+| Request size (local proxy) | 64 MiB on the two routes that carry an envelope (`POST .../metadata-ingestions` and `POST .../chunks`); nginx's own default (1 MiB) on every other `/v1/` route; see the note below | `ui-next/nginx.conf` |
+
+> **Implementation status (2026-09-20).** The 40 MiB figure this row used to carry came from the legacy `ui/` portal's `nginx.conf` (`client_max_body_size 40m`, removed with that portal in `0f8a4c4`); `ui-next/nginx.conf`, its replacement, never had it and set `client_max_body_size` only on `/mcp` (8 MiB) and `/graphql` (128 KiB), so nginx's 1 MiB default applied to every `/v1/` route, the ingestion routes included: measured on 2026-09-20, a 2 MiB body answered 413 through the UI proxy on `:3001` while the same body reached authentication (401) on the API's own port (tracker `R11-AUD05`). The file now gives `POST /v1/datasources/{id}/metadata-ingestions` and `POST /v1/metadata-ingestion-batches/{id}/chunks` a location of their own with `client_max_body_size 64m`, and every other `/v1/` route still gets 1 MiB. The 64 MiB is derived from the bounds above, because the ingestion code has no byte limit: a chunk is validated through the same model as a synchronous push, so both routes share one ceiling per request body, 50,000 tables and 250,000 columns (`SYNC_MAX_TABLES` and `SYNC_MAX_COLUMNS` in `src/atlas/modules/ingestion/schemas.py`). A body at those caps serialises to about 54 MiB with 32-character identifiers and every optional field written out, and 64 MiB leaves about 19 % for descriptions and whitespace. The batch bounds (1,000 chunks, 1,000,000 tables, 5,000,000 columns) cap the total across chunks, not any one request, so they do not enter the figure. A body that carries routine text (up to 1,000,000 characters a routine) or long descriptions can exceed 64 MiB, and belongs in more chunks. The limit exists only in the proxy: a request sent straight to the API has no byte limit, and the bounds above are then the only ones. Because nginx buffers and forwards a body before the API authenticates anything, 64 MiB is also what one unauthenticated request to those two routes may now cost through the proxy. `scripts/check_proxy_contract.py` (CI job `quality`) resolves each route through nginx's location rules and fails if either envelope route gets less than 64 MiB, more than 128 MiB or an unlimited body (`0`), or if any other `/v1/` route gets more than 1 MiB; `tests/test_proxy_body_limits.py` binds that script's route list to the application's route table and its floor to the synchronous caps; the `ui-proxy` CI job posts bodies of 2, 40 and 64 MiB, and of 64 MiB plus one byte, to the two routes, and of 1 and 2 MiB to ordinary `/v1/` routes, through the real nginx image.
 
 Larger estates use the durable batch contract (§8). Cumulative table and column admission is enforced **under the batch lock during every upload** and rechecked before processing — so a batch cannot exceed its bound by racing uploads.
 
@@ -309,12 +315,14 @@ sequenceDiagram
 
 Roles: `PlatformAdmin`, `MetadataAdmin`, `DataAdmin`, or the workload-oriented `MetadataIngestor`. All mutations write audit and outbox records.
 
+> **Implementation status (2026-09-20).** The push routes name `MetadataIngestor` in their role checks, but it is not in `PLATFORM_ROLES` (`src/aida/oidc.py`), and under OIDC only roles in that set can be granted through `oidc_role_mappings`. A workload identity therefore cannot carry `MetadataIngestor` in a deployment that uses OIDC; it works only under the development identity, where `X-Roles` accepts any string. A producer in a real deployment has to hold `PlatformAdmin`, `MetadataAdmin` or `DataAdmin`.
+
 ## 10. Planned evolution
 
 | Version | Adds | State |
 |---|---|---|
 | 1.1 | View definitions; routines and their parameters; source-side object descriptions; source-side grants | **Shipped 2026-08-30** |
-| 1.1+ | Index and partition inventory — deferred out of 1.1, tracked as `CN-8` | Not started |
+| 1.1+ | Index and partition inventory — deferred out of 1.1, tracked as `CN-8` | Pull path only: `metadata_index` and `metadata_partition` are populated and served (PostgreSQL and Oracle adapters). The push envelope field: not started |
 | 1.2 | BI assets (dashboards, reports); pipeline and topic assets | Not started |
 | 1.3 | File and API assets; ML model assets | Not started |
 | 2.0 | Only if a breaking change becomes unavoidable | — |

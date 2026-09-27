@@ -231,7 +231,7 @@ describe("ToolPlansScreen against the real tool_plans_api.py routes", () => {
 
   it("shows the server's own role-denial message unchanged, distinct from the entitlement case", async () => {
     createToolPlan.mockRejectedValueOnce(
-      new ApiError(403, "one of these roles is required: DataEngineer, PlatformAdmin, ToolDeveloper"),
+      new ApiError(403, "one of these roles is required: PlatformAdmin, ToolDeveloper"),
     );
     const ToolPlansScreen = await loadScreen();
     render(<ToolPlansScreen />);
@@ -240,7 +240,7 @@ describe("ToolPlansScreen against the real tool_plans_api.py routes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create plan" }));
 
     expect(
-      await screen.findByText("one of these roles is required: DataEngineer, PlatformAdmin, ToolDeveloper"),
+      await screen.findByText("one of these roles is required: PlatformAdmin, ToolDeveloper"),
     ).toBeInTheDocument();
   });
 });

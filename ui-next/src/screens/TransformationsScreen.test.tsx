@@ -25,7 +25,7 @@ import { ApiError } from "../lib/api";
 --------------------------------------------------------------------------- */
 
 const fetchOrgProjects = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<ProjectRead>>>();
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchDbtProjects = vi.fn<(projectId: string, signal?: AbortSignal) => Promise<PageOf<DbtProjectRead>>>();
 const createDbtProject =
   vi.fn<(projectId: string, body: DbtProjectCreate, signal?: AbortSignal) => Promise<DbtProjectRead>>();
@@ -42,7 +42,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchDbtProjects: (projectId: string, signal?: AbortSignal) => fetchDbtProjects(projectId, signal),
     createDbtProject: (projectId: string, body: DbtProjectCreate, signal?: AbortSignal) =>
       createDbtProject(projectId, body, signal),
@@ -131,7 +131,7 @@ async function loadScreen() {
 
 beforeEach(() => {
   fetchOrgProjects.mockReset();
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchDbtProjects.mockReset();
   createDbtProject.mockReset();
   fetchDbtArtifactImports.mockReset();
@@ -139,7 +139,7 @@ beforeEach(() => {
   fetchDbtResources.mockReset();
   fetchDbtLineage.mockReset();
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   vi.resetModules();
   history.replaceState(null, "", "/");
 });

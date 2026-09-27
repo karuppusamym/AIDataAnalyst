@@ -105,7 +105,7 @@ describe("CopyLinkButton", () => {
 
     await waitFor(() => expect(writeText).toHaveBeenCalled());
     const copied = String(writeText.mock.calls[0]![0]);
-    expect(copied).toContain("#/quality");
+    expect(copied).toContain("#/steward/quality");
     expect(copied).toContain("incident=inc_1");
     // Fields the target screen does not declare are dropped rather than
     // shipped to somebody who cannot use them.
@@ -127,7 +127,7 @@ describe("CopyLinkButton", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/refused clipboard access/i);
     const fallback = screen.getByLabelText("Link to copy") as HTMLInputElement;
-    expect(fallback.value).toContain("#/sources");
+    expect(fallback.value).toContain("#/operator/sources");
     expect(fallback.value).toContain("source=src_1");
     expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
   });

@@ -11,12 +11,22 @@ Architecture
 Stage 1: Candidate fetch
   Pull up to agent_retrieval_scan_limit rows from each object type (tables,
   columns, tools, business annotations, dbt resources, published semantic
-  metrics, and glossary terms bound to a semantic object) using the existing
+  metrics, glossary terms bound to a semantic object, -- R11-FP11 --
+  stored procedures and functions, and -- R11-FP09 -- concepts of each
+  ontology's published version with a valid mapping here, and -- R11-FP01 -- a
+  SQL Server or Oracle trigger that carries its own body, found by its name and
+  its firing table's name, never a PostgreSQL trigger, whose body a ROUTINE
+  candidate already carries) using the existing
   org/datasource scope filters. SM-2: an ACTIVE glossary-term<->semantic-object
   binding folds the term's definition/synonyms into the metric's candidate
   text (and the metric's identity into the term's hit metadata), so the
   binding participates in scoring in both directions instead of being a
-  static link nobody reads at query time.
+  static link nobody reads at query time. R11-FP08: a routine's *approved*
+  Atlas-authored description is one of the words that fetches it and one of the
+  words that scores it, so a procedure described in business language is
+  reachable by a question asked in business language -- inside this stage, not
+  as a channel of its own (R11-S3 defers new channels until retrieval quality
+  is measured).
 
 Stage 2: Hybrid scoring
   Score each candidate with three additive signals:
@@ -63,11 +73,12 @@ the hit type every caller consumes, and the composition's order.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import structlog
 from sqlalchemy import func, or_, select, true
@@ -75,6 +86,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
 from aida.config import Settings
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataRoutineParameter,
+    MetadataTrigger,
+    MetadataViewDefinition,
+    RoutineDocumentation,
+    RoutineDocumentationVersion,
+)
+from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
     BusinessDomain,
     BusinessEntity,
@@ -88,14 +109,19 @@ from aida.models import (
     GovernedToolVersion,
     MetadataBusinessAnnotation,
     MetadataColumn,
+    MetadataSchema,
     MetadataTable,
     QueryExecution,
     SemanticMetric,
     SemanticMetricVersion,
     TermSemanticBinding,
 )
+from aida.ontology_kinds import table_mapping_kind
+from aida.ontology_models import OntologyHead, OntologyVersion
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.quality_coupling import resolve_table_ids
 from aida.retrieval_metrics import RETRIEVAL_SECONDS
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 if TYPE_CHECKING:
     # Annotation-only (this module defers the real import to call time, to
@@ -156,6 +182,36 @@ def _bm25_score(query_tokens: list[str], candidate_text: str) -> float:
         _idf_weight(t) for t in query_tokens if t in lower_text
     )
     return min(1.0, matched_weight / total_weight)
+
+
+#: R11-FP11: a view definition match is weaker evidence than a name or description match --
+#: it says what the view is built from, not what it is.
+_DEFINITION_MATCH_WEIGHT = 0.6
+
+#: R11-FP08: how much of the coverage an *approved* routine description adds is kept.
+#:
+#: Full weight, and the number is stated rather than left implicit because the two
+#: neighbouring decisions in this file both went the other way and the difference is
+#: the whole point:
+#:
+#: * It is **not** discounted like `_DEFINITION_MATCH_WEIGHT`. That discount is for a
+#:   view's stored SQL, which says what the object is *built from*; a reviewed
+#:   description says what the routine is *for*, which is exactly what a
+#:   business-language question asks. Every other candidate in this module already
+#:   folds an object's description into its candidate text undiscounted (a table's
+#:   `source_description`, a metric's description, a concept's description), and an
+#:   Atlas-authored, independently APPROVED description is stronger evidence than any
+#:   of those -- it was reviewed, and no rescan can reword it.
+#: * It is **not** boosted above a name match either. `hybrid_retrieve` has exactly one
+#:   boost, and it belongs to published governed tools; a routine "is context for a
+#:   question, never a governed tool, and must not outrank one" (the rule the ROUTINE
+#:   candidate already carries below). Raising a description match above a name match
+#:   would need a second boost, and a routine is the wrong candidate to invent one for.
+#:
+#: Applied to the *incremental* coverage the description contributes rather than to the
+#: whole score, so this stays a real knob: at 0.6 an approved description would be
+#: discounted exactly the way a view definition is, without touching anything else.
+_APPROVED_DESCRIPTION_MATCH_WEIGHT = 1.0
 
 
 def _exact_phrase_bonus(query: str, candidate_text: str) -> float:
@@ -249,6 +305,156 @@ async def _latest_dbt_artifact_import_ids(
 # ---------------------------------------------------------------------------
 
 
+def _concept_mappings(definition: dict[str, Any], concept_key: str) -> list[tuple[str, UUID]]:
+    mappings: list[tuple[str, UUID]] = []
+    for mapping in definition.get("mappings") or []:
+        if not isinstance(mapping, dict) or mapping.get("concept") != concept_key:
+            continue
+        try:
+            subject_id = UUID(str(mapping.get("subject_id")))
+        except ValueError:
+            continue
+        mappings.append((str(mapping.get("subject_type")), subject_id))
+    return mappings
+
+
+async def _ontology_concept_hits(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    question: str,
+    query_tokens: list[str],
+    scan_limit: int,
+) -> list[HybridRetrievalHit]:
+    """R11-FP09: concepts of each ontology's *published* version that match the question.
+
+    A concept is found by its name, aliases and description. It stands on the catalog objects
+    it is mapped to that are still valid *in this datasource*: ACTIVE, and of the kind the
+    mapping names (`ontology_kinds.table_mapping_kind`, the rule the ontology routes enforce on
+    every write). A deprecated concept, a deprecated ontology, a draft, and a concept with
+    nothing valid here are not offered. No boost -- a concept is meaning, never an answer. The
+    approved version's id rides in the hit, so the grounding receipt built from the hits records
+    which ontology meaning an answer used.
+    """
+    rows = (
+        await session.execute(
+            select(OntologyVersion, OntologyHead.ontology_key)
+            .join(OntologyHead, OntologyHead.id == OntologyVersion.ontology_id)
+            .where(
+                OntologyHead.organization_id == datasource.organization_id,
+                OntologyVersion.organization_id == datasource.organization_id,
+                OntologyVersion.version == OntologyHead.published_version,
+                OntologyVersion.status == "APPROVED",
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+    matches: list[tuple[OntologyVersion, str, str, str, float]] = []
+    for version, ontology_key in rows:
+        definition = version.definition or {}
+        if definition.get("lifecycle") == "DEPRECATED":
+            continue
+        for concept in definition.get("concepts") or []:
+            if not isinstance(concept, dict) or concept.get("deprecated"):
+                continue
+            aliases = concept.get("aliases") or []
+            parts = (concept.get("name"), *aliases, concept.get("description"))
+            candidate_text = " ".join(str(part) for part in parts if part)
+            bm25 = _bm25_score(query_tokens, candidate_text)
+            score = round(min(1.0, bm25 + _exact_phrase_bonus(question, candidate_text)), 4)
+            if score > 0:
+                key = str(concept.get("key"))
+                matches.append((version, ontology_key, key, str(concept.get("name") or key), score))
+    if not matches:
+        return []
+
+    wanted: dict[str, set[UUID]] = {}
+    for version, _, concept_key, _, _ in matches:
+        for subject_type, subject_id in _concept_mappings(version.definition, concept_key):
+            wanted.setdefault(subject_type, set()).add(subject_id)
+    in_datasource = (
+        MetadataTable.datasource_id == datasource.id,
+        MetadataTable.organization_id == datasource.organization_id,
+        MetadataTable.status == "ACTIVE",
+    )
+    table_kinds: dict[UUID, str] = {}
+    table_ids = wanted.get("TABLE", set()) | wanted.get("VIEW", set())
+    if table_ids:
+        table_rows = await session.execute(
+            select(MetadataTable.id, MetadataTable.object_type).where(
+                MetadataTable.id.in_(table_ids), *in_datasource
+            )
+        )
+        table_kinds = {
+            table_id: table_mapping_kind(object_type) for table_id, object_type in table_rows.all()
+        }
+    column_tables: dict[UUID, UUID] = {}
+    if wanted.get("COLUMN"):
+        column_rows = await session.execute(
+            select(MetadataColumn.id, MetadataColumn.table_id)
+            .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+            .where(
+                MetadataColumn.id.in_(wanted["COLUMN"]),
+                MetadataColumn.status == "ACTIVE",
+                *in_datasource,
+            )
+        )
+        column_tables = {column_id: table_id for column_id, table_id in column_rows.all()}
+    routine_ids: set[UUID] = set()
+    if wanted.get("ROUTINE"):
+        routine_ids = set(
+            (
+                await session.scalars(
+                    select(MetadataRoutine.id).where(
+                        MetadataRoutine.id.in_(wanted["ROUTINE"]),
+                        MetadataRoutine.datasource_id == datasource.id,
+                        MetadataRoutine.organization_id == datasource.organization_id,
+                        MetadataRoutine.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        )
+
+    concept_hits: list[HybridRetrievalHit] = []
+    for version, ontology_key, concept_key, concept_name, score in matches:
+        tables: set[str] = set()
+        columns: set[str] = set()
+        routines: set[str] = set()
+        for subject_type, subject_id in _concept_mappings(version.definition, concept_key):
+            if subject_type in ("TABLE", "VIEW"):
+                if table_kinds.get(subject_id) == subject_type:
+                    tables.add(str(subject_id))
+            elif subject_type == "COLUMN":
+                parent = column_tables.get(subject_id)
+                if parent is not None:
+                    columns.add(str(subject_id))
+                    tables.add(str(parent))
+            elif subject_type == "ROUTINE" and subject_id in routine_ids:
+                routines.add(str(subject_id))
+        if not tables and not routines:
+            continue
+        concept_hits.append(
+            HybridRetrievalHit(
+                object_type="ONTOLOGY_CONCEPT",
+                # A concept has no row of its own: its id is fixed by (approved version, key).
+                object_id=str(uuid5(version.id, concept_key)),
+                display_name=concept_name,
+                score=score,
+                reason_codes=["BM25_ONTOLOGY_CONCEPT", "ONTOLOGY_VERSION_APPROVED"],
+                metadata={
+                    "ontology_key": ontology_key,
+                    "ontology_version_id": str(version.id),
+                    "ontology_version": version.version,
+                    "concept_key": concept_key,
+                    "mapped_table_ids": sorted(tables),
+                    "mapped_column_ids": sorted(columns),
+                    "mapped_routine_ids": sorted(routines),
+                },
+            )
+        )
+    return concept_hits
+
+
 async def hybrid_retrieve(
     session: AsyncSession,
     *,
@@ -286,8 +492,13 @@ async def hybrid_retrieve(
     # (sequential awaits — fine for typical catalog sizes)
     # ------------------------------------------------------------------
 
-    # 1. Tables
+    # 1. Tables. R11-FP11: fetched by name *or* source description -- a table the source
+    # describes in the question's words was never fetched, so its description could not score.
     name_filters = [func.lower(MetadataTable.name).contains(t) for t in query_tokens[:10]]
+    description_filters = [
+        func.lower(func.coalesce(MetadataTable.source_description, "")).contains(t)
+        for t in query_tokens[:10]
+    ]
     table_rows = (
         await session.scalars(
             select(MetadataTable)
@@ -295,7 +506,7 @@ async def hybrid_retrieve(
                 MetadataTable.datasource_id == datasource.id,
                 MetadataTable.organization_id == datasource.organization_id,
                 MetadataTable.status == "ACTIVE",
-                or_(*name_filters) if name_filters else true(),
+                or_(*name_filters, *description_filters) if name_filters else true(),
             )
             .limit(scan_limit)
         )
@@ -312,16 +523,78 @@ async def hybrid_retrieve(
             hit_id = f"TABLE:{table.id}"
             if hit_id not in seen_ids:
                 seen_ids.add(hit_id)
+                matched_name = any(token in table.name.lower() for token in query_tokens)
                 hits.append(
                     HybridRetrievalHit(
                         object_type="TABLE",
                         object_id=str(table.id),
                         display_name=table.name,
                         score=score,
-                        reason_codes=["BM25_TABLE_NAME"],
+                        reason_codes=[
+                            "BM25_TABLE_NAME" if matched_name else "BM25_TABLE_DESCRIPTION"
+                        ],
                         metadata={"table_id": str(table.id)},
                     )
                 )
+
+    # 1b. Views whose *definition* names what was asked (R11-FP11). A view called `v_rev_ltd`
+    # selecting `net_revenue` from `orders` answers "revenue by customer" and matched nothing
+    # before. Scored on the stored value-free text only, and only where screening lets that text
+    # be read at all; the hit carries a digest of it, never the text. A definition match is
+    # weaker evidence than a name match -- it names what the view is built from, not what it is --
+    # so it scores at `_DEFINITION_MATCH_WEIGHT` and never displaces a name match already found.
+    definition_filters = [
+        func.lower(MetadataViewDefinition.definition_sql_redacted).contains(t)
+        for t in query_tokens[:10]
+    ]
+    definition_rows = (
+        (
+            await session.execute(
+                select(MetadataViewDefinition, MetadataTable)
+                .join(MetadataTable, MetadataTable.id == MetadataViewDefinition.table_id)
+                .where(
+                    MetadataViewDefinition.organization_id == datasource.organization_id,
+                    MetadataViewDefinition.datasource_id == datasource.id,
+                    MetadataViewDefinition.status == "ACTIVE",
+                    MetadataViewDefinition.availability == AVAILABLE,
+                    MetadataViewDefinition.redaction_status.in_(
+                        sorted(VALUE_FREE_REDACTION_STATUSES)
+                    ),
+                    MetadataTable.status == "ACTIVE",
+                    or_(*definition_filters),
+                )
+                .limit(scan_limit)
+            )
+        ).all()
+        if definition_filters
+        else []
+    )
+
+    for definition, table in definition_rows:
+        stored = definition.definition_sql_redacted
+        if not stored or not is_eligible_for_model_context(definition.screening_status):
+            continue
+        hit_id = f"TABLE:{table.id}"
+        if hit_id in seen_ids:
+            continue
+        score = round(min(1.0, _bm25_score(query_tokens, stored) * _DEFINITION_MATCH_WEIGHT), 4)
+        if score <= 0:
+            continue
+        seen_ids.add(hit_id)
+        hits.append(
+            HybridRetrievalHit(
+                object_type="TABLE",
+                object_id=str(table.id),
+                display_name=table.name,
+                score=score,
+                reason_codes=["BM25_VIEW_DEFINITION"],
+                metadata={
+                    "table_id": str(table.id),
+                    "object_type": table.object_type,
+                    "definition_digest": hashlib.sha256(stored.encode("utf-8")).hexdigest(),
+                },
+            )
+        )
 
     # 2. Columns
     col_filters = [func.lower(MetadataColumn.name).contains(t) for t in query_tokens[:10]]
@@ -617,6 +890,16 @@ async def hybrid_retrieve(
                             "metric_id": str(metric.id),
                             "metric_slug": metric.slug,
                             "bound_term_ids": bound_term_ids,
+                            # The version a context product pins is the semantic *model*
+                            # version, and `ContextProductScope.admits` decides a metric on
+                            # exactly this key. Without it every metric hit read as `None`,
+                            # which is in no pinned set -- so a product that pinned a model
+                            # refused every metric, including the ones in the model it
+                            # pinned. Found 2026-09-19; the old test passed only because it
+                            # built this metadata by hand instead of retrieving it.
+                            "semantic_model_version_id": str(
+                                metric_version.semantic_model_version_id
+                            ),
                             # _model_context (agent_orchestrator.py) reads table_id or
                             # source_table_id off every hit to decide which tables to hydrate
                             # into the model's SQL-generation context; without this a metric
@@ -677,11 +960,383 @@ async def hybrid_retrieve(
                         reason_codes=["BM25_GLOSSARY_TERM", "SEMANTIC_OBJECT_BOUND"],
                         metadata={
                             "term_id": str(term.id),
+                            # A context product pins glossary *versions*, and
+                            # `ContextProductScope.admits` decides a term on this key.
+                            # Missing, every term hit read as `None` and a product that
+                            # pinned terms refused all of them -- see the semantic-model
+                            # note on the metric hit above, same defect, same date.
+                            "term_version_id": str(term_version.id),
                             "term_key": term.term_key,
                             "bound_semantic_object_ids": [str(m.id) for m in bound_metrics],
                         },
                     )
                 )
+
+    # 8. Stored procedures and functions (R11-FP11). A routine is found by the
+    # words in its name, its parameter names, the source's own description and
+    # -- R11-FP08 -- its approved Atlas-authored description -- never by its
+    # body, which is evidence to read on request (MCP
+    # `get_transformation_detail`), not text to rank. What it stands on comes only
+    # from ACTIVE procedure-lineage edges: an agent's PROPOSED edge nobody has
+    # decided does not steer an answer. No boost -- a routine is context for a
+    # question, never a governed tool, and must not outrank one.
+    #
+    # R11-FP08: the approved description also *widens the fetch*, for the reason the
+    # table candidate's own `description_filters` were added above -- a routine
+    # described in the question's words but named nothing like them was never fetched,
+    # so its description could not score however well it was written. Only the
+    # published, APPROVED version counts, the discipline the ontology candidate carries:
+    # a DRAFT or PENDING_APPROVAL draft is a proposal nobody has decided, a SUPERSEDED
+    # version is text the platform has replaced, and a WITHDRAWN one is text a reviewer
+    # retired -- none of the three is what Atlas asserts, so none of them ranks.
+    routine_filters = [func.lower(MetadataRoutine.name).contains(t) for t in query_tokens[:10]]
+    routine_scope: Any = true()
+    if routine_filters:
+        approved_description_match = (
+            select(RoutineDocumentationVersion.id)
+            .join(
+                RoutineDocumentation,
+                RoutineDocumentation.id == RoutineDocumentationVersion.documentation_id,
+            )
+            .where(
+                RoutineDocumentation.routine_id == MetadataRoutine.id,
+                RoutineDocumentation.organization_id == datasource.organization_id,
+                RoutineDocumentation.datasource_id == datasource.id,
+                RoutineDocumentationVersion.organization_id == datasource.organization_id,
+                RoutineDocumentationVersion.status == "APPROVED",
+                or_(
+                    *(
+                        func.lower(RoutineDocumentationVersion.description).contains(t)
+                        for t in query_tokens[:10]
+                    )
+                ),
+            )
+            .exists()
+        )
+        routine_scope = or_(*routine_filters, approved_description_match)
+    routine_rows = (
+        await session.execute(
+            select(MetadataRoutine, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+            .where(
+                MetadataRoutine.datasource_id == datasource.id,
+                MetadataRoutine.organization_id == datasource.organization_id,
+                MetadataRoutine.status == "ACTIVE",
+                routine_scope,
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+    routine_ids = [routine.id for routine, _schema_name in routine_rows]
+    parameter_names: dict[UUID, list[str]] = {}
+    reads_by_routine: dict[UUID, set[str]] = {}
+    writes_by_routine: dict[UUID, set[str]] = {}
+    triggers_by_routine: dict[UUID, set[str]] = {}
+    approved_descriptions: dict[UUID, RoutineDocumentationVersion] = {}
+    if routine_ids:
+        # R11-FP08: the approved description of every routine that was fetched -- the
+        # one widened into the candidate set above *and* the one found by its name,
+        # whose description still has to score. `current_routine_descriptions`' shape
+        # (ascending version, last write per routine wins) rather than a second rule.
+        approved_rows = await session.execute(
+            select(RoutineDocumentationVersion, RoutineDocumentation.routine_id)
+            .join(
+                RoutineDocumentation,
+                RoutineDocumentation.id == RoutineDocumentationVersion.documentation_id,
+            )
+            .where(
+                RoutineDocumentation.routine_id.in_(routine_ids),
+                RoutineDocumentation.organization_id == datasource.organization_id,
+                RoutineDocumentation.datasource_id == datasource.id,
+                RoutineDocumentationVersion.organization_id == datasource.organization_id,
+                RoutineDocumentationVersion.status == "APPROVED",
+            )
+            .order_by(RoutineDocumentationVersion.version)
+        )
+        approved_descriptions = {
+            routine_id: version for version, routine_id in approved_rows.all()
+        }
+        parameter_rows = await session.execute(
+            select(MetadataRoutineParameter.routine_id, MetadataRoutineParameter.name).where(
+                MetadataRoutineParameter.routine_id.in_(routine_ids),
+                MetadataRoutineParameter.status == "ACTIVE",
+                MetadataRoutineParameter.name.is_not(None),
+            )
+        )
+        for routine_id, parameter_name in parameter_rows.all():
+            parameter_names.setdefault(routine_id, []).append(parameter_name)
+        edge_rows = await session.execute(
+            select(
+                DeepProcedureLineageEdge.routine_id,
+                DeepProcedureLineageEdge.source_table_id,
+                DeepProcedureLineageEdge.target_table_id,
+                DeepProcedureLineageEdge.is_write,
+            ).where(
+                DeepProcedureLineageEdge.routine_id.in_(routine_ids),
+                DeepProcedureLineageEdge.organization_id == datasource.organization_id,
+                DeepProcedureLineageEdge.review_status == "ACTIVE",
+                DeepProcedureLineageEdge.is_intermediate.is_(False),
+            )
+        )
+        for routine_id, source_table_id, target_table_id, is_write in edge_rows.all():
+            if source_table_id is not None:
+                reads_by_routine.setdefault(routine_id, set()).add(str(source_table_id))
+            if target_table_id is not None and is_write:
+                writes_by_routine.setdefault(routine_id, set()).add(str(target_table_id))
+        # R11-FP01: a PostgreSQL trigger keeps no body -- its code is the function its
+        # `action_routine` names, and the trigger axis reads that function with the
+        # firing row bound, recording `routine_id` on each edge. So a trigger function's
+        # reviewed trigger lineage *is* what that routine's body reads and writes, and
+        # it joins the same two lists and so the graph stage's existing
+        # ROUTINE_READS_TABLE / ROUTINE_WRITES_TABLE edges: "which function audits
+        # orders" reaches the audit table no word of it names. The routine's own
+        # parse cannot supply this -- inside a trigger function `NEW` names no table.
+        # Same rules as the routine edges above: ACTIVE only, a temp-table hop left
+        # out, and never the body. A trigger the source has dropped no longer runs
+        # the function, so only an ACTIVE trigger's edges steer.
+        trigger_edge_rows = await session.execute(
+            select(
+                TriggerLineageEdge.routine_id,
+                TriggerLineageEdge.trigger_id,
+                TriggerLineageEdge.source_table_id,
+                TriggerLineageEdge.target_table_id,
+                TriggerLineageEdge.is_write,
+            )
+            .join(MetadataTrigger, MetadataTrigger.id == TriggerLineageEdge.trigger_id)
+            .where(
+                TriggerLineageEdge.routine_id.in_(routine_ids),
+                TriggerLineageEdge.organization_id == datasource.organization_id,
+                TriggerLineageEdge.datasource_id == datasource.id,
+                TriggerLineageEdge.review_status == "ACTIVE",
+                TriggerLineageEdge.is_intermediate.is_(False),
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.status == "ACTIVE",
+            )
+        )
+        for (
+            trigger_routine_id,
+            trigger_id,
+            source_table_id,
+            target_table_id,
+            is_write,
+        ) in trigger_edge_rows.all():
+            if trigger_routine_id is None:
+                continue
+            triggers_by_routine.setdefault(trigger_routine_id, set()).add(str(trigger_id))
+            if source_table_id is not None:
+                reads_by_routine.setdefault(trigger_routine_id, set()).add(str(source_table_id))
+            if target_table_id is not None and is_write:
+                writes_by_routine.setdefault(trigger_routine_id, set()).add(
+                    str(target_table_id)
+                )
+
+    for routine, schema_name in routine_rows:
+        # The source's own words stay in the bag beside Atlas's: retrieval is about
+        # *finding* the routine, and a source comment is still words the source uses,
+        # even where `context_compiler` refuses to publish it as the platform's
+        # description. What the approved version changes is the score and the reason
+        # code, not whether the source comment is read.
+        source_text = " ".join(
+            filter(
+                None,
+                [routine.name, routine.source_description, *parameter_names.get(routine.id, [])],
+            )
+        )
+        approved = approved_descriptions.get(routine.id)
+        candidate_text = (
+            f"{source_text} {approved.description}" if approved is not None else source_text
+        )
+        source_bm25 = _bm25_score(query_tokens, source_text)
+        description_bm25 = (
+            _bm25_score(query_tokens, approved.description) if approved is not None else 0.0
+        )
+        bm25 = source_bm25
+        if approved is not None:
+            # Keep `_APPROVED_DESCRIPTION_MATCH_WEIGHT` of the coverage the approved
+            # description adds on top of what the source text already matched.
+            added = (_bm25_score(query_tokens, candidate_text) - source_bm25) * (
+                _APPROVED_DESCRIPTION_MATCH_WEIGHT
+            )
+            bm25 = min(1.0, source_bm25 + added)
+        exact = _exact_phrase_bonus(question, candidate_text)
+        score = round(min(1.0, bm25 + exact), 4)
+        if score <= 0:
+            continue
+        hit_id = f"ROUTINE:{routine.id}"
+        if hit_id in seen_ids:
+            continue
+        seen_ids.add(hit_id)
+        # A name match and a meaning match are different evidence, and the grounding
+        # receipt hashes what matched -- so an approved-description match says so in its
+        # own code rather than arriving disguised as a name match. A routine reached
+        # *only* through its description carries no `BM25_ROUTINE_NAME`: that code is
+        # the existing claim about the routine's own identifiers (its name, its
+        # parameters, the source's comment) and would be false here.
+        routine_reason_codes: list[str] = []
+        if source_bm25 > 0:
+            routine_reason_codes.append("BM25_ROUTINE_NAME")
+        description_metadata: dict[str, Any] = {}
+        if approved is not None:
+            description_metadata = {
+                # The digest, never the prose: a hit's metadata is evidence a receipt
+                # hashes, the discipline `definition_digest` already carries above.
+                "description_digest": hashlib.sha256(
+                    approved.description.encode("utf-8")
+                ).hexdigest(),
+                "description_version_id": str(approved.id),
+                "description_version": approved.version,
+            }
+            if description_bm25 > 0:
+                routine_reason_codes.extend(
+                    ["BM25_ROUTINE_DESCRIPTION", "ROUTINE_DESCRIPTION_APPROVED"]
+                )
+        # R11-FP01: which triggers' reviewed lineage the two lists above include --
+        # identifiers only, and only when there are some, so a routine no trigger
+        # runs carries exactly the metadata it always did.
+        trigger_metadata: dict[str, Any] = (
+            {"trigger_ids": sorted(triggers_by_routine[routine.id])}
+            if routine.id in triggers_by_routine
+            else {}
+        )
+        hits.append(
+            HybridRetrievalHit(
+                object_type="ROUTINE",
+                object_id=str(routine.id),
+                display_name=f"{schema_name}.{routine.name}",
+                score=score,
+                reason_codes=routine_reason_codes,
+                metadata={
+                    "routine_id": str(routine.id),
+                    "datasource_id": str(datasource.id),
+                    "routine_type": routine.routine_type,
+                    "signature": routine.signature,
+                    "language": routine.language,
+                    "reads_table_ids": sorted(reads_by_routine.get(routine.id, set())),
+                    "writes_table_ids": sorted(writes_by_routine.get(routine.id, set())),
+                    **trigger_metadata,
+                    **description_metadata,
+                    # Whether MCP `get_transformation_detail` would release the body:
+                    # the same gate a person's parse applies.
+                    "body_available": (
+                        routine.availability == AVAILABLE
+                        and routine.redaction_status in VALUE_FREE_REDACTION_STATUSES
+                        and is_eligible_for_model_context(routine.screening_status)
+                    ),
+                },
+            )
+        )
+
+    # 8b. SQL Server and Oracle triggers, R11-FP01. A PostgreSQL trigger keeps no body of
+    # its own -- `action_routine` names the function that carries it, and that function is
+    # already a ROUTINE candidate above (`triggers_by_routine`), the trigger's reviewed
+    # lineage folded into its reads/writes. An engine that gives the trigger its own body
+    # names no routine here, so nothing above ever reaches it: it was not a retrieval
+    # candidate at all until this. Found the same way a routine is -- by name, never by
+    # body -- and admitted through a context product on the one reference group a trigger
+    # actually has: it fires on exactly one table, so `ContextProductScope._owning_table`
+    # decides it (`agent_orchestrator.py`), the same rule COLUMN/BUSINESS_ANNOTATION/
+    # DBT_RESOURCE already use, with no new reference-group field and no migration. A
+    # trigger whose firing table this datasource's catalog does not hold (out of the
+    # discovery selection, or not yet scanned) is stamped `table_id: None`: an unresolved
+    # reference, refused by a product the same way an unmatched dbt resource is, not
+    # admitted by a fallthrough.
+    own_body_trigger_filters = [
+        func.lower(MetadataTrigger.name).contains(t) for t in query_tokens[:10]
+    ]
+    trigger_table_filters = [
+        func.lower(MetadataTrigger.table_name).contains(t) for t in query_tokens[:10]
+    ]
+    trigger_scope: Any = true()
+    if own_body_trigger_filters or trigger_table_filters:
+        trigger_scope = or_(*own_body_trigger_filters, *trigger_table_filters)
+    trigger_rows = (
+        await session.execute(
+            select(MetadataTrigger, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTrigger.schema_id)
+            .where(
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.status == "ACTIVE",
+                or_(MetadataTrigger.action_routine.is_(None), MetadataTrigger.action_routine == ""),
+                trigger_scope,
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+    if trigger_rows:
+        # One bulk lookup for every firing table these candidates might need, folded to
+        # lower case: PostgreSQL folds unquoted identifiers to lower case, Oracle and
+        # Snowflake to upper, so an exact-case match would miss legitimately-cased rows
+        # the same way `DiscoverySelection` matching already accounts for (R11-FP01,
+        # landed 2026-09-15).
+        firing_table_rows = await session.execute(
+            select(MetadataSchema.name, MetadataTable.name, MetadataTable.id)
+            .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+            .where(
+                MetadataTable.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                MetadataTable.status == "ACTIVE",
+            )
+        )
+        firing_table_ids = {
+            (schema_name.casefold(), table_name.casefold()): table_id
+            for schema_name, table_name, table_id in firing_table_rows.all()
+        }
+        for trigger, own_schema_name in trigger_rows:
+            candidate_text = f"{trigger.name} {trigger.table_name}"
+            bm25 = _bm25_score(query_tokens, candidate_text)
+            score = round(min(1.0, bm25 + _exact_phrase_bonus(question, candidate_text)), 4)
+            if score <= 0:
+                continue
+            hit_id = f"TRIGGER:{trigger.id}"
+            if hit_id in seen_ids:
+                continue
+            seen_ids.add(hit_id)
+            firing_schema_name = trigger.table_schema_name or own_schema_name
+            table_id = firing_table_ids.get(
+                (firing_schema_name.casefold(), trigger.table_name.casefold())
+            )
+            trigger_reason_codes = ["BM25_TRIGGER_NAME"] if bm25 > 0 else []
+            hits.append(
+                HybridRetrievalHit(
+                    object_type="TRIGGER",
+                    object_id=str(trigger.id),
+                    display_name=f"{own_schema_name}.{trigger.table_name}.{trigger.name}",
+                    score=score,
+                    reason_codes=trigger_reason_codes,
+                    metadata={
+                        "trigger_id": str(trigger.id),
+                        "datasource_id": str(datasource.id),
+                        # The one reference group `_owning_table` reads; `None` when the
+                        # firing table is not in this datasource's catalog, so the hit is
+                        # an unresolved reference rather than a guess.
+                        "table_id": str(table_id) if table_id is not None else None,
+                        "timing": trigger.timing,
+                        "events": trigger.events,
+                        # Whether MCP `get_transformation_detail` would release the body:
+                        # the same three-part gate a routine body uses.
+                        "body_available": (
+                            trigger.availability == AVAILABLE
+                            and trigger.redaction_status in VALUE_FREE_REDACTION_STATUSES
+                            and is_eligible_for_model_context(trigger.screening_status)
+                        ),
+                    },
+                )
+            )
+
+    # 9. Ontology concepts (R11-FP09) -- see `_ontology_concept_hits`.
+    for concept_hit in await _ontology_concept_hits(
+        session,
+        datasource=datasource,
+        question=question,
+        query_tokens=query_tokens,
+        scan_limit=scan_limit,
+    ):
+        hit_id = f"{concept_hit.object_type}:{concept_hit.object_id}"
+        if hit_id not in seen_ids:
+            seen_ids.add(hit_id)
+            hits.append(concept_hit)
 
     # ------------------------------------------------------------------
     # Sort by score desc, cap at retrieval_limit
@@ -713,13 +1368,6 @@ class RetrievalEvidence:
     graph_expansion_path: list[str]
     source_signals: list[str]
     metadata: dict[str, Any]
-
-
-# RT-6: the number of recorded executions against a table beyond which its
-# usage_popularity raw_score saturates at 1.0. 10 real executions is a small,
-# deliberately conservative bar -- enough to separate "never queried" from
-# "actually used" without requiring warehouse-scale traffic to move at all.
-_USAGE_POPULARITY_SATURATION = 10
 
 
 async def _table_execution_counts(

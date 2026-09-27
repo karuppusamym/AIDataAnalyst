@@ -57,7 +57,7 @@ from typing import Protocol
 
 import httpx
 
-from aida.secrets import SecretResolutionError, SecretResolver
+from aida.secrets import SecretResolutionError, SecretResolver, vault_data_field
 from atlas.platform.config import Settings
 
 
@@ -172,7 +172,7 @@ class VaultTransitSigningProvider:
 
     async def sign(self, data: str) -> str:
         body = await self._call(f"/v1/transit/hmac/{self._key_name}", {"input": _b64(data)})
-        signature = _response_field(body, "hmac")
+        signature = vault_data_field(body, "hmac")
         if not isinstance(signature, str) or not signature:
             raise SigningError("KMS signing response was malformed")
         return signature
@@ -182,7 +182,7 @@ class VaultTransitSigningProvider:
             f"/v1/transit/verify/{self._key_name}",
             {"input": _b64(data), "hmac": signature},
         )
-        valid = _response_field(body, "valid")
+        valid = vault_data_field(body, "valid")
         if not isinstance(valid, bool):
             raise SigningError("KMS verification response was malformed")
         return valid
@@ -215,14 +215,6 @@ def _b64(data: str) -> str:
     return base64.b64encode(data.encode("utf-8")).decode("ascii")
 
 
-def _response_field(body: dict[str, object], field: str) -> object:
-    """`body["data"][field]`, tolerating a malformed shape rather than raising
-    a `KeyError`/`TypeError` the caller would have to distinguish from a
-    genuinely bad value -- both collapse to the same `SigningError`."""
-    data = body.get("data")
-    if not isinstance(data, dict):
-        return None
-    return data.get(field)
 
 
 def resolve_signing_provider(
@@ -254,3 +246,26 @@ def resolve_signing_provider(
             timeout_seconds=settings.hmac_signing_timeout_seconds,
         )
     raise SigningUnavailable(f"HMAC_SIGNING_PROVIDER_UNSUPPORTED:{provider}")
+
+
+async def sign_value(settings: Settings, data: str) -> str:
+    """Keyed digest of `data` under the deployment's configured signer.
+
+    The non-SQL digests in this codebase -- an agent run's question, a tool
+    execution's normalized parameters, a query-memory comment -- are keyed for
+    the same reason `audit_sql_hash` is, and for one more: they stand in for
+    text the control plane deliberately does not store. An unkeyed hash of a
+    short, guessable question (or of an account id passed as a tool parameter)
+    is reversible by dictionary attack, so the digest is only as private as
+    the key is unreachable.
+
+    Before this, those call sites read `Settings.audit_hmac_key` and called
+    `hmac.new` directly, which put the key in process memory in exactly the
+    deployment that configures a KMS signer to keep it out -- the failure mode
+    this module's docstring rules out for signatures, reached through the back
+    door by digests. Routing them here fixes that. Under the `local` provider
+    the result is byte-identical to the previous computation, so existing
+    development rows stay comparable.
+    """
+    provider = resolve_signing_provider(settings)
+    return await provider.sign(data)
