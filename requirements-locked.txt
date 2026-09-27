@@ -216,7 +216,7 @@ s3transfer==0.19.2
     # via boto3
 six==1.17.0
     # via python-dateutil
-snowflake-connector-python==4.7.1
+snowflake-connector-python==4.7.5
     # via bank-data-intelligence-platform
 sortedcontainers==2.4.0
     # via snowflake-connector-python
